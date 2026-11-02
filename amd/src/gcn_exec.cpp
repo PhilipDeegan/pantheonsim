@@ -8904,7 +8904,7 @@ struct Machine {
       uint64_t raw = 0;
       std::memcpy(&raw, scratch_at(g, w, lane, offset, nbytes), nbytes);
       const uint64_t at = m0 + static_cast<uint64_t>(in.offset) + uint64_t{lane} * 4;
-      if (at + 4 > g.lds.size())
+      if (at > g.lds.size() || 4 > g.lds.size() - at)
         throw Error::make(Err::InvalidValue, in.name, " writes LDS at ", at, ", past the ", g.lds.size(),
                           " bytes the work-group has");
       const uint32_t v = narrow_load ? widen(raw, part) : static_cast<uint32_t>(raw);
@@ -9830,7 +9830,8 @@ struct Machine {
                                           : lane_src64(w, in.src[0], lane)) +
                             static_cast<uint64_t>(static_cast<int64_t>(in.offset));
       const uint64_t at = m0 + static_cast<uint64_t>(static_cast<int64_t>(in.offset)) + uint64_t{lane} * bytes;
-      if (at + bytes > g.lds.size())
+      // (`at` can wrap: M0 0, offset -16 and lane 0 give 2^64-16, and at + bytes is then 0; compare without adding.)
+      if (at > g.lds.size() || bytes > g.lds.size() - at)
         throw Error::make(Err::InvalidValue, op, " writes LDS at ", at, ", past the ", g.lds.size(),
                           " bytes the work-group has");
       uint32_t v[4];
