@@ -10192,6 +10192,14 @@ struct Machine {
     return true;
   }
 
+  // A load of four words a lane (global_load_dwordx4) for the active lanes from `from` on, made together where the lanes' addresses are not
+  // a run: lane by lane (Machine::load_words) makes a lane's four words one 16-byte access on a 16-byte boundary, two aligned pairs on the
+  // other 8-byte boundary, and a word, an aligned pair and a word on a 4-byte one. Here the quad is two 8-byte loads, which hand back the
+  // same words: only a thread that writes the quad at the same moment could tell, so the batch is made on one host thread only (not
+  // conc()). Two batches (8-byte and 4-byte loads), as load_wave makes them. False, having changed no register, where the memory manager
+  // declines or an address is not on a word.
+  [[gnu::noinline]] bool wave_load4(Wave& w, uint32_t from, const uint64_t* lane_addr, const Operand& dst);
+
   // The active lanes from `from` on, each moving one scalar (a byte, a short, a word or a pair; `lane_addr[lane]` its address),
   // made together by the memory manager (MemoryManager::load_batch / store_batch): what lane by lane would do, one lookup for
   // the allocation instead of one a lane. A load puts each lane's value in `data` (`words` registers, or the one a byte or a short is
@@ -12741,6 +12749,54 @@ struct Machine {
   // (Last, so that no other member moves: where the machine's hot members sit in memory moves the interpreter's speed.)
   std::atomic<uint32_t>* prev_rows_sink_ = nullptr;   // the decode-cache sink this thread had before this machine
 };
+
+// (Out of the class: its place in the unit's layout is the end of the machine's, not the middle of its memory path.)
+bool Machine::wave_load4(Wave& w, uint32_t from, const uint64_t* lane_addr, const Operand& dst) {
+  if (conc()) return false;
+  uint64_t a8[2 * kLanes], v8[2 * kLanes], a4[2 * kLanes], v4[2 * kLanes], at[kLanes];
+  uint32_t lanes[kLanes];
+  uint32_t n = 0, n8 = 0, n4 = 0;
+  uint64_t bits = 0;
+  for (uint64_t m = w.exec >> from << from; m; m &= m - 1) {
+    const uint32_t lane = static_cast<uint32_t>(__builtin_ctzll(m));
+    const uint64_t a = lane_addr[lane];
+    bits |= a;
+    at[n] = a, lanes[n++] = lane;
+    if (!(a & 7)) {
+      a8[n8++] = a, a8[n8++] = a + 8;
+    } else {
+      a8[n8++] = a + 4, a4[n4++] = a, a4[n4++] = a + 12;
+    }
+  }
+  if (!n) return true;
+  if (bits & 3) return false;
+  for (uint32_t c = 0; c < n8; c += kLanes)
+    if (!mem.load_batch(a8 + c, std::min<uint32_t>(kLanes, n8 - c), 8, v8 + c)) return false;
+  for (uint32_t c = 0; c < n4; c += kLanes)
+    if (!mem.load_batch(a4 + c, std::min<uint32_t>(kLanes, n4 - c), 4, v4 + c)) return false;
+  uint32_t* const r0 = row_of(w, dst, 0);
+  uint32_t* const r1 = row_of(w, dst, 1);
+  uint32_t* const r2 = row_of(w, dst, 2);
+  uint32_t* const r3 = row_of(w, dst, 3);
+  uint32_t prev[4] = {};
+  uint32_t i8 = 0, i4 = 0;
+  for (uint32_t i = 0; i < n; ++i) {
+    uint32_t got[4];
+    if (!(at[i] & 7)) {
+      const uint64_t lo = v8[i8++], hi = v8[i8++];
+      got[0] = static_cast<uint32_t>(lo), got[1] = static_cast<uint32_t>(lo >> 32), got[2] = static_cast<uint32_t>(hi), got[3] = static_cast<uint32_t>(hi >> 32);
+    } else {
+      const uint64_t mid = v8[i8++];
+      got[0] = static_cast<uint32_t>(v4[i4++]), got[1] = static_cast<uint32_t>(mid), got[2] = static_cast<uint32_t>(mid >> 32);
+      got[3] = static_cast<uint32_t>(v4[i4++]);
+    }
+    // (Lanes of a load that follow a lane with the same address take the value that lane got, as the memo does one at a time.)
+    if (i && at[i] == at[i - 1]) std::memcpy(got, prev, sizeof got);
+    r0[lanes[i]] = got[0], r1[lanes[i]] = got[1], r2[lanes[i]] = got[2], r3[lanes[i]] = got[3];
+    std::memcpy(prev, got, sizeof got);
+  }
+  return true;
+}
 
 }  // namespace
 

@@ -6419,7 +6419,7 @@ bench.py canaries (13 workloads x SASS and PTX, 15 alternating runs, cpu 10, cou
 | rodinia gaussian | 0.880 | 0.898 | <0.001 |
 The gains add: the gather-bound rows keep part 1's gain (ATAX 0.797 alone), the short-kernel rows keep part 2's (gaussian 0.917 alone, hotspot 0.967 alone). Part 2 moves six bench.py canary rows more than 2% the wrong way (`wmma` PTX 0.978, `shared` PTX 0.975, `atomics` SASS 0.981, `atomics` PTX 0.975, `api` SASS 0.971, `api` PTX 0.973; 25 runs beside an A/A of 1.000-1.003) on workloads whose executed code it does not touch; read as code placement in the single LTO unit, not fixed (see the layout notes of rounds sp4 to sp10).
 
-## Round sp18: the SASS global-memory path (branch `sp18-sass`, base `sp17-speed` dd3adb43)
+## Round sp18 (SASS): the global-memory path (branch `sp18-sass`, base `sp17-speed` dd3adb43)
 
 The question: what does the SASS tier spend its instructions on in the gather-bound real programs, and in the issue loop? Measured first, on server3 (Zen 4), with `perf record -e instructions:u -c 1000000` on one thread (`VGPU_THREADS=1`, SASS, `nvidia/rtx3060`), PolyBench/GPU and Rodinia from the Round sp8 corpus, and the canary workloads with `-c 2000000`.
 
@@ -6479,6 +6479,44 @@ Step by step (single runs, instructions B/A on ATAX / GEMM / SYR2K): the new `wa
 * Calls inside the library go through the PLT (`batch_faults_clear`, `find_ordinary_miss`, `host_map_free_span`'s callees): `-Wl,-Bsymbolic-functions` would remove it but changes which copy of a function the shim libraries that each carry the core bind to; not looked at beyond the flag above.
 * `load_batch` (13 to 26% of the gather rows) is 14 instructions a lane and bound by the L1 misses; `load_broadcast` is still about 110 instructions a call (the fault checks, the lookup, the chunk test, the fill).
 * `POPC` calls libgcc's `__popcountdi2` per lane (3% of `int_alu`): the AVX2 unit is compiled with `target("avx2")` and no `popcnt`.
+
+## Round sp18 (AMD): NaN lanes and gathered quad loads (branch `sp18-amd`, base `sp17-speed` dd3adb43)
+
+Two of the three items Round sp17 left (`run_groups` was looked at again and left alone: about 45 instructions of bookkeeping around each handler call, spread over four read-modify-write counters, the state checks of `tier_step` and the `Inst::next` chain, nothing small and bit-safe; the `divergent` row says what an edit near it costs in layout). Measured with a sampling profiler (an `LD_PRELOAD` `SIGPROF` sampler resolved against `nm`; `perf` is not allowed on server2) on the 19 PolyBench/GPU programs hipified and built for gfx942 (`hipcc -O2`, dimensions capped at 512 / 160 / 1536, one thread, `amd/mi300x`).
+
+### What changed
+1. `fix_nan32` (`amd/src/gcn_tier.cpp`; 13.5 % of GRAMSCHM, 9.4 % of LU): a lane whose result is a NaN was recomputed by the interpreter's rule, a switch on the rule per lane and a `std::fma` call even where an operand is a NaN, which already says the answer (the first NaN operand in the rule's order, quieted). Now one template per rule, a row pass (32 or 64 lanes, a constant, so GCC makes vectors of it) that does the lanes with a NaN operand without computing anything, and the old per-lane rule only for a lane whose NaN the operation itself made (`inf - inf`, `0 * inf`), and only if there is one.
+2. `Machine::wave_load4` (`amd/src/gcn_exec.cpp`, defined after the class so no member of the machine moves; hooked in `tier_global`): `global_load_dwordx4` / `flat_load_dwordx4` whose lanes make no run (a gather of float4s, or quads on a 4-byte boundary) went lane by lane through `load_words` and `load_quad`. Now two batches, as `load_wave` and `wave_load3` do: a lane on an 8-byte boundary is two 8-byte loads (what a quad on a 16-byte boundary and the two pairs of a 8-byte one give), any other lane an 8-byte load in the middle and a word at each end. The quad's 16-byte access becomes two 8-byte ones, which only a thread writing the quad at that moment could tell, so the batch is made only when `conc()` is false. Stores of the same shapes are unchanged (they must keep lane order across mixed sizes).
+
+### Results (counters identical; Zen 5, server2, cpu 13, `VGPU_THREADS=1`, user-time median of 9 runs, A = `sp17-speed`, W = this branch, A2 = a copy of A in the same window; load 4 to 5)
+| program | W/A | A2/A | | program | W/A | A2/A |
+|---|---:|---:|---|---|---:|---:|
+| GRAMSCHM | **0.858** | 0.997 | | GEMM | 0.997 | 0.994 |
+| LU | **0.913** | 0.990 | | 3MM | 0.975 | 1.000 |
+| X4 (float4 gathers, below) | **0.410** | 1.023 | | 2MM | 0.981 | 0.995 |
+| SYR2K | 0.995 | 1.003 | | SYRK | 0.997 | 1.000 |
+| CORR | 0.994 | 0.994 | | COVAR | 0.989 | 1.004 |
+| FDTD-2D | 0.994 | 0.986 | | JACOBI2D | 1.001 | 1.001 |
+| 2DCONV | 1.027 | 0.994 | | 3DCONV | 0.989 | 0.994 |
+| ATAX | 0.982 | 0.984 | | BICG | 0.955 | 0.988 |
+| GEMVER | 0.978 | 0.998 | | GESUMMV | 1.025 | 0.961 |
+| MVT | 1.017 | 1.011 | | | | |
+The programs under 0.1 s (2DCONV, ATAX, BICG, GEMVER, GESUMMV, MVT) time start-up and swing as far between copies of A as W does; none of them is claimed. `X4` is a kernel of 16 K threads that load a `float4` from 64 random 16-byte slots each (variant 0) and from random 4-byte-aligned addresses (variant 1): the sim's output hash is the same on A and W for gfx942 and gfx1030, and equals the real RX 6800's (`amd/rx6800` and the card: `d5a8901c3ed4a983` / `8813586ecd033783`).
+
+`bench-amd` canary (mi300x, 44 rows, one thread, 15 runs, cpu 13): counters identical in all 44 rows (and `--check-counters`: 66 workload/target pairs match). W/A, with the A/A of a copy in brackets: `mfma` 1.016 (1.004), `smfmac` 1.012 (1.001), `divergent` 1.018 (1.021), `mem` 0.999 (1.000), `flat` 1.048 (0.989), `smem` 1.030 (0.947), `narrow` 1.019 (1.008), `mfma_fp8` 1.044 (1.000), `p_i64` 1.037 (1.004), `valu_int` 0.988 (0.984), `atomics` 0.989 (0.993); no row below 0.98. The -3 % of `mfma` / `smfmac` and the -2 to -4 % of `divergent` that Round sp17 measured against the round before are not in these numbers against `sp17-speed`, and rows that swing between two copies of the same library (`smem`, `p_sbuf` 1.070, `p_smem_wide` 1.044, `launch`) are not claimed either way. Not recovered by design: that loss is the placement of `gcn_exec.cpp`, which a change anywhere in that unit re-rolls.
+
+### The layout lottery, again
+The first version of `wave_load4` was a member defined in the middle of the memory path: CORR 1.04 to 1.06, COVAR 1.03 at equal counters (other rows 2 to 3 % faster). Defining it after the class (the `noinline` stays on the declaration) took CORR and COVAR back to 0.998 / 0.984 and moved the rest within the A/A. The `fix_nan32` change is in `gcn_tier.cpp`, a unit outside link-time optimization, and moved no other row (checked alone: CORR 0.994, GEMM 1.000). `lint_hot_unit_layout` passes.
+
+### Tests (CMake-wired, existing) and mutations
+No new test file: the existing same-bits tests already drive both paths, so the evidence is the mutants they kill (each mutant built and run alone against the whole unit).
+* `test_amd_gcn_tier_same_bits` (flavour 2: floats with the specials and NaNs, every `v_*_f32` shape of the five corpora, tier on against tier off). Killed: the add, mul, subrev and fma operand order flipped, the packed fma order flipped, the NaN not quieted, the second operand taken after the third, only the first operand looked at, a 32-lane pass over a 64-lane wave. Survived, equivalent: the third operand ignored (the lane then takes the scalar rule, which gives the same bits) and the scalar fallback never run (the vector result of `inf - inf` is the scalar rule's, the default NaN).
+* `test_amd_gcn_gather_same_bits` (flavours 21 to 24 hold `global_load_dwordx4` / `flat_load_dwordx4` lanes on every boundary, with lanes on one address and one lane off). Killed: the last word at +8, the pair halves swapped, the word and the last word swapped, a batch of 4-byte loads one short. Survived, equivalent: the high pair at +4 and the middle pair at +8 (the batch declines on the misaligned 8-byte load and the lanes go one at a time, correctly), the same-address rule dropped (loads, single thread), `conc()` not tested (the test runs one thread), the alignment test of the addresses dropped (the batch declines itself). Also: `test_amd_gcn_same_bits`, `test_amd_gcn_memory_same_bits`, `lint_hot_unit_layout` and `bench-amd --check-counters` pass.
+* The substring filter `VGPU_GATHER_ONLY=dwordx4` aborts with a double free on `sp17-speed` too (`load_dwordx4` and the other filters pass); not looked into.
+
+### Not done
+* `run_groups` (above), and a gfx1030/gfx942 real-card A/B of quad stores. `dwordx4` stores that are not runs still go lane by lane.
+* The AMD rows are measured on Zen 5 only; Zen 4 was not part of this round.
 
 ## Round sp17: the AMD memory path on real programs (branch `sp17-amd`, base `sp15-speed-pr` 4a5185a3)
 
