@@ -10201,6 +10201,14 @@ struct Machine {
   // declines or an address is not on a word.
   [[gnu::noinline]] bool wave_load4(Wave& w, uint32_t from, const uint64_t* lane_addr, const Operand& dst);
 
+  // A store of three or four words a lane (global_store_dwordx3 / dwordx4) for the active lanes from `from` on, made together where the
+  // lanes' addresses are not a run. Lane by lane (Machine::store_words) stores each lane's words one lane after the other; here the same
+  // words go as one batch of 4-byte stores in that order (lane 0's words, then lane 1's, ...), so a byte two lanes both write ends as the
+  // later lane's, whatever the sizes of the accesses were (only a thread that reads the quad at the same moment could tell a 16-byte
+  // access from four 4-byte ones: not made under conc()). False, having changed nothing, where the memory manager declines or an
+  // address is not on a word.
+  [[gnu::noinline]] bool wave_store_words(Wave& w, uint32_t from, const uint64_t* lane_addr, const Operand& src, uint32_t words);
+
   // The active lanes from `from` on, each moving one scalar (a byte, a short, a word or a pair; `lane_addr[lane]` its address),
   // made together by the memory manager (MemoryManager::load_batch / store_batch): what lane by lane would do, one lookup for
   // the allocation instead of one a lane. A load puts each lane's value in `data` (`words` registers, or the one a byte or a short is
@@ -12752,6 +12760,24 @@ struct Machine {
 };
 
 // (Out of the class: its place in the unit's layout is the end of the machine's, not the middle of its memory path.)
+bool Machine::wave_store_words(Wave& w, uint32_t from, const uint64_t* lane_addr, const Operand& src, uint32_t words) {
+  if (conc()) return false;
+  uint64_t a[4 * kLanes], v[4 * kLanes];
+  uint32_t n = 0;
+  uint64_t bits = 0;
+  const uint32_t* rows[4];
+  for (uint32_t k = 0; k < words; ++k) rows[k] = row_of(w, src, k);
+  for (uint64_t m = w.exec >> from << from; m; m &= m - 1) {
+    const uint32_t lane = static_cast<uint32_t>(__builtin_ctzll(m));
+    const uint64_t at = lane_addr[lane];
+    bits |= at;
+    for (uint32_t k = 0; k < words; ++k) a[n] = at + 4 * k, v[n++] = rows[k][lane];
+  }
+  if (!n) return true;
+  if (bits & 3) return false;
+  return mem.store_batch(a, n, 4, v);
+}
+
 bool Machine::wave_load4(Wave& w, uint32_t from, const uint64_t* lane_addr, const Operand& dst) {
   if (conc()) return false;
   uint64_t a8[2 * kLanes], v8[2 * kLanes], a4[2 * kLanes], v4[2 * kLanes], at[kLanes];
