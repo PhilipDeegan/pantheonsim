@@ -6419,6 +6419,67 @@ bench.py canaries (13 workloads x SASS and PTX, 15 alternating runs, cpu 10, cou
 | rodinia gaussian | 0.880 | 0.898 | <0.001 |
 The gains add: the gather-bound rows keep part 1's gain (ATAX 0.797 alone), the short-kernel rows keep part 2's (gaussian 0.917 alone, hotspot 0.967 alone). Part 2 moves six bench.py canary rows more than 2% the wrong way (`wmma` PTX 0.978, `shared` PTX 0.975, `atomics` SASS 0.981, `atomics` PTX 0.975, `api` SASS 0.971, `api` PTX 0.973; 25 runs beside an A/A of 1.000-1.003) on workloads whose executed code it does not touch; read as code placement in the single LTO unit, not fixed (see the layout notes of rounds sp4 to sp10).
 
+## Round sp18: the SASS global-memory path (branch `sp18-sass`, base `sp17-speed` dd3adb43)
+
+The question: what does the SASS tier spend its instructions on in the gather-bound real programs, and in the issue loop? Measured first, on server3 (Zen 4), with `perf record -e instructions:u -c 1000000` on one thread (`VGPU_THREADS=1`, SASS, `nvidia/rtx3060`), PolyBench/GPU and Rodinia from the Round sp8 corpus, and the canary workloads with `-c 2000000`.
+
+### What the profile said (base build, share of instructions retired)
+* ATAX: `warp_rows_k` 24%, `load_batch` 14%, `h_global<false>` 9%, `load_broadcast` 8%, `store_run` 6%, `load_run` 6%, **`find_ordinary_miss` 5%**, `count_global_progression` 5%, `step_warp` 3%. SYR2K: `load_batch` 26%, `warp_rows_k` 17%, `h_global<false>` 8%, `count_global_progression` 8%, `load_broadcast` 7%, `find_ordinary_miss` 2.5%.
+* `warp_rows_k` (the full warp's addresses, window and stride tests) was 166 instructions with six 32-byte spills to the stack (the chain of eight expected-address vectors the compiler hoisted).
+* `count_global_progression` was a function of its own: six pushes and pops around a dozen operations, and `memcount::fast()` read through the GOT (two loads of a guard and a flag) on every counted access.
+* `find_ordinary_miss`: a kernel that reads A, then x, then writes y asks the thread's lookup memory for three allocations in turn, and the lookup tries the way that answered *last* first, which is the allocation of the instruction before. So most accesses of such a kernel took the miss path (a call, a loop over the ways, the epoch tests). Each global instruction reads the same allocation every time.
+* The issue loop (`step_warp`, which holds `tier_run_t`): 9% of `int_alu`, 27% of `warp`, 36% of `divergent`, 45% of `shared` (barrier turns), 3 to 6% of the real programs, and **flat**: in a 100,000-instruction sample of `shared` no instruction of `step_warp` has more than 5.6% of the function's samples (the top one is the epilogue's `pop`s: a call per warp turn), the rest is a few percent each. The per-instruction `++st.instructions; st.thread_instructions += lanes; st.inst_by_class[cls] += lanes` and the `w.steps` update are memory read-modify-writes, but `w.steps` is read by S2R CLOCK in `exec.cpp` and the counters by the fallback handlers, so keeping them in registers needs a flush before every call out of the loop. Not attempted (see Not done).
+
+### What changed
+1. **A hint for the allocation lookup** (`MemoryManager::find_ordinary(addr, len, base, hint)`; `MOp::way`). Each global op keeps the way of the lookup memory its allocation was last found in and passes it (`&op.way`) to `load_batch`, `store_batch`, `load_broadcast`, `store_strided`, `load_run`, `store_run`; the lookup asks that way first instead of `mem.last`. The hint is only where to look first: any byte (masked to the ways), none, another thread's (read and written with relaxed atomics), stale after a free (the epoch test still decides). The thread's `last` and `prev` ways are not touched by a hit.
+2. **`warp_rows_k` without the spills**: each group of four addresses is compared with the one before it plus `4 * stride` (the first with `a0 + 0..3 * stride`, by starting `prev` one step back) instead of with a chain of expected addresses; the constant-window test takes the unsigned minimum (`vpminud`) of `(a - window)` over the groups and looks at the high halves once at the end instead of compare-and-or per group; the three shapes (`lo` and `hi` rows, `lo` only, neither) are three instantiations, not tests in the loop. About 165 to about 115 instructions, no spill.
+3. **`count_global_progression` inlined** into the handler, with `fast` the launch's own copy of `VGPU_FASTCOUNT` (`Runner::fastcount_`, sampled at launch).
+4. `lookups()` (the thread's lookup memory, found by the thread pointer in a table of slots): the first probe inline, the rest in a function of its own (it was a call and a loop set-up on every lookup). `load_broadcast` fills its 32 entries with a counted loop of fixed length (sixteen stores).
+
+### Results (counters and outputs identical in every run)
+Zen 4 (server3), one thread, `perf stat -e instructions:u,cycles:u`, alternating A B, medians, Mann-Whitney p on cycles; A = base build (dd3adb43), B = this branch, each built here and frozen. CPU 13 for the first table (its SMT sibling was used by another session during parts of the run: the A/A of that window drifted to 1.04 on ATAX, so the rows were repeated on CPU 4 with an idle sibling: ATAX 0.866, GEMM 0.916, BICG 0.926, MVT 0.901, the same as below).
+| program | runs | instructions B/A | cycles B/A | p |
+|---|---:|---:|---:|---:|
+| polybench ATAX | 9 | 0.819 | 0.864 | <0.001 |
+| polybench BICG | 9 | 0.850 | 0.930 | 0.019 |
+| polybench GESUMMV | 9 | 0.877 | 0.924 | 0.031 |
+| polybench MVT | 9 | 0.834 | 0.894 | 0.005 |
+| polybench GEMM | 9 | 0.833 | 0.913 | <0.001 |
+| polybench SYR2K | 5 | 0.887 | 0.914 | 0.009 |
+| polybench SYRK | 5 | 0.920 | 0.924 | 0.009 |
+| polybench 3MM | 5 | 0.844 | 0.919 | 0.009 |
+| polybench CORR | 5 | 0.956 | 0.937 | 0.60 |
+| polybench 2DCONV (no change expected) | 9 | 0.987 | 0.991 | 0.07 |
+| polybench JACOBI2D | 9 | 0.988 | 0.975 | <0.001 |
+| rodinia needle | 9 | 1.000 | 0.981 | 0.004 |
+| rodinia hotspot | 9 | 0.997 | 1.007 | 0.002 |
+| rodinia gaussian | 9 | 0.994 | 0.982 | <0.001 |
+| rodinia pathfinder | 9 | 0.999 | 0.988 | 0.97 |
+| rodinia backprop | 9 | 0.977 | 1.000 | 0.97 |
+| rodinia lud | 9 | 0.998 | 0.996 | 0.024 |
+| polybench GRAMSCHM (702 G cycles a run) | 3 | 0.861 | 0.969 | 0.05 |
+| polybench FDTD-2D (494 G cycles a run) | 3 | 0.972 | 0.977 | 0.13 |
+A/A (A against itself): ATAX 0.999, GEMM 0.999 (CPU 4, 9 runs); on CPU 13 (sibling busy) needle 1.000, hotspot 1.001, 2DCONV 1.004, GEMM 1.001, ATAX 1.041.
+
+`bench.py --ab` canary (13 workloads x SASS and PTX, 9 runs, CPU 4, load 8 to 11 from other sessions): counters `identical` in all 28 rows; the only row the script calls different is `mem` SASS 1.052x (p 0.024; its A/A is 1.007x); every other row is inside its own A/A spread (0.97 to 1.03): `divergent` SASS 1.019x (A/A 0.989x), `shared` SASS 1.016x, `local` 1.010x, `int_alu` 1.010x, `api` SASS 1.017x (A/A 0.987x), `launch` SASS 1.002x. The PTX rows (1.00 +- 0.02) run the same memory manager with no hint.
+
+Step by step (single runs, instructions B/A on ATAX / GEMM / SYR2K): the new `warp_rows_k` alone 0.978 / 0.978; plus the inlined counting, the inline first probe and the broadcast fill 0.939 / 0.948 / 0.942; plus the hint 0.819 / 0.833 / 0.887.
+
+### Tried and not kept
+* `-fno-semantic-interposition` on the hot units (the memory manager's functions are called through the PLT inside the library, and GCC will not inline an exported function): instructions -0.4% on top of the above, cycles +4.4% (ATAX), -1.4% (GEMM), +4.5% (SYR2K): a layout re-roll, not a gain. Dropped.
+
+### Tests (CMake-wired, no GPU) and mutations
+* `test_memfast`: `a_lookup_hint_is_only_a_place_to_look_first` (random, stale, out-of-range and no hints for `load_batch`, `load_broadcast` and `load_run` over twelve allocations (more than the eight ways) against the words stored; every 700 iterations an allocation is freed and the calls with every hint must decline its addresses, then a new one is made) and `more_threads_than_lookup_slots_all_read_the_right_words` (1,300 threads alive at once, over the 1,024 slots, each reading through the scalar, batch and broadcast paths).
+* `test_sass_mem_rows` (existing, holds the AVX2 kernel to the lane definitions over 3 kinds of rows x 34 positions of a lane in the window or off the stride x 8 adds x 12 bases x 16 strides) also with `VGPU_SIMD=base`; `test_warp_stride_access` (broadcast counts 1 to 32).
+* Mutants built and run on server3 (each killed unless noted): window minimum taken as a maximum; `prev` not advanced; `prev` not started a step back; step doubled; window test without the shift (and with the wrong shift); high half shifted by 31; broadcast fill one lane short; first probe inverted; hint hit skipping the epoch test; hint hit returning a wrong base. Survived, equivalent: the group difference written as a subtraction instead of an xor (same zero test); the probe loop returning the slot of the first probe instead of the probed one (another thread's lookup memory: the answers are the same and only a data race, which TSan, not run here, would flag); the hint not masked to the ways (reads past the entries: caught only by ASan, not run here).
+* Also run, all pass: `test_tier`, `test_sass_alu_runs`, `test_sass_atomics`, `test_sass_block_reuse`, `test_sass_dispatch`, `test_sass_generic_mem` (and with `VGPU_SIMD=base`), `test_gather_sp10`, `test_memhot_sp8`, `test_memcopy_direct`, `test_sass_access_count`, `test_memrmw`, `test_memalloc`, `test_sass_ldgsts`, `test_hostmap_cache`, `test_exec`, `test_exec2`, `test_fastpath`, `test_sched`, `test_sass_lockfree`, `lint_hot_unit_layout`. Sources compile with g++-12 (`-fsyntax-only`). Not run: the sanitizer builds and the AMD guards (CI).
+
+### Not done
+* The issue loop: its profile is flat and the per-instruction counters need a flush protocol around every call out of the loop (S2R CLOCK reads `w.steps`; the fallback handlers read the counters). Hoisting `tier_stats_` and `max_steps_` into locals was not tried: the loop has no spare register (its comment says so).
+* Calls inside the library go through the PLT (`batch_faults_clear`, `find_ordinary_miss`, `host_map_free_span`'s callees): `-Wl,-Bsymbolic-functions` would remove it but changes which copy of a function the shim libraries that each carry the core bind to; not looked at beyond the flag above.
+* `load_batch` (13 to 26% of the gather rows) is 14 instructions a lane and bound by the L1 misses; `load_broadcast` is still about 110 instructions a call (the fault checks, the lookup, the chunk test, the fill).
+* `POPC` calls libgcc's `__popcountdi2` per lane (3% of `int_alu`): the AVX2 unit is compiled with `target("avx2")` and no `popcnt`.
+
 ## Round sp17: the AMD memory path on real programs (branch `sp17-amd`, base `sp15-speed-pr` 4a5185a3)
 
 The question: the sp16 profile of the real programs put a quarter of the AMD cycles in the memory path (`wave_scalars`, `tier_global`, `memory_run`, `load_batch_in`, `batch_addresses_ok`; 78 % of SYR2K) and 12 % in the `run_groups` loop. Measured first, with `perf record -e cycles:u` on the 20 PolyBench/GPU programs hipified and built for gfx942 (`hipcc -O2`, one thread, `amd/mi300x`), then changed in the order the profile gave.
