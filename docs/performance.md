@@ -6725,3 +6725,54 @@ The SASS engine and programs with no module do not change (the `mem` row is 1%, 
 * Mutations, each rebuilt and run on server3, each fails a test: threshold back to 2 MiB (the first), threshold 0 (the second and `unsupported_ptx_error_names_profile`), no name tie-break (the third), eleven opcodes shown instead of ten (the fourth).
 
 Not run: the e2e suite (no nvcc on server3); the nightly lazy-modules workflow and the regular CI cover it, and ASan, UBSan and TSan (the change adds no shared state).
+
+## Round sp20 (zen5-check): `sp18-speed` against `sp17-speed` on Zen 5 (docs only, no code changed)
+
+The question: does the combined branch (`sp18-speed` db576493 = SASS global-memory path + sp18-amd + sp19-amd) lose anywhere against `sp17-speed` dd3adb43 on Zen 5? Host server2 (Ryzen 9 9950X), Release, GCC 13.3, `VGPU_THREADS=1`, every run pinned to cpu 13, load 4 to 7 (timed runs wait for load < 8), `nice -n 19`. A and W were built from `git archive` trees in separate directories, then the build directories were copied at the same moment to equal-length paths (`runA`, `runW`) with an A/A copy (`runB`, a third copy of A's bytes). Counters identical in every row of the SASS/PTX canary and the 44-row mi300x canary; outputs identical in every PolyBench and Rodinia program except `particlefilter_float` (DIFFER in A/A as well: the known nondeterministic program).
+
+### SASS and PTX canary (`bench.py --ab`, 13 workloads x 2 engines, 15 runs; W/A median ratio, > 1 means W is faster; A/A in brackets)
+| row | SASS | PTX |
+|---|---:|---:|
+| int_alu | 0.993 (1.001) | 0.997 (0.998) |
+| f32_fma | 1.010 (1.012) | 0.999 (1.001) |
+| f64_fma | 0.995 (0.990) | 1.002 (0.995) |
+| wmma | 1.000 (0.999) | 0.991 (1.002) |
+| mma_ptx | 0.997 (0.999) | **1.042** (1.005) |
+| mem | **1.043** (1.007) | 1.000 (0.992) |
+| shared | **1.035** (1.004) | 1.000 (0.957) |
+| atomics | 0.980 (1.013) | 0.995 (1.002) |
+| local | 1.003 (0.999) | 0.983 (0.996) |
+| divergent | 1.014 (0.997) | 0.996 (0.998) |
+| warp | 1.002 (1.011) | 1.002 (1.000) |
+| launch | 1.013 (0.999) | 0.997 (0.970) |
+| api | 1.007 (1.010) | 1.007 (1.004) |
+
+No row loses 3 %. The two rows under 0.985 (SASS `atomics` 0.980, PTX `local` 0.983) are inside the A/A swing of the window's other rows (PTX `shared` 0.957 and PTX `launch` 0.970 in the A/A; SASS `atomics` read 1.013 in it).
+
+### Real programs (`real.py`, cpu 13, 7 runs, 3 for programs over 30 s; W over A of the median wall time; A/A of the same window: 0.98 to 1.02 in every row)
+PolyBench (gather rows first): ATAX 1.16, GEMM 1.13, 3MM 1.12, MVT 1.12, SYR2K 1.09, SYRK 1.09, GESUMMV 1.09, JACOBI1D 1.09, BICG 1.05, 2MM 1.05, CORR 1.03, COVAR 1.04, FDTD-2D 1.04, GRAMSCHM 1.04, LU 1.02, GEMVER 1.04, 3DCONV 1.02, 2DCONV 1.02, JACOBI2D 1.03, ADI 1.03 (geometric mean 1.064x, no program under 1.00). Rodinia: sc_gpu 1.06, particlefilter_float 1.04 (outputs differ in the A/A too), backprop 1.03, needle 1.02, lud 1.01, hotspot / gaussian / lavaMD / srad_v2 1.00, nn 1.01, bfs 1.04 (10 ms, start-up), pathfinder 0.99 (geometric mean 1.013x). The programs under 0.3 s time start-up as much as simulation.
+
+### mi300x AMD canary (`bench-amd`, 44 rows, 15 runs; W/A, A/A in brackets; the rows that moved)
+Faster: `mfma_fp8` 1.053 (0.976), `p_smem_wide` 1.048 (0.991), `mfma_bf16` 1.041 (0.990), `mfma` 1.037 (0.989), `flat` 1.033 (0.992), `p_perm` 1.028 (1.023), `divergent` 1.025 (1.009). Four rows read 0.95 to 0.97: `p_lane` **0.946** (A/A 1.004), `p_sdwa` 0.968 (1.007), `smem` 0.963 (0.979), `p_sbuf` 0.970 (0.971); `atomics` 0.975 (0.997). Everything else 0.98 to 1.02. The `mfma` / `smfmac` / `divergent` losses that Round sp17 measured are not present against `sp17-speed`.
+
+A repeat of those rows (21 runs, three windows) gave the same: `p_lane` 0.944 / 0.949 (A/A 1.005), `p_sdwa` 0.969 / 0.971 (0.998), `smem` 0.966 / 0.973 (0.980), `p_sbuf` 0.968 / 0.967 (0.970), `atomics` 0.988 / 0.983 (1.013).
+
+### The cause of `p_lane` and `p_sdwa`: the copy of the library, not the code
+`p_lane` is a 15 ms device phase and the 0.9 ms gap is the whole-process gap (user time +0.7 ms, page faults equal at 803 / 804). The profile (SIGPROF sampler, 15 samples) puts the time in the same handlers in A and W, and none of them is touched by `sp18-speed` (`h_int_avx2`, `run_lane`, `h_readlane`; the AMD changes are `fix_nan32` and the dwordx3/x4 memory path). `libamdhip64.so.6.4` of the two differ, but the hot handlers sit at the same 64-byte offsets in both. What decides it is the file copy. Median device CPU time of `p_lane`, 31 interleaved runs, byte-identical copies of A's build and of W's build, all copied at the same moment:
+
+| build directory | bytes of | p_lane device ms | p_sdwa device ms |
+|---|---|---:|---:|
+| runA | A | 14.8 | 74.0 |
+| runB (the A/A) | A | 14.7 | 73.4 |
+| runA3 | A | 15.7 | 73.7 |
+| runA4 | A | 15.7 | 73.8 |
+| runW | W | 15.7 | 76.0 |
+| runW3 | W | 15.6 | 74.2 |
+| runW4 | W | 15.6 | 74.5 |
+
+Three copies of A's bytes give 14.8 / 14.7 / 15.7 / 15.7, so `p_lane` moves by 6 % between copies of one library; W's copies are all on the slow side. An earlier pair did the same (an unrelated one-function edit to `src/core/error.cpp`, which leaves `libamdhip64` byte-identical in A and in W: the edited A copy read 15.4 ms, the edited W copy 14.7 ms, the reverse of the unedited pair). Page-cache placement of the mapped file (physical addresses of the text pages) is the only thing that differs, so this is Round sp16's "copies of one library differ", and an A/A made with one copy cannot see it: here the A/A copy happened to land with A. `p_sdwa` is the same effect at 1 to 3 % (W copies 74.2 to 76.0 against A copies 73.4 to 74.0). `smem` and `p_sbuf` have the same sign in the A/A (0.979 / 0.971). No code was changed; a fix by layout is not possible for page placement.
+
+### Caveats
+* The A/A control is one copy; the p_lane table shows that several copies are needed for a 15 ms row. Rows under 20 ms (`p_lane`, `p_dpp*`, `startup`) are not claimed either way.
+* The PolyBench programs here are the MINI datasets scaled by the corpus (0.1 s to 120 s); GEMM-class programs measure at 0.5 s and mostly time the host reference check as well.
+* Zen 4 was not part of this round. Timed windows were at load 4 to 7 from other sessions.
