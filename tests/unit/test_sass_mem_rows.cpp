@@ -178,6 +178,8 @@ VTEST(full_warp_store_values_are_the_lane_loop) {
   std::fill(z, z + 32, 7);
   sm::full_warp_store_values(nullptr, 4, z);   // RZ stores zeros
   for (unsigned l = 0; l < 32; ++l) VCHECK_EQ(z[l], 0u);
+}
+
 // The AVX2 kernel behind the tier's full-warp global access (simd::warp_rows_kernel; null on a host or at a VGPU_SIMD level without AVX2, where the scalar
 // full_warp_addresses is all there is and the VGPU_SIMD=base twin of this test runs only the checks that do not need it): the addresses, the first
 // lane's, the stride of the first two, whether a lane is in the window and whether all lanes are on the stride, against the lane definitions, over the
