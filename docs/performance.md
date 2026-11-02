@@ -6466,3 +6466,59 @@ A/A (A against itself, 15 runs): ATAX 0.998, GEMM 0.999, hotspot 0.999, gaussian
 * `init_block` is 12% of gaussian and 17% of blockAccess (small blocks, many of them): two `rep stos` of about 3 KB each per warp (`new (&w) Warp()` and `w.r.assign(nregs * 32, 0)`; `ur[256]`, `pc[32]`, `cga_target[32]`, `rpc[32]` are most of it). A reset of only what a run can have changed needs a test that a reset warp equals a fresh one.
 * `warp_rows_k` spills six ymm registers to the stack in the unrolled loop (the precomputed expected-address chain) and is 5 to 15% of the gather rows; a version with `expect` advanced in the loop and no spills was not tried.
 * `count_global_progression` is 70 instructions with a six-register prologue and epilogue (13% of SYR2K's instructions); inlining it into `h_global` changes the placement of `h_global`.
+
+## Round sp19: process start, and a PTX module is parsed a kernel at a time from 16 KiB (branch `sp19-start`, base ef41312a)
+
+The question was where the fixed cost of a short program goes (CI, the playground, many small tests). Measured on server3 (Zen 4, `perf stat` instructions:u and task-clock, two CPUs pinned, 30 runs a side rotated over three fresh copies of each library directory; the benchmark program's cached binary for the module cases, two `g++`-built runtime-API probes for the rest).
+
+### Where the start goes (base ef41312a, NVIDIA shim, CUDA 13)
+
+| program | task-clock | user instructions | what it is |
+| --- | ---: | ---: | --- |
+| `devq` (device count + properties, no module) | 2.1 ms | 2.9 M | 229 page faults, 0 threads, ~35 `openat`, 32 `mmap` |
+| `memcpy` (malloc, memcpy, memset, free; no module) | 2.9 ms | 4.1 M | |
+| benchmark `startup`, SASS (default), verdict cache warm | 3.2 ms | 4.4 M | context, module registration, one launch |
+| the same with `VGPU_SASS_CACHE=0`, or a cold cache | +0.7 ms | 9.1 M | decoding and checking the module's SASS; the cache saves it from the second run on |
+| the same on the PTX engine (`VGPU_SASS=0`) | 18.4 ms | 76.9 M | parsing the module's PTX: 81 KB, every kernel, to launch one |
+| HIP `startup` (gfx942 shim) | 3.5 to 4 ms | 6.2 M user | one worker thread; 703 page faults; most of the time is the kernel's (exec and faults) |
+
+What the time is, for a program with no module (`devq`, 2.1 ms): the dynamic loader. 77% of the user-mode samples of 300 runs (`perf record -F 20000 -e cycles:u`) are in `ld-linux`, and the simulator library itself is 6%. `LD_DEBUG=statistics` reports a smaller figure, 512 k cycles in the loader before `main` (258 k relocating 2338 symbols, 170 k loading objects); the two were not reconciled (the samples include the lazy symbol resolution after `main` starts). `LD_DEBUG=bindings`: 2503 symbol bindings in all, of which 1729 are libstdc++'s own, 551 are the shim's own exported symbols, 47 are the shim's references to libstdc++ and 36 to libc. There is no thread, no large allocation and no environment scan; `strace -c` shows 0.6 ms of syscalls under tracing. `LD_BIND_NOW=1` makes it worse (8.3 M cycles against 6.0 M), so lazy binding is the right setting. The first two lines of the table are what a program that touches no module costs; they have no hotspot (the earlier profile of this document, "a 3 ms program ... none above 1.5%", still holds).
+
+Not done, with the reason:
+* `-Wl,-Bsymbolic-functions` (or hidden visibility) would remove the 551 self-bindings (22% of the lookups). It is not safe: `libcuda.so.1` and `libcudart.so.N` each carry the simulator's core, and the two copies become one machine because the dynamic linker lets the first library's definitions interpose on the second's (`runtime::owner()` in `src/runtime/shared_runtime.cpp` looks the copy up by name for the libraries loaded privately). A symbolic link would give each library its own machine. The saving is about 0.1 ms of 2.
+* A static libstdc++ in the shims would remove 1729 of the 2503 bindings, but puts a second C++ runtime in every process that has its own. Not tried.
+* The HIP start is user 1.3 to 1.7 ms and system 2.1 to 2.5 ms on four CPUs (the code object's msgpack parse and the decoder's `table()` are 5% and 3% of it by a frame-pointer call graph, which is not reliable here). Nothing is above the 2% bar.
+
+### What changed
+
+`kLazyModuleBytes` goes from 2 MiB to 16 KiB (`src/runtime/runtime.cpp`). A module of 16 KiB or more is split into its kernels and each is parsed when first looked up, as a module over 2 MiB already was. The PTX parser costs about 0.9 k host instructions a byte, so an 81 KB module spent 14 ms parsing all its kernels to launch one. `VGPU_LAZY_MODULE_BYTES` and `VGPU_PARSE_WHOLE=1` still move or turn off the threshold. 16 KiB, not 0: a smaller module parses in under 3 ms, and keeps the whole parse's behaviour of refusing a kernel the simulator cannot parse when the module loads (`unsupported_ptx_error_names_profile` needs it, and fails with the threshold at 0).
+
+The one behaviour that moves: a module between 16 KiB and 2 MiB with an unsupported instruction in a kernel nothing launches now loads, and the error is raised when that kernel is looked up (it already was so above 2 MiB). The nightly "Lazy modules" workflow runs the whole e2e suite with every module lazy and has passed daily since it was added.
+
+The by-opcode line of the `VGPU_COUNTERS` report ordered equal counts by opcode id, and ids are handed out in the order the parser first meets a mnemonic, so a lazily parsed module printed `cvta=1 mov=1 mul=1` where the whole parse printed `mov=1 mul=1 cvta=1`. The line is now built by `runtime::opcode_summary`, equal counts ordered by name: the same text whichever way the module was parsed. This changes the text of existing reports where counts tie (on the PTX engine; the SASS engine's line is unchanged); the numbers do not change.
+
+### Results
+
+| case | instructions B/A | task-clock A | task-clock B | saved | p |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| PTX engine, benchmark `startup` (81 KB module) | 0.084 | 18.4 ms | 3.3 ms | 15.1 ms | <0.001 |
+| PTX engine, `mem quick` | 0.833 | 61.6 ms | 46.6 ms | 15.0 ms | <0.001 |
+| PTX engine, `divergent quick` | 0.762 | 39.6 ms | 25.4 ms | 14.2 ms | <0.001 |
+| PTX engine, `int_alu quick` | 0.856 | 54.2 ms | 39.4 ms | 14.8 ms | <0.001 |
+| A/A, PTX `startup` (same library, other copies) | 1.000 | 18.4 ms | 18.4 ms | 0.03 ms | 0.78 |
+| PTX engine, `api quick` (does not load the module) | 1.000 | 11.7 ms | 11.7 ms | 0.03 ms | 0.31 |
+| SASS engine, `startup` | 1.000 | 3.18 ms | 3.18 ms | 0 | 0.94 |
+| SASS engine, `mem quick` | 1.000 | 38.2 ms | 37.8 ms | 0.4 ms | 0.006 |
+| `devq` | 1.000 | 2.12 ms | 2.12 ms | 0 | 0.18 |
+| `memcpy` | 1.000 | 2.87 ms | 2.85 ms | 0.02 ms | 0.20 |
+
+The SASS engine and programs with no module do not change (the `mem` row is 1%, below the 2% bar, and instructions are equal). Counters and stdout, all 16 workloads on both engines (`VGPU_COUNTERS=1`): the branch with the default threshold and with `VGPU_PARSE_WHOLE=1` print the same text for every workload except `atomics`, which differs from itself between two runs (host-atomic order); against the base the numbers are identical and only the order of tied opcodes in the by-opcode line differs (PTX engine), more lines on `launch` and `mem` where there are many kernels.
+
+### Tests (CMake-wired, `test_runtime`)
+
+* `modules_from_16_KiB_up_parse_kernels_when_first_used`: a 20 KiB module with an unsupported kernel loads, its good kernel runs, looking up the unsupported one gives `UnsupportedPtx`.
+* `modules_under_16_KiB_are_parsed_whole`: the same module at 4 KiB is refused at load.
+* `opcode_summary_orders_equal_counts_by_name`, `opcode_summary_keeps_ten_and_counts_the_rest`.
+* Mutations, each rebuilt and run on server3, each fails a test: threshold back to 2 MiB (the first), threshold 0 (the second and `unsupported_ptx_error_names_profile`), no name tie-break (the third), eleven opcodes shown instead of ten (the fourth).
+
+Not run: the e2e suite (no nvcc on server3); the nightly lazy-modules workflow and the regular CI cover it, and ASan, UBSan and TSan (the change adds no shared state).
