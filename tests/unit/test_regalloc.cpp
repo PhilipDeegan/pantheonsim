@@ -345,9 +345,13 @@ VTEST(a_ptx_estimate_a_little_over_the_block_file_launches_with_spill) {
   cfg.block = {1024, 1, 1};
   exec::launch(m.entries[0], cfg, {}, mem, prof);
 
-  auto res = exec::kernel_resources(m.entries[0], prof, 1024, 0);
+  auto res = exec::kernel_resources(m.entries[0], prof, 1024, 0, true);
   VCHECK_EQ(res.usage.regs_per_thread, 64u);
   VCHECK_EQ(res.usage.spilled_regs, raw.regs_per_thread - 64u);
+  // A query (cudaFuncGetAttributes, occupancy) is not a launch: it reports the estimate as it is.
+  auto query = exec::kernel_resources(m.entries[0], prof, 1024, 0);
+  VCHECK_EQ(query.usage.regs_per_thread, raw.regs_per_thread);
+  VCHECK_EQ(query.usage.spilled_regs, 0u);
   // At a block size the estimate fits, nothing is clamped.
   auto small = exec::kernel_resources(m.entries[0], prof, 256, 0);
   VCHECK_EQ(small.usage.regs_per_thread, raw.regs_per_thread);
