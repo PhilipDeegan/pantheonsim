@@ -23,7 +23,7 @@
 # VGPU_JIT_SHARD=tier,steps,random,modes runs only those stages of the gate (default: all of them; "programs" is every other program of --full), so
 # that ctest can run them side by side: e2e_sass_jit_shard_tier, _steps, _random and _modes in CMakeLists.txt together are exactly the stages of the
 # whole run, once each. VGPU_JIT_LIST=1 prints the stages a run (with its VGPU_JIT_SHARD) would run, one a line, without building or running anything;
-# tests/ci/check_shard_partition.sh uses it to prove the shards partition the whole.
+# tests/lint/check_shard_partition.sh uses it to prove the shards partition the whole.
 #
 # The comparison cannot pass by the JIT doing nothing: sass_tier's statistics must show the generated regions ran at least
 # VGPU_JIT_MIN_PERCENT (default 10) percent of its warp instructions.
