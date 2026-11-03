@@ -2078,6 +2078,7 @@ class Parser {
         OpNotPred op;
         op.dst = expect_reg_operand("not.pred destination");
         expect_punct(",");
+        if (peek_punct("!")) { next(); op.src_neg = true; }
         op.src = expect_reg_operand("not.pred source");
         ins.op = op;
       } else {
@@ -4415,16 +4416,17 @@ class Parser {
         OpPredBin op;
         op.op = *pop;
         op.dst = expect_reg_operand("predicate destination");
-        auto pred_source = [&](Reg& r, int8_t& imm) {
+        auto pred_source = [&](Reg& r, int8_t& imm, bool& neg) {
+          if (peek_punct("!")) { next(); neg = true; }
           const Operand o = parse_operand();
           if (const auto* reg = std::get_if<RegOperand>(&o)) r = reg->reg;
           else if (const auto* i = std::get_if<ImmInt>(&o)) imm = i->value != 0 ? 1 : 0;
           else fail(ins.line, base_op + ".pred takes predicate registers or immediates");
         };
         expect_punct(",");
-        pred_source(op.a, op.a_imm);
+        pred_source(op.a, op.a_imm, op.a_neg);
         expect_punct(",");
-        pred_source(op.b, op.b_imm);
+        pred_source(op.b, op.b_imm, op.b_neg);
         ins.op = op;
       } else if (ty.is_float()) {
         if (ty.bits != 16 && ty.bits != 32 && ty.bits != 64)
@@ -4654,6 +4656,7 @@ class Parser {
       expect_punct(",");
       op.b = parse_operand();
       expect_punct(",");
+      if (peek_punct("!")) { next(); op.pred_negated = true; }
       op.pred = expect_reg_operand("selp predicate");
       ins.op = op;
     } else if (op0 == "bra") {
