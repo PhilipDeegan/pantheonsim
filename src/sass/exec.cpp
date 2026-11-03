@@ -98,9 +98,11 @@ struct Warp {
   std::vector<uint32_t> r;            // r[reg * 32 + lane]
   Mask p[8] = {0, 0, 0, 0, 0, 0, 0, kAll};
   uint32_t ur[256] = {};
+  // How many of `ur`'s words may be non-zero: the first block a warp runs sets it to the number of uniform registers its
+  // code can write (init_block), so the next block clears that many and no more. Never a word past it has been written.
+  uint32_t ur_extent = 256;
   bool up[8] = {false, false, false, false, false, false, false, true};
   uint64_t pc[32] = {};               // per-lane code address
-  uint32_t device_error[32] = {};     // the device runtime's per-thread last error: a failed call sets it, a successful one leaves it
   Mask alive = 0;                     // lanes that are threads of the block
   Mask exited = 0;
   Mask waiting = 0;
@@ -114,7 +116,6 @@ struct Warp {
   // BMOV.PQUAD MACTIVE: the threads every instruction runs on until MACTIVE is put back (0: the issuing group).
   Mask mactive_force = 0;
   uint64_t bssy_stamp[16] = {};       // when (Block::bssy_clock) each barrier was last set up: higher is more deeply nested
-  uint64_t rpc[32] = {};              // the return-address register (RPCMOV)
   uint64_t gmma_issued = 0;           // warpgroup MMAs this warp has issued
   const Code* code_hint = nullptr;    // the code section this warp last ran in (step_warp, and the tier)
   // The tier's chain (tier_ops.inc): how many more calls of step_warp the caller's turn has after this one, and how many the
@@ -147,9 +148,60 @@ struct Warp {
   // The cluster barrier (UCGABAR): lanes that have arrived in its current
   // phase, and the phase each lane's wait waits for.
   Mask cga_arrived = 0;
-  uint64_t cga_target[32] = {};
+  // State only a few kernels use: the device runtime's per-thread last error (a failed call sets it, a successful one leaves
+  // it), the return-address register (RPCMOV) and the cluster barrier's phase per lane. Every access to it goes through rare(),
+  // which notes that it may differ from a new warp's, so that a warp that never touched it does not have it cleared again for
+  // the next block (init_block). Out of the line from the rest to keep that state's 640 bytes off the hot members' cache lines.
+  struct Rare {
+    uint32_t device_error[32] = {};
+    uint64_t rpc[32] = {};
+    uint64_t cga_target[32] = {};
+  };
+  Rare rare_;
+  bool rare_dirty = false;
+  Rare& rare() { rare_dirty = true; return rare_; }
+  const Rare& rare() const { return rare_; }
+  void reset_rare() {
+    if (!rare_dirty) return;
+    rare_ = Rare{};
+    rare_dirty = false;
+  }
 
   Mask runnable() const { return alive & ~exited & ~waiting; }
+
+  // Back to a new Warp's state for the next block, without building one: `init_block` then sets index, nregs, alive, pc, local_size
+  // and the register file. The members are listed here in the order they are declared; any other must be added here too, which
+  // the size check below (and, in a debug build, init_block's comparison with a new warp) catches.
+  void reset() {
+    std::memset(p, 0, sizeof p);
+    p[7] = kAll;
+    std::memset(ur, 0, std::min<size_t>(ur_extent, 256) * sizeof(uint32_t));
+    std::memset(up, 0, sizeof up);
+    up[7] = true;
+    exited = waiting = ws_held = 0;
+    std::memset(wait_kind, 0, sizeof wait_kind);
+    std::memset(wait_arg, 0, sizeof wait_arg);
+    std::memset(b, 0, sizeof b);
+    mactive_force = 0;
+    std::memset(bssy_stamp, 0, sizeof bssy_stamp);
+    gmma_issued = 0;
+    code_hint = nullptr;
+    budget = extra = 0;
+    local.clear();
+    steps = 0;
+    spins = 0;
+    give_way = false;
+    spin_yields = 0;
+    idle_yields = 0;
+    yield_pc = 0;
+    slice = 0;
+    b2r = 0;
+    b2r_pred = false;
+    yield = false;
+    store_gate = true;
+    cga_arrived = 0;
+    reset_rare();
+  }
   uint32_t& reg(unsigned n, unsigned lane) {
     if (n >= nregs) [[unlikely]] past_file(n);
     return r[n * 32 + lane];
@@ -158,6 +210,9 @@ struct Warp {
     throw std::out_of_range("register R" + std::to_string(n) + " past the warp's " + std::to_string(nregs));
   }
 };
+// Warp::reset names every member. A member added changes this size (or not, if it fits in padding, which the debug build's
+// expect_new_warp would then catch): add it to reset() and to expect_new_warp, then change the number.
+static_assert(sizeof(Warp) == 2488, "Warp has a new member: see Warp::reset");
 
 // A warpgroup MMA's shared-memory operands, read by the first of its four
 // warps (exec_gmma).
@@ -201,7 +256,11 @@ struct Block {
     uint32_t popc = 0;
     bool and_ = true, or_ = false;
   };
-  Barrier bars[16];
+  Barrier bars_[16];
+  // Whether a barrier may differ from a new one (init_block sets them again only then). Every write to one goes through bar().
+  bool bars_dirty = false;
+  Barrier& bar(unsigned id) { bars_dirty = true; return bars_[id]; }
+  const Barrier (&bars() const)[16] { return bars_; }
   // What an mbarrier's word in shared memory has no room for, by its offset:
   // the transaction bytes its phase still waits for (raised by expect-tx,
   // lowered as copies complete; it may dip below zero when a copy lands
@@ -1217,6 +1276,24 @@ void Runner::seed_alloc_handshake(Block& blk) {
   }
 }
 
+#ifndef NDEBUG
+// A debug build checks what init_block leaves against a new Warp, member by member: a member that Warp::reset got wrong, or a uniform
+// register written past ur_extent, fails here. (The size of Warp is pinned beside the struct, so that a member added is noticed.)
+static void expect_new_warp(const Warp& w) {
+  const Warp f;
+  const auto same = [](const auto& a, const auto& b) { return std::memcmp(&a, &b, sizeof a) == 0; };
+  bool ok = same(w.p, f.p) && same(w.ur, f.ur) && same(w.up, f.up) && w.exited == f.exited && w.waiting == f.waiting &&
+            w.ws_held == f.ws_held && same(w.wait_kind, f.wait_kind) && same(w.wait_arg, f.wait_arg) && same(w.b, f.b) &&
+            w.mactive_force == f.mactive_force && same(w.bssy_stamp, f.bssy_stamp) && w.gmma_issued == f.gmma_issued &&
+            w.code_hint == f.code_hint && w.budget == f.budget && w.extra == f.extra && w.local.empty() && w.steps == f.steps &&
+            w.spins == f.spins && w.give_way == f.give_way && w.spin_yields == f.spin_yields && w.idle_yields == f.idle_yields &&
+            w.yield_pc == f.yield_pc && w.slice == f.slice && w.b2r == f.b2r && w.b2r_pred == f.b2r_pred && w.yield == f.yield &&
+            w.store_gate == f.store_gate && w.cga_arrived == f.cga_arrived && same(w.rare(), f.rare()) && !w.rare_dirty;
+  for (uint32_t v : w.r) ok = ok && v == 0;
+  if (!ok) throw std::logic_error("init_block left a warp that is not a new warp's state");
+}
+#endif
+
 void Runner::init_block(Block& blk, uint64_t linear) {
   blk.rank = 0;
   blk.own.blocks.assign(1, &blk);
@@ -1227,22 +1304,22 @@ void Runner::init_block(Block& blk, uint64_t linear) {
   blk.ctaid[2] = static_cast<uint32_t>(linear / (static_cast<uint64_t>(cfg_.grid[0]) * cfg_.grid[1]));
   blk.shared.assign(shared_size_, 0);
   seed_alloc_handshake(blk);
-  blk.st = exec::LaunchStats{};
+  // The block's counts, back to zero in place: the counters are the words before inst_by_opcode (see LaunchStats::add), and what the
+  // vector holds, if anything, goes.
+  std::memset(static_cast<void*>(&blk.st), 0, exec::kCounterWords * sizeof(uint64_t));
+  blk.st.inst_by_opcode.clear();
   const uint32_t nwarps = (block_threads_ + 31) / 32;
   blk.st.warps = nwarps;
   blk.warps.resize(nwarps);
   const uint32_t nregs = std::max<uint32_t>(k_.regs + 8, 16);
+  // The uniform registers an instruction of this module can write: a 6-bit field (UR63 is URZ) before sm_100, and 8 bits (UR255)
+  // after. The words past that are never written, so a warp's next block does not clear them (Warp::ur_extent).
+  const uint32_t ur_words = m_.sm >= 100 ? 256 : 64;
   for (uint32_t i = 0; i < nwarps; ++i) {
     Warp& w = blk.warps[i];
-    // A fresh warp, built in place: assigning a temporary copies its three kilobytes, and its register file and local memory
-    // are given back to be allocated again. The two vectors keep their memory and start empty, as a new warp's do.
-    std::vector<uint32_t> regs = std::move(w.r);
-    std::vector<uint8_t> local = std::move(w.local);
-    local.clear();
-    w.~Warp();
-    new (&w) Warp();
-    w.local = std::move(local);
-    w.r = std::move(regs);
+    // A new warp's state, in place: the register file and local memory keep their memory and start empty, as a new warp's do.
+    w.reset();
+    w.ur_extent = ur_words;
     w.index = i;
     w.nregs = std::min<uint32_t>(nregs, 256);
     w.r.assign(static_cast<size_t>(w.nregs) * 32, 0);
@@ -1252,12 +1329,18 @@ void Runner::init_block(Block& blk, uint64_t linear) {
     for (unsigned l = 0; l < 32; ++l) w.pc[l] = entry_;
     w.local_size = local_size_;
     // (the local memory is made on the warp's first local access)
+#ifndef NDEBUG
+    expect_new_warp(w);
+#endif
   }
   blk.live = block_threads_;
-  for (Block::Barrier& b : blk.bars) b = Block::Barrier{};
-  blk.mbar.clear();
-  blk.gmma.clear();
-  blk.tmem.reset();
+  if (blk.bars_dirty) {
+    for (Block::Barrier& b : blk.bars_) b = Block::Barrier{};
+    blk.bars_dirty = false;
+  }
+  if (!blk.mbar.empty()) blk.mbar.clear();
+  if (!blk.gmma.empty()) blk.gmma.clear();
+  if (!blk.tmem.pristine()) blk.tmem.reset();
 }
 
 exec::LaunchStats Runner::run() {
@@ -1520,7 +1603,8 @@ bool Runner::break_warpsync_standoff(Block& blk) {
   // The block barrier the lanes go on to counts live lanes, and the ones parked at the BSYNC cannot
   // arrive until the others have gone past it. The hardware counts the warp as arrived, so when nothing
   // can move, a barrier that every other live lane has reached is complete.
-  for (Block::Barrier& b : blk.bars) {
+  for (unsigned bar_id = 0; bar_id < 16; ++bar_id) {
+    const Block::Barrier& b = blk.bars()[bar_id];
     if (!b.arrived || b.expected) continue;
     uint32_t live = 0;
     for (const Warp& w : blk.warps) {
@@ -1540,7 +1624,7 @@ bool Runner::break_warpsync_standoff(Block& blk) {
       w.b2r = b.red == 0 ? b.popc : b.red == 1 ? b.and_ : b.or_;
       w.b2r_pred = b.red == 0 ? b.popc != 0 : b.red == 1 ? b.and_ : b.or_;
     }
-    b = Block::Barrier{};
+    blk.bar(bar_id) = Block::Barrier{};
     any = true;
   }
   return any;

@@ -2054,7 +2054,7 @@ inline void tier_bsync(Warp& w, Mask ex, unsigned x) {
 // the block, or the count it was named with -- the warps' lanes waiting at it go on, every warp learns the reduction's result, and
 // the barrier is reset.
 inline void tier_release_bar(Block& blk, unsigned id) {
-  Block::Barrier& b = blk.bars[id];
+  Block::Barrier& b = blk.bar(id);
   const uint32_t expected = b.expected ? b.expected : blk.live;
   if (b.arrived < expected) return;
   for (Warp& ww : blk.warps) tier_wake(ww, tier_waiting_on(ww, Wait::Bar, id));
@@ -2493,7 +2493,7 @@ bool Runner::tier_run_t(Block& blk, Warp& w, Mask group, uint64_t pick, const Co
       tier_set_pcs(w, group, here + 16);
       if (tier_stats_) [[unlikely]] tier_stats().native[static_cast<size_t>(Op::YIELD)].fetch_add(1, std::memory_order_relaxed);
     } else if (last.form == tier::Form::Exit && w.waiting == 0 && [&] {
-                 for (const Block::Barrier& b : blk.bars)
+                 for (const Block::Barrier& b : blk.bars())
                    if (b.arrived) return false;
                  return true;
                }()) {
@@ -2526,7 +2526,7 @@ bool Runner::tier_run_t(Block& blk, Warp& w, Mask group, uint64_t pick, const Co
       if (ex) ++st.barriers;
       if (idx != first) tier_set_pcs(w, group, here);
       const unsigned id = (last.aux & 1) ? last.c : (tier_sc(c, last.s[0], 0) & 15);
-      Block::Barrier& b = blk.bars[id];
+      Block::Barrier& b = blk.bar(id);
       b.mode = last.a;
       b.red = last.b;
       const uint32_t count = static_cast<uint32_t>(last.imm);

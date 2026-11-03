@@ -41,6 +41,11 @@ const Insn kAddr = {0x000fe200078e0006ull, 0x00000004000a7825ull, "IMAD.WIDE.U32
 const Insn kSetR9 = {0x000fc80000000f00ull, 0x1234567800097802ull, "MOV R9, 0x12345678"};
 const Insn kStoreR9 = {0x000fe2000c101904ull, 0x000000090a007986ull, "STG.E [R10.64], R9"};
 const Insn kStoreR0 = {0x000fe2000c101904ull, 0x000000000a007986ull, "STG.E [R10.64], R0"};
+// A uniform register: UMOV UR62, 0x1234 (the highest a program can write below sm_100: UR63 is URZ), and MOV R9, UR62.
+const Insn kSetUr62 = {0x000fe20000000000ull, 0x00001234003e7882ull, "UMOV UR62, 0x1234"};
+const Insn kSetUr0 = {0x000fe20000000000ull, 0x0000abcd00007882ull, "UMOV UR0, 0xabcd"};
+const Insn kR9FromUr62 = {0x000fc80008000f00ull, 0x0000003e00097c02ull, "MOV R9, UR62"};
+const Insn kR9FromUr0 = {0x000fc80008000f00ull, 0x0000000000097c02ull, "MOV R9, UR0"};
 const Insn kExit = {0x000fea0003800000ull, 0x000000000000794dull, "EXIT"};
 
 template <class T>
@@ -118,7 +123,7 @@ struct Env {
   }
   std::shared_ptr<sass::Module> load(const std::vector<Insn>& code) { return load(std::vector<Kernel>{{"k", code}}); }
   // Runs the module's kernel over `blocks` blocks of `threads`, each storing to out[block]; returns out.
-  std::vector<uint32_t> run(sass::Module& m, uint32_t blocks, uint32_t threads, const char* kernel = "k") {
+  std::vector<uint32_t> run(sass::Module& m, uint32_t blocks, uint32_t threads, const char* kernel = "k", exec::LaunchStats* stats = nullptr) {
     const uint64_t out = mem.alloc(blocks * 4);
     const std::vector<uint32_t> poison(blocks, 0x5A5A5A5Au);
     mem.write(out, poison.data(), blocks * 4);
@@ -127,7 +132,8 @@ struct Env {
     cfg.block = {threads, 1, 1};
     std::vector<uint8_t> arg(8);
     std::memcpy(arg.data(), &out, 8);
-    sass::launch(m, kernel, cfg, {arg}, mem, prof);
+    const exec::LaunchStats st = sass::launch(m, kernel, cfg, {arg}, mem, prof);
+    if (stats) *stats = st;
     std::vector<uint32_t> got(blocks);
     mem.read(out, got.data(), blocks * 4);
     return got;
@@ -183,6 +189,50 @@ VTEST(registers_start_at_zero_in_the_next_block_and_the_next_launch) {
     for (uint32_t v : e.run(*sets, 4, 128)) VCHECK_EQ(v, 0x12345678u);
     for (uint32_t v : e.run(*reads, 4, 128)) VCHECK_EQ(v, 0u);
     for (uint32_t v : e.run(*reads, 4, 32)) VCHECK_EQ(v, 0u);
+  }
+}
+
+// The uniform registers are cleared by what the module can write (Warp::ur_extent), not by what the last block did: a kernel that sets the first and
+// the last register a program can write, then the next block, launch and kernel, read zero in both.
+VTEST(uniform_registers_start_at_zero_in_the_next_block_and_the_next_launch) {
+  OneThread one;
+  Env e;
+  const auto sets62 = e.load({kCtaid, kPtrLo, kPtrHi, kAddr, kSetUr62, kR9FromUr62, kStoreR9, kExit});
+  const auto sets0 = e.load({kCtaid, kPtrLo, kPtrHi, kAddr, kSetUr0, kR9FromUr0, kStoreR9, kExit});
+  const auto reads62 = e.load({kCtaid, kPtrLo, kPtrHi, kAddr, kR9FromUr62, kStoreR9, kExit});
+  const auto reads0 = e.load({kCtaid, kPtrLo, kPtrHi, kAddr, kR9FromUr0, kStoreR9, kExit});
+  for (int round = 0; round < 3; ++round) {
+    for (uint32_t v : e.run(*sets62, 4, 128)) VCHECK_EQ(v, 0x1234u);
+    for (uint32_t v : e.run(*reads62, 4, 128)) VCHECK_EQ(v, 0u);
+    for (uint32_t v : e.run(*sets0, 4, 64)) VCHECK_EQ(v, 0xabcdu);
+    for (uint32_t v : e.run(*reads0, 4, 64)) VCHECK_EQ(v, 0u);
+    for (uint32_t v : e.run(*reads62, 3, 32)) VCHECK_EQ(v, 0u);
+    // (and the block itself: a warp's second block, after a first that set it, reads zero)
+    for (uint32_t v : e.run(*sets62, 1, 32)) VCHECK_EQ(v, 0x1234u);
+    for (uint32_t v : e.run(*reads62, 5, 32)) VCHECK_EQ(v, 0u);
+  }
+}
+
+// A block's counts start at zero in every block, in the Block a thread keeps: a launch's counts are the sum of its blocks', whatever ran there before.
+VTEST(a_blocks_counts_start_at_zero_in_the_next_block_and_the_next_launch) {
+  OneThread one;
+  Env e;
+  const auto m = e.load({kCtaid, kPtrLo, kPtrHi, kAddr, kStoreR0, kExit});
+  const auto longer = e.load({kCtaid, kPtrLo, kPtrHi, kAddr, kSetR9, kSetR9, kSetR9, kStoreR9, kExit});
+  exec::LaunchStats first;
+  e.run(*m, 6, 64, "k", &first);
+  VCHECK_EQ(first.blocks, uint64_t{6});
+  VCHECK_EQ(first.warps, uint64_t{12});
+  VCHECK_EQ(first.instructions, uint64_t{6 * 2 * 6});   // six instructions in each of two warps of each of six blocks
+  for (int round = 0; round < 2; ++round) {
+    exec::LaunchStats long_run, again;
+    e.run(*longer, 3, 32, "k", &long_run);
+    VCHECK_EQ(long_run.instructions, uint64_t{3 * 9});
+    e.run(*m, 6, 64, "k", &again);
+    VCHECK_EQ(again.instructions, first.instructions);
+    VCHECK_EQ(again.global_stores, first.global_stores);
+    VCHECK_EQ(again.thread_instructions, first.thread_instructions);
+    VCHECK_EQ(again.warps, first.warps);
   }
 }
 
