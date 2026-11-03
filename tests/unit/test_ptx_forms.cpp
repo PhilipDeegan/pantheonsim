@@ -1,5 +1,6 @@
 // PTX forms that real producers emit (drjit-core, JIT compilers) and that the frontend used to refuse:
 //   * a negated predicate source operand (`and.pred %p2, !%p0, %p1;`)    issue 474
+//   * `ldu` (uniform load), which reads what `ld` reads    issue 472
 // Each result is compared with what the PTX ISA says the instruction computes, worked out here on the host.
 #include <cstdint>
 #include <cstring>
@@ -126,6 +127,56 @@ VTEST(a_negated_guard_still_works_beside_a_negated_source) {
 )";
   const std::vector<uint32_t> r = run(ptx, 32, 32);
   for (uint32_t t = 0; t < 32; ++t) VCHECK_EQ(uint64_t{r[t]}, uint64_t{(t & 1) ? 105u : 9u});
+}
+
+// ---- 472: ldu ----
+
+VTEST(ldu_loads_what_ld_loads_scalar_and_vector) {
+  const std::string ptx = std::string(kHeader) + R"(
+.visible .entry k(.param .u64 po)
+{
+  .reg .b64 %rd<3>;
+  .reg .b32 %r<8>;
+  ld.param.u64 %rd1, [po];
+  cvta.to.global.u64 %rd1, %rd1;
+  mov.u32 %r0, 41;
+  st.global.u32 [%rd1+16], %r0;
+  mov.u32 %r0, 1;
+  st.global.u32 [%rd1+32], %r0;
+  mov.u32 %r0, 2;
+  st.global.u32 [%rd1+36], %r0;
+  mov.u32 %r0, 3;
+  st.global.u32 [%rd1+40], %r0;
+  mov.u32 %r0, 4;
+  st.global.u32 [%rd1+44], %r0;
+  ldu.global.u32 %r1, [%rd1+16];
+  add.u32 %r1, %r1, 1;
+  st.global.u32 [%rd1], %r1;
+  ldu.global.v4.u32 {%r2, %r3, %r4, %r5}, [%rd1+32];
+  add.u32 %r6, %r2, %r3;
+  add.u32 %r6, %r6, %r4;
+  add.u32 %r6, %r6, %r5;
+  st.global.u32 [%rd1+4], %r6;
+  ret;
+}
+)";
+  const std::vector<uint32_t> r = run(ptx, 1, 12);
+  VCHECK_EQ(uint64_t{r[0]}, uint64_t{42});
+  VCHECK_EQ(uint64_t{r[1]}, uint64_t{1 + 2 + 3 + 4});
+}
+
+VTEST(ldu_outside_global_is_refused) {
+  const std::string ptx = std::string(kHeader) + R"(
+.visible .entry k(.param .u64 po)
+{
+  .reg .b32 %r<2>;
+  .reg .b64 %rd<2>;
+  ldu.shared.u32 %r1, [%rd1];
+  ret;
+}
+)";
+  auto e = VCAPTURE(Error, ptx::parse(ptx));
+  VCHECK_CONTAINS(std::string(e.what()), "ldu outside .global");
 }
 
 VTEST_MAIN

@@ -1461,6 +1461,11 @@ class Parser {
     cur_opcode_ = opcode;
     std::vector<std::string> parts = split_dots(opcode);
     if (parts.empty()) fail(ins.line, "bad opcode '" + opcode + "'");
+    // ldu (a load whose address is the same in every lane of the warp, PTX ISA "ldu") is an ld: the
+    // uniformity is a promise about the address, and a plain load of it reads the same bytes.
+    // Only .global (and the .v2/.v4 forms) exist.
+    const bool is_ldu = parts[0] == "ldu";
+    if (is_ldu) parts[0] = "ld";
 
     auto unsupported = [&](const std::string& hint) -> Instr {
       fail_unsupported(ins.line, reconstruct_from(start_tok), fn.name, hint);
@@ -1679,6 +1684,7 @@ class Parser {
         vec = 2;
       }
       if (!have_ty) fail(ins.line, "ld/st missing type: " + opcode);
+      if (is_ldu && space != Space::Global) return unsupported("ldu outside .global (the ISA defines only ldu.global)");
       storage_bytes(ty, ins.line, opcode);
       if (vec == 8 && (ty.bytes() != 4 || space != Space::Global))
         return unsupported(".v8 " + op0 + " of other than 32-bit elements in global memory");
