@@ -2,6 +2,7 @@
 //   * a negated predicate source operand (`and.pred %p2, !%p0, %p1;`)    issue 474
 //   * `ldu` (uniform load), which reads what `ld` reads    issue 472
 //   * the array-element address `var[imm]` (without or with the outer brackets)    issue 476
+//   * `.reg` parameters and return values of a .func, and the call through them    issue 475
 // Each result is compared with what the PTX ISA says the instruction computes, worked out here on the host.
 #include <cstdint>
 #include <cstring>
@@ -277,6 +278,122 @@ VTEST(array_element_index_outside_the_array_is_refused) {
 )";
   auto e = VCAPTURE(Error, ptx::parse(ptx));
   VCHECK_CONTAINS(std::string(e.what()), "outside 'arr'");
+}
+
+// ---- 475: .reg parameters and return values ----
+
+// The issue's PTX: a .func with a .reg parameter, called through a .callprototype with the .reg form.
+VTEST(an_indirect_call_passes_a_reg_parameter) {
+  const std::string ptx = std::string(kHeader) + R"(
+.visible .func f(.reg .u64 data)
+{
+  .reg .b32 %r<2>;
+  mov.b32 %r0, 77;
+  st.global.b32 [data], %r0;
+  ret;
+}
+.visible .entry k(.param .u64 p)
+{
+  .reg .b64 %rd<4>;
+  ld.param.u64 %rd0, [p];
+  cvta.to.global.u64 %rd0, %rd0;
+  mov.u64 %rd1, f;
+  {
+    proto: .callprototype _(.reg .u64 data);
+    call %rd1, (%rd0), proto;
+  }
+  ret;
+}
+)";
+  const std::vector<uint32_t> r = run(ptx, 1, 1);
+  VCHECK_EQ(uint64_t{r[0]}, uint64_t{77});
+}
+
+// Per-lane arguments, a .reg return value, an immediate argument, and a guarded call: the lanes that do not call keep their
+// result register. The same function written with .param must give the same words (the two forms are one call).
+VTEST(direct_call_with_reg_parameters_and_a_reg_return_value) {
+  const std::string reg_form = std::string(kHeader) + R"(
+.func (.reg .b32 res) scale(.reg .u64 data, .reg .b32 x, .reg .b32 k)
+{
+  .reg .b32 %r<4>;
+  mad.lo.u32 %r0, x, k, 1;
+  st.global.u32 [data], %r0;
+  add.u32 res, x, 7;
+  ret;
+}
+.visible .entry k(.param .u64 po)
+{
+  .reg .pred %p<2>;
+  .reg .b32 %r<8>;
+  .reg .b64 %rd<6>;
+  ld.param.u64 %rd0, [po];
+  cvta.to.global.u64 %rd0, %rd0;
+  mov.u32 %r0, %tid.x;
+  mul.wide.u32 %rd1, %r0, 8;
+  add.u64 %rd2, %rd0, %rd1;
+  mov.u32 %r2, 1000;
+  and.b32 %r3, %r0, 1;
+  setp.ne.u32 %p0, %r3, 0;
+  @%p0 call (%r2), scale, (%rd2, %r0, 3);
+  st.global.u32 [%rd2+4], %r2;
+  ret;
+}
+)";
+  const std::string param_form = std::string(kHeader) + R"(
+.func (.param .b32 res) scale(.param .u64 data, .param .b32 x, .param .b32 k)
+{
+  .reg .b32 %r<4>;
+  .reg .b64 %rd<2>;
+  ld.param.u64 %rd0, [data];
+  ld.param.b32 %r1, [x];
+  ld.param.b32 %r2, [k];
+  mad.lo.u32 %r0, %r1, %r2, 1;
+  st.global.u32 [%rd0], %r0;
+  add.u32 %r3, %r1, 7;
+  st.param.b32 [res], %r3;
+  ret;
+}
+.visible .entry k(.param .u64 po)
+{
+  .reg .pred %p<2>;
+  .reg .b32 %r<8>;
+  .reg .b64 %rd<6>;
+  ld.param.u64 %rd0, [po];
+  cvta.to.global.u64 %rd0, %rd0;
+  mov.u32 %r0, %tid.x;
+  mul.wide.u32 %rd1, %r0, 8;
+  add.u64 %rd2, %rd0, %rd1;
+  mov.u32 %r2, 1000;
+  and.b32 %r3, %r0, 1;
+  setp.ne.u32 %p0, %r3, 0;
+  @%p0 bra DO;
+  bra DONE;
+DO:
+  {
+    .param .u64 a0;
+    .param .b32 a1;
+    .param .b32 a2;
+    .param .b32 r0;
+    st.param.u64 [a0], %rd2;
+    st.param.b32 [a1], %r0;
+    mov.u32 %r4, 3;
+    st.param.b32 [a2], %r4;
+    call (r0), scale, (a0, a1, a2);
+    ld.param.b32 %r2, [r0];
+  }
+DONE:
+  st.global.u32 [%rd2+4], %r2;
+  ret;
+}
+)";
+  const std::vector<uint32_t> a = run(reg_form, 32, 64);
+  const std::vector<uint32_t> b = run(param_form, 32, 64);
+  for (uint32_t t = 0; t < 32; ++t) {
+    const bool odd = t & 1;
+    VCHECK_EQ(uint64_t{a[2 * t]}, uint64_t{odd ? t * 3 + 1 : 0u});
+    VCHECK_EQ(uint64_t{a[2 * t + 1]}, uint64_t{odd ? t + 7 : 1000u});
+  }
+  VCHECK(a == b);
 }
 
 VTEST_MAIN
