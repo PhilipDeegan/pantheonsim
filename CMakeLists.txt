@@ -1354,8 +1354,15 @@ function(vgpu_shard_tests base)
     set_property(TEST ${_name} APPEND PROPERTY ENVIRONMENT ${S_ENVIRONMENT} "${S_ENV_VAR}=${_spec}")
   endforeach()
   set(_list_env ${S_ENVIRONMENT} "${S_LIST_ENV}=1")
+  # CMake swaps a target name for its file only when it is the command itself; here it is an argument of the script, so spell the path out.
+  set(_partition_command ${S_COMMAND})
+  list(GET _partition_command 0 _partition_exe)
+  if(TARGET ${_partition_exe})
+    list(REMOVE_AT _partition_command 0)
+    list(PREPEND _partition_command "$<TARGET_FILE:${_partition_exe}>")
+  endif()
   add_test(NAME ${base}_shards_partition
-           COMMAND ${CMAKE_SOURCE_DIR}/tests/lint/check_shard_partition.sh ${S_ENV_VAR} ${S_SPECS} -- ${S_COMMAND})
+           COMMAND ${CMAKE_SOURCE_DIR}/tests/lint/check_shard_partition.sh ${S_ENV_VAR} ${S_SPECS} -- ${_partition_command})
   set_tests_properties(${base}_shards_partition PROPERTIES ENVIRONMENT "${_list_env}" TIMEOUT 600)
 endfunction()
 
