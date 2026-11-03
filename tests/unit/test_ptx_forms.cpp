@@ -1,6 +1,7 @@
 // PTX forms that real producers emit (drjit-core, JIT compilers) and that the frontend used to refuse:
 //   * a negated predicate source operand (`and.pred %p2, !%p0, %p1;`)    issue 474
 //   * `ldu` (uniform load), which reads what `ld` reads    issue 472
+//   * the array-element address `var[imm]` (without or with the outer brackets)    issue 476
 // Each result is compared with what the PTX ISA says the instruction computes, worked out here on the host.
 #include <cstdint>
 #include <cstring>
@@ -177,6 +178,105 @@ VTEST(ldu_outside_global_is_refused) {
 )";
   auto e = VCAPTURE(Error, ptx::parse(ptx));
   VCHECK_CONTAINS(std::string(e.what()), "ldu outside .global");
+}
+
+// ---- 476: var[imm] ----
+
+VTEST(array_element_address_on_local_scales_by_the_element_size) {
+  const std::string ptx = std::string(kHeader) + R"(
+.visible .entry k(.param .u64 po)
+{
+  .reg .f32 %f<4>;
+  .reg .b32 %r<8>;
+  .reg .b64 %rd<8>;
+  .local .align 4 .b32 arr[4];
+  .local .align 8 .b64 big[3];
+  ld.param.u64 %rd0, [po];
+  cvta.to.global.u64 %rd0, %rd0;
+  mov.u32 %r0, %tid.x;
+  mov.b32 %f0, 0x3f800000;
+  st.local.b32 arr[0], %f0;
+  add.u32 %r1, %r0, 10;
+  st.local.b32 arr[1], %r1;
+  add.u32 %r2, %r0, 20;
+  st.local.b32 [arr[2]], %r2;
+  add.u32 %r3, %r0, 30;
+  st.local.b32 [arr+12], %r3;                 // the same place as arr[3]
+  cvt.u64.u32 %rd1, %r0;
+  add.u64 %rd2, %rd1, 1000;
+  st.local.b64 big[2], %rd2;
+  ld.local.b32 %f1, arr[0];
+  ld.local.b32 %r4, arr[1];
+  ld.local.b32 %r5, [arr[2]];
+  ld.local.b32 %r6, arr[3];
+  ld.local.b64 %rd3, big[2];
+  mov.b32 %r7, %f1;
+  mul.wide.u32 %rd4, %r0, 24;
+  add.u64 %rd5, %rd0, %rd4;
+  st.global.u32 [%rd5+0], %r7;
+  st.global.u32 [%rd5+4], %r4;
+  st.global.u32 [%rd5+8], %r5;
+  st.global.u32 [%rd5+12], %r6;
+  st.global.u64 [%rd5+16], %rd3;
+  ret;
+}
+)";
+  const std::vector<uint32_t> r = run(ptx, 32, 32 * 6);
+  for (uint32_t t = 0; t < 32; ++t) {
+    VCHECK_EQ(uint64_t{r[t * 6 + 0]}, uint64_t{0x3f800000u});
+    VCHECK_EQ(uint64_t{r[t * 6 + 1]}, uint64_t{t + 10});
+    VCHECK_EQ(uint64_t{r[t * 6 + 2]}, uint64_t{t + 20});
+    VCHECK_EQ(uint64_t{r[t * 6 + 3]}, uint64_t{t + 30});
+    VCHECK_EQ(uint64_t{r[t * 6 + 4]}, uint64_t{t + 1000});
+    VCHECK_EQ(uint64_t{r[t * 6 + 5]}, uint64_t{0});
+  }
+}
+
+VTEST(array_element_address_on_shared_global_and_const) {
+  const std::string ptx = std::string(kHeader) + R"(
+.global .align 4 .u32 gl[4];
+.const .align 4 .u32 cn[4] = {11, 22, 33, 44};
+.visible .entry k(.param .u64 po)
+{
+  .reg .b32 %r<8>;
+  .reg .b64 %rd<4>;
+  .shared .align 4 .u32 sh[4];
+  ld.param.u64 %rd0, [po];
+  cvta.to.global.u64 %rd0, %rd0;
+  mov.u32 %r0, 5;
+  st.shared.u32 sh[2], %r0;
+  mov.u32 %r1, 6;
+  st.global.u32 gl[3], %r1;
+  ld.shared.u32 %r2, sh[2];
+  ld.global.u32 %r3, gl[3];
+  ld.const.u32 %r4, cn[2];
+  ld.global.u32 %r5, [cn[3]];
+  st.global.u32 [%rd0+0], %r2;
+  st.global.u32 [%rd0+4], %r3;
+  st.global.u32 [%rd0+8], %r4;
+  st.global.u32 [%rd0+12], %r5;
+  ret;
+}
+)";
+  const std::vector<uint32_t> r = run(ptx, 1, 4);
+  VCHECK_EQ(uint64_t{r[0]}, uint64_t{5});
+  VCHECK_EQ(uint64_t{r[1]}, uint64_t{6});
+  VCHECK_EQ(uint64_t{r[2]}, uint64_t{33});
+  VCHECK_EQ(uint64_t{r[3]}, uint64_t{44});
+}
+
+VTEST(array_element_index_outside_the_array_is_refused) {
+  const std::string ptx = std::string(kHeader) + R"(
+.visible .entry k(.param .u64 po)
+{
+  .reg .b32 %r<2>;
+  .local .align 4 .b32 arr[4];
+  st.local.b32 arr[4], %r0;
+  ret;
+}
+)";
+  auto e = VCAPTURE(Error, ptx::parse(ptx));
+  VCHECK_CONTAINS(std::string(e.what()), "outside 'arr'");
 }
 
 VTEST_MAIN

@@ -539,6 +539,7 @@ class Parser {
     g.size = checked_size(elems, storage_bytes(ty, line, "global '" + g.name + "'"), uint64_t{1} << 40, line,
                           "global '" + g.name + "'");
     if (g.size == 0) fail(line, "zero-sized global '" + g.name + "'");
+    note_array(g.name, ty.bytes(), elems, true);
     if (peek_punct("=")) {
       next();
       if (peek_punct("{")) {
@@ -617,6 +618,7 @@ class Parser {
     fn.is_device_func = true;
     call_slots_.clear();
     declared_regs_.clear();
+    fn_arrays_.clear();
     if (peek_punct("(")) {
       next();
       const std::string kw = expect_word("'.param'");
@@ -705,6 +707,7 @@ class Parser {
     current_kernel_ = fn.name;
     call_slots_.clear();
     declared_regs_.clear();
+    fn_arrays_.clear();
     if (peek_punct("(")) {
       next();
       while (!peek_punct(")")) {
@@ -1158,6 +1161,7 @@ class Parser {
       d.size = 0;
     }
     if (d.align == 0) d.align = 8;
+    note_array(d.name, ty.bytes(), elems, sized);
     expect_punct(";");
     return d;
   }
@@ -1199,6 +1203,7 @@ class Parser {
     d.offset = static_cast<uint32_t>(off);
     fn.local_frame_size = static_cast<uint32_t>(off + d.size);
     if (!fn.locals.emplace(d.name, d).second) fail(line, "duplicate .local '" + d.name + "'");
+    note_array(d.name, ty.bytes(), elems, true);
     expect_punct(";");
   }
 
@@ -1391,10 +1396,34 @@ class Parser {
     return ops;
   }
 
-  Addr parse_addr(const EntryFn& fn) {
+  // `[imm]` after an array's name: the element index, as the byte offset it
+  // names. The element is the declared type's size (PTX ISA 5.1.5, "a[1]" is
+  // the address of the second element), and a constant index outside the
+  // declared array is refused rather than addressed.
+  int64_t parse_array_index(const std::string& base, size_t line) {
     expect_punct("[");
+    const int64_t idx = expect_int("array element index");
+    expect_punct("]");
+    auto it = fn_arrays_.find(base);
+    if (it == fn_arrays_.end()) it = module_arrays_.find(base);
+    if (it == fn_arrays_.end() && it == module_arrays_.end())
+      fail(line, "'" + base + "[...]' needs '" + base + "' declared as an array before this instruction");
+    const ArrayInfo& info = it->second;
+    if (idx < 0 || (info.sized && static_cast<uint64_t>(idx) >= info.count))
+      fail(line, "element " + std::to_string(idx) + " is outside '" + base + "', which has " +
+                     std::to_string(info.count) + " element(s)");
+    return idx * static_cast<int64_t>(info.elem_bytes);
+  }
+
+  Addr parse_addr(const EntryFn& fn) {
+    // The element form without the outer brackets: "st.local.b32 arr[0], %f0;".
+    const bool bare = !peek_punct("[");
+    const size_t addr_line = peek().line;
+    if (!bare) next();
     Addr a;
     std::string base = expect_word("address base");
+    int64_t array_off = 0;
+    if (bare || peek_punct("[")) array_off = parse_array_index(base, addr_line);
     if (base[0] == '%' || declared_regs_.count(base)) {
       a.base_kind = Addr::Base::Reg;
       Reg r = intern(base);
@@ -1426,11 +1455,12 @@ class Parser {
         a.base_kind = Addr::Base::Symbol;
       }
     }
-    if (peek_punct("+")) {
+    a.offset = array_off;
+    if (!bare && peek_punct("+")) {
       next();
-      a.offset = expect_int("address offset");
+      a.offset += expect_int("address offset");
     }
-    expect_punct("]");
+    if (!bare) expect_punct("]");
     return a;
   }
 
@@ -5486,6 +5516,15 @@ class Parser {
   std::string current_kernel_;
   std::set<std::string> call_slots_;
   std::set<std::string> declared_regs_;  // every .reg name in the current kernel
+  // The element size and count of every declared array, for the element form
+  // `var[imm]` (PTX ISA 5.1.5: the address of element imm). Variables of the
+  // module (.global, .const, module-scope .shared) and of the current function
+  // (.local, .shared) are kept apart because a function's names go away with it.
+  struct ArrayInfo { uint32_t elem_bytes = 0; uint64_t count = 0; bool sized = true; };
+  std::unordered_map<std::string, ArrayInfo> module_arrays_, fn_arrays_;
+  void note_array(const std::string& name, uint32_t elem_bytes, uint64_t count, bool sized) {
+    (cur_fn_ ? fn_arrays_ : module_arrays_)[name] = ArrayInfo{elem_bytes, count, sized};
+  }
   // Registers declared inside a nested { } block that shadow an outer
   // declaration, innermost block last: source name -> the name it is interned
   // under while the block is open.
