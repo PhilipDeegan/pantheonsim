@@ -10129,6 +10129,57 @@ struct Machine {
     return count;
   }
 
+  // The lanes from `lane` (whose address is `addr`) that are active and take consecutive addresses, a byte or a short each, moved with one
+  // call to the memory manager (load_run / store_run with the element as the unit): what lane by lane would do, every element one access, in
+  // lane order. A load widens each element into its lane of `row` (`sign`: sign-extended); `raw_last` gets the last lane's element, what a lane
+  // that reads the same address next takes. Returns how many lanes it did, 0 having done nothing (fewer than two, or the memory manager
+  // refusing: a fault armed, a host mapping, a run not inside one allocation, misaligned), and the lanes then go one at a time. The address of
+  // lane l is `(hi ? hi[l] << 32 | lo[l] : lo[l]) + add`. Out of line, as memory_run is.
+  [[gnu::noinline]] uint32_t narrow_run(Wave& w, bool load, uint32_t lane, uint64_t addr, uint32_t bytes, bool sign, const uint32_t* lo,
+                                        const uint32_t* hi, uint64_t add, uint32_t* row, uint64_t* raw_last) {
+    const uint64_t off_mask = ~(w.exec >> lane);
+    const uint32_t reach = std::min<uint32_t>(off_mask ? static_cast<uint32_t>(__builtin_ctzll(off_mask)) : kLanes, kLanes - lane);
+    uint32_t count = 1;
+    uint64_t next = addr;
+    if (hi) {
+      for (; count < reach && ((static_cast<uint64_t>(hi[lane + count]) << 32 | lo[lane + count]) + add) == (next += bytes); ++count) {
+      }
+    } else {
+      for (; count < reach && (lo[lane + count] + add) == (next += bytes); ++count) {
+      }
+    }
+    if (count < 2) return 0;
+    alignas(8) uint8_t buf[kLanes * 2];
+    MemoryManager& m = at(addr);
+    if (load) {
+      if (!m.load_run(addr, buf, uint64_t{bytes} * count, bytes)) return 0;
+      if (bytes == 1) {
+        if (sign)
+          for (uint32_t i = 0; i < count; ++i) row[lane + i] = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(buf[i])));
+        else
+          for (uint32_t i = 0; i < count; ++i) row[lane + i] = buf[i];
+        *raw_last = buf[count - 1];
+      } else {
+        uint16_t v = 0;
+        for (uint32_t i = 0; i < count; ++i) {
+          std::memcpy(&v, buf + 2 * i, 2);
+          row[lane + i] = sign ? static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(v))) : v;
+        }
+        *raw_last = v;
+      }
+      return count;
+    }
+    if (bytes == 1) {
+      for (uint32_t i = 0; i < count; ++i) buf[i] = static_cast<uint8_t>(row[lane + i]);
+    } else {
+      for (uint32_t i = 0; i < count; ++i) {
+        const uint16_t v = static_cast<uint16_t>(row[lane + i]);
+        std::memcpy(buf + 2 * i, &v, 2);
+      }
+    }
+    return m.store_run(addr, buf, uint64_t{bytes} * count, bytes) ? count : 0;
+  }
+
   // `n` loads of `bytes` each (a warp's lanes), made together by MemoryManager::load_batch. Pairs (`bytes` 8) with an address on a 4-byte
   // boundary but not an 8-byte one -- the lanes of a stencil's load of two neighbouring floats, which the compiler makes one
   // global_load_dwordx2 -- are two word accesses where lane by lane (Machine::load_words) makes them, an aligned pair one 8-byte
@@ -10414,6 +10465,8 @@ struct Machine {
                       : kind == Kind::Narrow ? (narrow_store ? in.src[1].kind == OperandKind::Vgpr && in.src[1].sel == 6 && !dpp_operand
                                                              : in.dst[0].kind == OperandKind::Vgpr && !narrow_dst)
                                              : false);
+    // A byte or a short a lane on consecutive addresses goes to memory as one call (narrow_run), as a run of words does.
+    bool try_nruns = try_batch && kind == Kind::Narrow && a0_vgpr && !in.scale_offset;
     // An atomic's lanes go to memory together (wave_atomics), once, where the lanes can take turns without a lock.
     bool try_atomics = kind == Kind::Atomic && d.peers.empty() && runs_on && (!conc() || lock_free);
     for (uint32_t lane = 0; lane < kLanes; ++lane) {
@@ -10435,6 +10488,22 @@ struct Machine {
           continue;
         }
         try_runs = false;
+      }
+      if (try_nruns) {
+        uint64_t raw = 0;
+        const Operand& data = narrow_store ? in.src[1] : in.dst[0];
+        const uint32_t made = memo && !narrow_store && memo_addr == addr
+                                  ? 0
+                                  : narrow_run(w, !narrow_store, lane, addr, n.bytes, n.sign, w.vgpr[a0.index].data(),
+                                               in.has_saddr ? nullptr : w.vgpr[a0.index + 1].data(),
+                                               (in.has_saddr ? saddr_base : 0) + static_cast<uint64_t>(static_cast<int64_t>(in.offset)),
+                                               w.vgpr[data.index].data(), &raw);
+        if (made) {
+          if (!narrow_store) memo_value = raw, memo_addr = addr + uint64_t{n.bytes} * (made - 1), memo = true;
+          lane += made - 1;
+          continue;
+        }
+        try_nruns = false;
       }
       if (try_atomics) {
         try_atomics = false;
