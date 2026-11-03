@@ -111,18 +111,41 @@ inline void lockstep_note(const char* kernel, uint64_t units, const LockstepShap
 }
 
 // Folds `n` bytes into a running fingerprint (the engines fingerprint a block's registers and
-// program counters to tell a block that is waiting from one that is computing).
+// program counters to tell a block that is waiting from one that is computing). Only equality of two
+// fingerprints of the same block is ever looked at, never a value, so the function is free to be fast:
+// the old one-word-at-a-time chain (xor, multiply, xor-shift: seven cycles a word) was half of the cycles of
+// a decoupled look-back sort. Long inputs are folded by eight independent chains of the same step, a word
+// each in turn, which the core runs side by side; the chains are then folded into `h` in order, so a
+// change of any word still changes the result (each chain's step is a bijection of its state for a given
+// word, and the lanes are combined by the same step).
 inline uint64_t lockstep_fold(uint64_t h, const void* data, size_t n) {
+  constexpr uint64_t kPrime = 0x100000001b3ull;
   const unsigned char* p = static_cast<const unsigned char*>(data);
+  if (n >= 64) {
+    uint64_t s[8];
+    for (unsigned i = 0; i < 8; ++i) s[i] = (h ^ (0x9E3779B97F4A7C15ull * (i + 1))) * kPrime;
+    for (; n >= 64; n -= 64, p += 64) {
+      uint64_t w[8];
+      std::memcpy(w, p, 64);
+      for (unsigned i = 0; i < 8; ++i) {
+        s[i] = (s[i] ^ w[i]) * kPrime;
+        s[i] ^= s[i] >> 29;
+      }
+    }
+    for (unsigned i = 0; i < 8; ++i) {
+      h = (h ^ s[i]) * kPrime;
+      h ^= h >> 29;
+    }
+  }
   for (; n >= 8; n -= 8, p += 8) {
     uint64_t w;
     std::memcpy(&w, p, 8);
-    h = (h ^ w) * 0x100000001b3ull;
+    h = (h ^ w) * kPrime;
     h ^= h >> 29;
   }
   uint64_t w = 0;
   if (n) std::memcpy(&w, p, n);
-  return (h ^ w) * 0x100000001b3ull;
+  return (h ^ w) * kPrime;
 }
 
 // One host thread's part of a lockstep launch, and the one place that decides how resident blocks
