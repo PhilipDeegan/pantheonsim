@@ -4,7 +4,7 @@ description: >
   compile what an earlier build already did. ccache keys an object on the preprocessed source, the compiler and its flags, so a hit
   is the object the compiler would have made, whoever built it; there is no step where a wrong object can be taken for a right one.
   Put it after the checkout and pr-guard, before the configure step, give that step
-  `env: CMAKE_CXX_COMPILER_LAUNCHER: ${{ steps.<id>.outputs.launcher }}` (and the same for CMAKE_C_COMPILER_LAUNCHER), and, in the one job
+  `env: CMAKE_CXX_COMPILER_LAUNCHER` set to this action's `launcher` output (the steps context of this step's id) (and the same for CMAKE_C_COMPILER_LAUNCHER), and, in the one job
   per key that builds everything, `./.github/actions/ccache-save` last. Everything is best effort: no ccache and no way to install it
   means the build runs as it did.
 
