@@ -20,9 +20,22 @@
 # the schedule-only `jit` job of sass-ptx.yml sets.
 # VGPU_JIT_PROGRAMS="sass_tier.sm_86 sass_tier_steps.sm_86" narrows the programs (and drops the random stage); VGPU_TIER_WORK keeps the built programs between runs.
 #
+# VGPU_JIT_SHARD=tier,steps,random,modes runs only those stages of the gate (default: all of them; "programs" is every other program of --full), so
+# that ctest can run them side by side: e2e_sass_jit_shard_tier, _steps, _random and _modes in CMakeLists.txt together are exactly the stages of the
+# whole run, once each. VGPU_JIT_LIST=1 prints the stages a run (with its VGPU_JIT_SHARD) would run, one a line, without building or running anything;
+# tests/ci/check_shard_partition.sh uses it to prove the shards partition the whole.
+#
 # The comparison cannot pass by the JIT doing nothing: sass_tier's statistics must show the generated regions ran at least
 # VGPU_JIT_MIN_PERCENT (default 10) percent of its warp instructions.
 set -uo pipefail
+shard="${VGPU_JIT_SHARD:-}"
+# Is stage $1 (tier, steps, programs, random, modes) in this run's shard?
+want() { [[ -z $shard || ",$shard," == *",$1,"* ]]; }
+if [[ -n ${VGPU_JIT_LIST:-} ]]; then
+  if [[ ${1:-} == --full || -n ${VGPU_JIT_FULL:-} ]]; then stages="tier steps programs random modes"; else stages="tier steps random modes"; fi
+  for st in $stages; do want "$st" && echo "$st"; done
+  exit 0
+fi
 root="$(cd "$(dirname "$0")/../../.." && pwd)"
 . "$root/tests/shim_guard.sh"
 shim="${VGPU_BUILD_DIR:-$root/build}/shim"
@@ -49,9 +62,16 @@ if (( ! full )) && [[ -z $prog_filter ]]; then   # the gate: two programs, built
   prog_filter="sass_tier.sm_86 sass_tier_steps.sm_86"
   export VGPU_TIER_ARCHS="${VGPU_TIER_ARCHS:-sm_86}" VGPU_TIER_PROGRAMS="${VGPU_TIER_PROGRAMS:-sass_tier_steps:75}"
 fi
+if [[ -n $shard ]]; then   # build only what this shard's stages run (sass_tier is also the failure modes' program)
+  want tier || want modes || export VGPU_TIER_NO_SASS_TIER=1
+  want steps || want programs || export VGPU_TIER_PROGRAMS=-
+  if [[ -n ${VGPU_TIER_NO_SASS_TIER:-} && ${VGPU_TIER_PROGRAMS:-} == - ]]; then built_nothing=1; fi
+fi
+if [[ -n ${built_nothing:-} ]]; then rc=0; build_log=""; else
 build_log="$(VGPU_TIER_BUILD_ONLY=1 "$root/nvidia/tests/e2e/run_sass_tier.sh" 2>&1)"; rc=$?
 if grep -q '^SKIP' <<< "$build_log" && ! compgen -G "$work/*.sm_*" >/dev/null; then echo "$build_log" | grep '^SKIP' | head -1; exit 0; fi
 (( rc == 0 )) || { echo "FAIL: building the test programs"; echo "$build_log" | tail -20; exit 1; }
+fi
 
 declare -A gpu=([sm_75]=nvidia/t4 [sm_80]=nvidia/a100 [sm_86]=nvidia/rtx3060 [sm_89]=nvidia/l4 [sm_90]=nvidia/h100
                 [sm_100]=nvidia/b200 [sm_120]=nvidia/rtx5090)
@@ -204,13 +224,18 @@ for f in "$work"/*.sm_*; do
   programs+=("${b%.*} ${b##*.}")
 done
 shopt -u nullglob
-(( ${#programs[@]} )) || { echo "SKIP: no test programs were built"; exit 0; }
-[[ -n ${VGPU_JIT_ONLY_RANDOM:-} ]] || for j in "${programs[@]}"; do check $j; done
+(( ${#programs[@]} )) || [[ -n ${built_nothing:-} ]] || { echo "SKIP: no test programs were built"; exit 0; }
+if [[ -z ${VGPU_JIT_ONLY_RANDOM:-} ]]; then
+  for j in "${programs[@]}"; do
+    case ${j%% *} in sass_tier) st=tier ;; sass_tier_steps) st=steps ;; *) st=programs ;; esac
+    ! want $st || check $j
+  done
+fi
 
 # Random straight-line kernels (jit_random.py): u32 / u64 / float statements over a small pool of variables, guards, loads; blocks of 128, 48 and
 # 33 threads. The tier and the JIT with every region compiled must print the same hashes and counters (VGPU_JIT_RANDOM_SEEDS seeds of
 # VGPU_JIT_RANDOM_KERNELS kernels each; default 3 of 16 with --full, 1 in the gate; VGPU_JIT_RANDOM_ARCH, default sm_86).
-if command -v python3 >/dev/null 2>&1 && [[ -z ${VGPU_JIT_PROGRAMS:-} ]]; then
+if want random && command -v python3 >/dev/null 2>&1 && [[ -z ${VGPU_JIT_PROGRAMS:-} ]]; then
   rarch="${VGPU_JIT_RANDOM_ARCH:-sm_86}"
   if grep -qx "$rarch" <<< "$("$nvcc_bin" --list-gpu-code 2>/dev/null)"; then
     for seed in $(seq 1 "${VGPU_JIT_RANDOM_SEEDS:-$(( full ? 3 : 1 ))}"); do
@@ -231,7 +256,7 @@ fi
 
 # The failure modes: the JIT cannot do its job and the program must not notice (stdout and stderr, the notices aside: VGPU_QUIET).
 prog=sass_tier; arch=sm_86
-if [[ -z ${VGPU_JIT_ONLY_RANDOM:-} && -x "$work/$prog.$arch" ]]; then
+if want modes && [[ -z ${VGPU_JIT_ONLY_RANDOM:-} && -x "$work/$prog.$arch" ]]; then
   bin="$work/$prog.$arch"
   ref="$(runit "$bin" $arch VGPU_TIER=1)"
   mode() {
