@@ -198,8 +198,9 @@ void MemoryManager::remember_freed(uint64_t ptr, uint64_t size) {
 }
 
 void MemoryManager::free(uint64_t ptr) {
-  if (card_resident_.load(std::memory_order_relaxed) > 0)
-    if (CardGate* gate = card_gate_.load(std::memory_order_acquire)) gate->before_free(ptr);
+  // The gate is told of every free, not only while some allocation holds a card copy: it tracks allocations that have none (a launch the size rule
+  // refused still registers them), and an entry that outlives its allocation points into a freed record and reads freed memory.
+  if (CardGate* gate = card_gate_.load(std::memory_order_acquire)) gate->before_free(ptr);
   // Quiet: a free says which allocation it takes (note_free) and leaves every other answer a thread
   // remembered as it was.
   ExclusiveGuard table_guard(table_lock_.get(), /*quiet=*/true);
@@ -1105,8 +1106,7 @@ void MemoryManager::unmap_host(uint64_t addr) {
 }
 
 void MemoryManager::free_all() {
-  if (card_resident_.load(std::memory_order_relaxed) > 0)
-    if (CardGate* gate = card_gate_.load(std::memory_order_acquire)) gate->before_free(UINT64_MAX);
+  if (CardGate* gate = card_gate_.load(std::memory_order_acquire)) gate->before_free(UINT64_MAX);
   // The heap's blocks go in the sweep below with every other allocation; its
   // record of them, and the budget they held, go here.
   std::lock_guard<std::mutex> heap_guard(heap_->mu);
@@ -1469,8 +1469,11 @@ bool MemoryManager::access_at(uint64_t va, bool* readable, bool* writable) const
 
 uint64_t MemoryManager::share(uint64_t ptr, const std::string& path) {
   // The exported file is the allocation from here on: whatever only the card holds comes back first.
-  if (card_resident_.load(std::memory_order_relaxed) > 0)
-    if (CardGate* gate = card_gate_.load(std::memory_order_acquire)) gate->before_access(ptr, UINT64_MAX / 2, false);
+  // (the allocation leaves live_ below, for a file: the gate drops what it tracks of it as well)
+  if (CardGate* gate = card_gate_.load(std::memory_order_acquire)) {
+    if (card_resident_.load(std::memory_order_relaxed) > 0) gate->before_access(ptr, UINT64_MAX / 2, false);
+    gate->before_free(ptr);
+  }
   ExclusiveGuard table_guard(table_lock_.get());
   if (const auto it = shared_.find(ptr); it != shared_.end()) return it->second.size;
   const auto live = live_.find(ptr);
