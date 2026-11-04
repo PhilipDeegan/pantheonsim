@@ -415,7 +415,10 @@ bool enter_rootfs(const RootfsInput& in, RootfsResult* result) {
     return false;
   }
   ::rmdir("/.oldroot");
-  if (::chdir("/root") != 0) ::chdir("/");
+  if (::chdir("/root") != 0 && ::chdir("/") != 0) {
+    err = errno_text("cannot enter the new root");
+    return false;
+  }
   return true;
 }
 
