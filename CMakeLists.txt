@@ -1439,6 +1439,8 @@ add_test(NAME test_memcount_forms_simd_base COMMAND test_memcount_forms)
 set_tests_properties(test_memcount_forms_simd_base PROPERTIES ENVIRONMENT "VGPU_SIMD=base" TIMEOUT 1500)
 # The table of bank passes by warp shape (sass_bank_passes_memo), against the definition of the passes.
 vgpu_unit_test(test_bank_memo)
+# The bitmap counting of the passes of 1 to 4 byte accesses (detail::bank_passes_bitmap), against the definition of the passes.
+vgpu_unit_test(test_bank_bitmap)
 # The single-lookup atomic read-modify-write and the one-lookup texel read, against the per-access code they replace.
 vgpu_unit_test(test_atom_rmw)
 # Module::code_at (a binary search over the code sections) against the scan it replaced.
