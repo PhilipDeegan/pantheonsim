@@ -47,7 +47,8 @@ code() {  # code <command...>: the exit status only
 own() {  # own <dir>: filters `ls -A <dir>` of the session
   local d=$1 skip="-"
   [[ "$build/" == "$d/"* ]] && { skip=${build#"$d"/}; skip=${skip%%/*}; }
-  grep -vx -e "$skip" | grep -v '^vgpu-session-' || true
+  # (in /opt: the host's toolkits, which the session has where a real machine does)
+  grep -vx -e "$skip" | grep -v '^vgpu-session-' | { [[ $d == /opt ]] && grep -v -e '^rocm' -e '^cuda' || cat; } || true
 }
 
 # ---------------------------------------------------------------- argument checks (no namespaces needed)
