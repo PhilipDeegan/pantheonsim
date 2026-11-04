@@ -6878,7 +6878,7 @@ Three copies of A's bytes give 14.8 / 14.7 / 15.7 / 15.7, so `p_lane` moves by 6
 * The PolyBench programs here are the MINI datasets scaled by the corpus (0.1 s to 120 s); GEMM-class programs measure at 0.5 s and mostly time the host reference check as well.
 * Zen 4 was not part of this round. Timed windows were at load 4 to 7 from other sessions.
 
-## Round sp21 (zero-fill and block setup) (branch `sp21-zero`, base 85ec63a5)
+## Round sp21z (zero-fill and block setup) (branch `sp21-zero`, base 85ec63a5)
 
 Two overheads from a survey of main: the zero-fill of device-memory chunks (HeCBench `atomicCost`: 7.2 M page faults, 8.8 s of 31 s in the kernel) and the per-block set-up of the SASS executor (`init_block`: rodinia gaussian 12%, HeCBench `blockAccess` 17%). Host: server3 (Ryzen 7 PRO 8840U, Zen 4), Release GCC 13.3 LTO, `VGPU_THREADS=1`, `perf stat` instructions:u and cycles:u (plus page faults, task-clock, user and system time), cpu 12, alternating A B (order flipped each pair), 15 runs (21 for the 4 ms row), three fresh copies of each side's library directory used in rotation, A = main 85ec63a5 built here and frozen, B = this branch. Mann-Whitney p. Standard output with the timing lines dropped identical in every run of both sides. Load 2 to 13 from other sessions on other cpus.
 
