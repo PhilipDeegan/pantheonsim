@@ -156,6 +156,12 @@ for t in /usr/local/cuda /opt/rocm; do
   out=$(rs -c "test -e $t && echo yes || echo no")
   expect "$t is in the session exactly when the host has it" "$host" "$out"
 done
+for t in /usr/local/cuda /opt/rocm; do   # where the host has a toolkit: its files, read-only
+  [[ -d $t ]] || continue
+  expect "$t lists what the host's does" "$(ls "$t")" "$(rs -c "ls $t")"
+  out=$(rs -c "touch $t/vgpu-rootfs-probe 2>&1")
+  contains "$t is read-only" "Read-only file system" "$out"
+done
 out=$(timeout 60 "$vgpu" shell -y --rootfs </dev/null 2>&1)
 contains "the banner says the root is private" "Root     : private" "$out"
 contains "the banner lists the session's own directories" "the session's own" "$out"
