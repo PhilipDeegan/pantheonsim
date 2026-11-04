@@ -3746,10 +3746,11 @@ set_tests_properties(e2e_host_gpu_stub PROPERTIES
 
 # Tier 2 (src/sass/jit.hpp, VGPU_JIT=1) against the tier, on the same programs: results and every counter, with the JIT forced on at once, one
 # and four host threads, a warm cache, the faults of sass_tier_steps, and every way the JIT can fail (the output must not change).
-# Four shards (VGPU_JIT_SHARD, run_sass_jit.sh): sass_tier's variants, sass_tier_steps' faults and limits, the random kernels, and the failure
-# modes. One process it took 1611 s in the unit job, most of it synchronous host-compiler runs; the shards are independent (each has its own cache
+# Six shards (VGPU_JIT_SHARD, run_sass_jit.sh): sass_tier's variants, sass_tier_steps' faults and region caps, its two step-limit bisections
+# (gather, shared), the random kernels, and the failure modes. One process it took 1611 s in the unit job
+# (the steps stage alone 1089 s, most of it synchronous host-compiler runs); the shards are independent (each has its own cache
 # directories) and together are the stages of the whole run, once each (e2e_sass_jit_shards_partition proves it).
-vgpu_shard_tests(e2e_sass_jit ENV_VAR VGPU_JIT_SHARD LIST_ENV VGPU_JIT_LIST SPECS tier steps random modes
+vgpu_shard_tests(e2e_sass_jit ENV_VAR VGPU_JIT_SHARD LIST_ENV VGPU_JIT_LIST SPECS tier steps steps_gather steps_shared random modes
   COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_sass_jit.sh
   ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
   PROPERTIES DEPENDS vgpucudart SKIP_REGULAR_EXPRESSION "^SKIP:" TIMEOUT 3600)

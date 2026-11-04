@@ -20,8 +20,8 @@
 # the schedule-only `jit` job of sass-ptx.yml sets.
 # VGPU_JIT_PROGRAMS="sass_tier.sm_86 sass_tier_steps.sm_86" narrows the programs (and drops the random stage); VGPU_TIER_WORK keeps the built programs between runs.
 #
-# VGPU_JIT_SHARD=tier,steps,random,modes runs only those stages of the gate (default: all of them; "programs" is every other program of --full), so
-# that ctest can run them side by side: e2e_sass_jit_shard_tier, _steps, _random and _modes in CMakeLists.txt together are exactly the stages of the
+# VGPU_JIT_SHARD=tier,steps,steps_gather,steps_shared,random,modes runs only those stages of the gate (default: all of them; "programs" is every other program of --full), so
+# that ctest can run them side by side: e2e_sass_jit_shard_tier, _steps, _steps_gather, _steps_shared, _random and _modes in CMakeLists.txt together are exactly the stages of the
 # whole run, once each. VGPU_JIT_LIST=1 prints the stages a run (with its VGPU_JIT_SHARD) would run, one a line, without building or running anything;
 # tests/lint/check_shard_partition.sh uses it to prove the shards partition the whole.
 #
@@ -29,10 +29,10 @@
 # VGPU_JIT_MIN_PERCENT (default 10) percent of its warp instructions.
 set -uo pipefail
 shard="${VGPU_JIT_SHARD:-}"
-# Is stage $1 (tier, steps, programs, random, modes) in this run's shard?
+# Is stage $1 (tier, steps, steps_gather, steps_shared, programs, random, modes) in this run's shard?
 want() { [[ -z $shard || ",$shard," == *",$1,"* ]]; }
 if [[ -n ${VGPU_JIT_LIST:-} ]]; then
-  if [[ ${1:-} == --full || -n ${VGPU_JIT_FULL:-} ]]; then stages="tier steps programs random modes"; else stages="tier steps random modes"; fi
+  if [[ ${1:-} == --full || -n ${VGPU_JIT_FULL:-} ]]; then stages="tier steps steps_gather steps_shared programs random modes"; else stages="tier steps steps_gather steps_shared random modes"; fi
   for st in $stages; do want "$st" && echo "$st"; done
   exit 0
 fi
@@ -64,7 +64,7 @@ if (( ! full )) && [[ -z $prog_filter ]]; then   # the gate: two programs, built
 fi
 if [[ -n $shard ]]; then   # build only what this shard's stages run (sass_tier is also the failure modes' program)
   want tier || want modes || export VGPU_TIER_NO_SASS_TIER=1
-  want steps || want programs || export VGPU_TIER_PROGRAMS=-
+  want steps || want steps_gather || want steps_shared || want programs || export VGPU_TIER_PROGRAMS=-
   if [[ -n ${VGPU_TIER_NO_SASS_TIER:-} && ${VGPU_TIER_PROGRAMS:-} == - ]]; then built_nothing=1; fi
 fi
 if [[ -n ${built_nothing:-} ]]; then rc=0; build_log=""; else
@@ -163,6 +163,7 @@ check() {
   if [[ $p == sass_tier_steps && -z $why ]]; then
     # Faults deep into a run of straight instructions, and the step limit, with the generated code compiled with and without -fexceptions.
     local f fa fb fc thr=0 fsf fenv=(VGPU_GPU=${gpu[$arch]} VGPU_THREADS=1 VGPU_COUNTERS=1 VGPU_MAX_STEPS=50000 LD_LIBRARY_PATH="$shim" $(both_shims_env "$shim"))
+    if want steps; then
     for f in gather scatter local shared atomic trap forever; do
       fa="$(cd "$work" && env "${fenv[@]}" VGPU_TIER=1 timeout 300 "$bin" fault $f 2>&1)"
       fsf="$work/fault.$f.stats"; rm -f "$fsf"
@@ -176,8 +177,10 @@ check() {
     # The step budget is checked once for a whole region (steps + k): a limit that falls inside the region the fault is in must give the
     # limit's error, not the fault's. For each fault that is thrown inside a region: the smallest VGPU_MAX_STEPS at which the tier reports the
     # fault (found by bisection), then the limits just below it, tier against JIT.
+    fi
     local lim la lb lo hi mid off
     for f in gather shared; do
+      want steps_$f || continue
       lo=1; hi=20000
       while (( lo < hi )); do
         mid=$(( (lo + hi) / 2 ))
@@ -196,6 +199,7 @@ check() {
     # region of 257 ops (the 256-instruction run, then the one that ends it) must be left to the tier. Output of the whole program, all
     # three limits against the tier's.
     local cap co
+    if want steps; then
     for cap in 255 256 257; do
       co="$(runit "$bin" $arch "${jitenv[@]}" VGPU_JIT_MAX_REGION=$cap "VGPU_JIT_CACHE=$cache-cap$cap")"
       [[ "$a" == "$co" ]] || why="${why:+$why; }regions of up to $cap ops print differently from the tier"
@@ -203,6 +207,7 @@ check() {
     # The comparison above means something only if faults really were thrown from inside generated regions.
     (( thr >= ${VGPU_JIT_MIN_THROWS:-2} )) || why="${why:+$why; }only $thr of the faults were thrown inside a generated region"
     fault_throws=$thr
+    fi
   fi
   if [[ -n $why ]]; then
     echo "FAIL $arch $p: $why"
@@ -227,8 +232,11 @@ shopt -u nullglob
 (( ${#programs[@]} )) || [[ -n ${built_nothing:-} ]] || { echo "SKIP: no test programs were built"; exit 0; }
 if [[ -z ${VGPU_JIT_ONLY_RANDOM:-} ]]; then
   for j in "${programs[@]}"; do
-    case ${j%% *} in sass_tier) st=tier ;; sass_tier_steps) st=steps ;; *) st=programs ;; esac
-    ! want $st || check $j
+    case ${j%% *} in
+      sass_tier) want tier && check $j ;;
+      sass_tier_steps) { want steps || want steps_gather || want steps_shared; } && check $j ;;   # check runs only the sections of the stages it has
+      *) want programs && check $j ;;
+    esac
   done
 fi
 
