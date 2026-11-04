@@ -14,6 +14,11 @@ release says what runs and what it produces, never how fast a real GPU would run
   `.global` and `.const` arrays. The index counts elements of the declared type; one outside the array is refused.
 - PTX: a `.func` can take its parameters and return its value in `.reg`s (`.func (.reg .b32 r) f(.reg .u64 data)`), and a call
   (direct, or through a `.callprototype` with `.reg`s) passes registers or numbers for them.
+- cuDSS 1.0 runs. The simulator's cuDSS is now presented as `libcudss.so.1` (1.0: its version macros,
+  `cudaDataType_t` signatures, `cudssSetJitCacheDir` and the pinned-memory handler functions, the four new
+  config parameters, Bunch-Kaufman accepted) with `libcudss.so.0` (0.8) kept beside it, unchanged, so programs
+  built against either major run. A program built against NVIDIA's 1.0, such as SCS's `run_tests_cudss`, no
+  longer stops with "needs libcudss.so.1, but this build of the simulator has no libcudss.so" (#426).
 - A kernel run from PTX no longer fails to launch when its register estimate is up to twice the block's register
   file. The estimate is the peak of live virtual registers and ptxas needs fewer, so ggml's `rms_norm_f32`
   (88 estimated, 64 allowed at 1,024 threads) stopped Ollama running Gemma 3 on the RTX PRO 6000 profile, the one
