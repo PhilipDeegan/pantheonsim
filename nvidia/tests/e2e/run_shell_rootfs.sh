@@ -124,6 +124,9 @@ extra=""
 for n in $out; do [[ "$allowed" == *" $n "* ]] || extra+="$n "; done
 expect "/dev holds only the minimal nodes" "" "$extra"
 
+out=$(rs -c 'head -c 4 /dev/urandom | wc -c; echo x > /dev/null && echo null; head -c 3 /dev/zero | wc -c; ls /dev/pts')
+expect "/dev/urandom, /dev/null, /dev/zero and a devpts work" $'4\nnull\n3\nptmx' "$out"
+
 # --- the system still works, read-only
 out=$(rs -c 'ls /usr/bin | head -1 >/dev/null && sh -c "echo from-sh" && cat /etc/hostname 2>/dev/null; true')
 contains "ls and sh run from the host's /usr" "from-sh" "$out"
