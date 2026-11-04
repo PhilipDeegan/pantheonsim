@@ -6985,3 +6985,31 @@ Survived, equivalent: the run taken in the constant window with the first window
 * alignedTypes and Rodinia not A/B'd (above); 2MM and FDTD-2D with 7 runs; the box carried load 3 to 25 from other sessions, so the cycle columns are less sharp than the instruction columns; the cycles profile of the first table was too sparse to use.
 * A strided gather (ATAX's `A[i][k]`) still goes through the full address pass, which needs its addresses; a progression of any stride other than 0 and the access size would need its address fill when the access falls back, and the gain there is the 8 stores of a kernel that is about 115 instructions.
 * The PTX engine and the AMD engine are untouched.
+
+## Round sp19 (PTX): a warp's global load or store goes to memory as it stands, and the lockstep fingerprint folds eight words at a time (branch `sp19-ptx`, merged with `origin/main` dad11eee)
+
+The question: the PTX interpreter is about 2.2x slower than the SASS tier on the same program; what in `exec_ld` / `exec_st` and in the lockstep launch costs the most that can go without a change of any result, counter or error text? Measured on server3 (Zen 4), one thread, `VGPU_SASS=0`, `nvidia/rtx3060`, programs from the `tools/bench/real` corpora, Release, GCC 13.3, each side built here (A = `origin/main` dad11eee, B = A + this branch), `perf stat -e instructions:u,cycles:u`, pinned to cpu 13.
+
+### What changed (commit aa14743f, rebased by merge)
+1. `exec_ld` / `exec_st`: for a full warp of one value each (`n == 1`, 32 active lanes, power-of-two width, aligned) the addresses already in `at` go to `MemoryManager` as they are (`load_broadcast` when every lane names one address, `load_batch` otherwise; `store_strided` when the lanes are on a constant stride, `store_batch` otherwise) and the values come back into the register's row without a copy. Anything the memory manager declines has touched nothing and takes the old path, so counters, errors and memory are those of the lane loop. `VGPU_FASTPATH=0` keeps the lane loop as the reference.
+2. `lockstep_fold` (the fingerprint of a block's registers, taken by the SASS, PTX and AMD lockstep launches to tell a waiting block from a computing one): input of 64 bytes or more is folded by eight independent chains of the old step; only equality of two fingerprints is looked at.
+
+### Results (A/B alternating, 15 pairs, three fresh copies of each side's library, A/A control with the same script)
+Outputs: `real.py` with `VGPU_SASS=0`, stdout and stderr of one run per side hashed with the timing lines dropped, **identical** for SYRK, SYR2K, ATAX, GEMVER, 3MM, 2DCONV, lud, needle, hotspot, radixsort2 (PASS), sortKV (PASS); `rc` 0 on both sides. Instruction counts are deterministic, so their rows are exact; cycles were taken at load 1.5 to 2.8 (the first run, at load 13 to 25, gave the same instruction rows and cycles rows that moved with the load, which is why the cycles rows below are from the second run).
+
+| program | instructions B/A | cycles B/A (load < 3) | cycles A/A |
+|---|---:|---:|---:|
+| polybench SYRK | 0.6701 | 0.6597 | 0.9957 |
+| polybench ATAX | 0.6762 | 0.6750 | 0.9957 |
+| hecbench radixsort2 | 0.9257 | 0.6558 | 1.0012 |
+| hecbench sortKV | 0.9057 | 0.6043 | 1.0014 |
+| polybench GEMVER | 0.7874 | (load 13 to 25) | |
+| polybench 3MM | 0.7264 | (load 13 to 25) | |
+| rodinia hotspot | 0.9907 | (load 13 to 25) 1.005 | |
+| polybench 2DCONV | 1.0005 | (load 13 to 25) 0.990 | |
+A/A instructions are exactly 1.0000 in every row. One uncontrolled wall-clock run per side at load 2 (`real_ptx.py`): SYRK 18.69 s to 12.47 s, SYR2K 32.45 to 20.94, ATAX 3.56 to 2.46, 3MM 5.49 to 4.34, GEMVER 1.51 to 1.23, radixsort2 13.72 to 9.29, sortKV 1.56 to 1.05; hotspot, 2DCONV, needle and lud within 3%.
+The sort programs' instruction count falls 7 to 9% but their cycles 34 to 40%: the saving is the fold's dependent multiply chain (seven cycles a word, one word at a time), which is few instructions and many cycles.
+
+### Mutations (built and run on server3; `tests/unit/test_lockstep_fold.cpp`, `tests/unit/test_ptx_paths.cpp`)
+Killed: fold lane 7 left out of the combination, chain 0 left out, tail dropped, last word of a 64-byte block skipped; load broadcast taken for every warp, or the batch reversed/one lane short; store stride one element too large, constant-stride test ignored, values taken from the neighbouring lane, partial mask taken (killed by the new `guarded` rows), last lane left out of the stride test (killed by the new `last lane off the stride` rows).
+Survived, judged equivalent for the property each guards: the running value ignored when the eight chains are seeded (it still enters in the final combination); the `>> 29` of the chain step removed and `n >= 64` changed to `n > 64` (a different fold, still one in which any change of any byte changes the value); the alignment test ahead of the batch (`load_batch` / `store_batch` decline a misaligned warp themselves); `fast_enabled_` dropped from the new condition (the reference run of the test then takes the same path); a partial mask taken by the load (the register write is masked and inactive lanes' valid addresses are only read). Survived and not testable here: the lane number carried into the error when `store_batch` runs out of host memory for a chunk (`failed_at`).

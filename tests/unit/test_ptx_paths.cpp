@@ -289,7 +289,7 @@ $LW:
 // of a row-major array; negative: descending; `gather`: no constant stride), eight accesses per lane 64 bytes apart. A load sums what it read
 // into out[tid]; a store writes a value per lane and access and then every lane sums the whole array, so an access that went to the wrong
 // place or not at all shows in out. `fix` edits the address (a lane off its alignment).
-std::string global_words_body(bool store, const char* ty, int stride, int start, const char* fix, bool gather = false) {
+std::string global_words_body(bool store, const char* ty, int stride, int start, const char* fix, bool gather = false, bool guarded = false) {
   std::string b = R"(    add.u64 %rd5, %rd1, 1024;
     mov.u32 %r10, 0;
 $FILL:
@@ -307,14 +307,19 @@ $FILL:
   else
     b += "    mul.wide.s32 %rd6, %r1, " + std::to_string(stride) + ";\n";
   b += "    add.s64 %rd7, %rd5, %rd6;\n    add.s64 %rd7, %rd7, " + std::to_string(start) + ";\n";
-  b += std::string(fix) + "    mov.u32 %r14, 0;\n    mov.u32 %r10, 0;\n$ACC:\n";
+  b += std::string(fix) + "    mov.u32 %r14, 0;\n    mov.u32 %r10, 0;\n";
+  // `guarded`: only the first 13 lanes of the warp make the access, but every lane's address is a good one (a full warp's addresses with
+  // part of the warp predicated off must not reach memory for the lanes that are off).
+  if (guarded) b += "    setp.lt.u32 %p3, %r1, 13;\n";
+  b += "$ACC:\n";
+  const std::string g = guarded ? "@%p3 " : "";
   const std::string t = ty;
   if (store) {
-    b += "    mad.lo.u32 %r12, %r2, 7, %r10;\n    st.global." + t + " [%rd7], %r12;\n";
+    b += "    mad.lo.u32 %r12, %r2, 7, %r10;\n    " + g + "st.global." + t + " [%rd7], %r12;\n";
   } else if (t == "u64") {
-    b += "    ld.global.u64 %rd6, [%rd7];\n    cvt.u32.u64 %r13, %rd6;\n    mad.lo.u32 %r14, %r14, 31, %r13;\n";
+    b += "    " + g + "ld.global.u64 %rd6, [%rd7];\n    cvt.u32.u64 %r13, %rd6;\n    mad.lo.u32 %r14, %r14, 31, %r13;\n";
   } else {
-    b += "    ld.global." + t + " %r13, [%rd7];\n    mad.lo.u32 %r14, %r14, 31, %r13;\n";
+    b += "    " + g + "ld.global." + t + " %r13, [%rd7];\n    mad.lo.u32 %r14, %r14, 31, %r13;\n";
   }
   b += "    add.s64 %rd7, %rd7, 64;\n    add.u32 %r10, %r10, 1;\n    setp.lt.u32 %p1, %r10, 8;\n    @%p1 bra $ACC;\n";
   if (store)
@@ -420,6 +425,14 @@ VTEST(a_warp_of_global_words_matches_the_lane_loop) {
         same((what + " gather").c_str(), global_words_body(store, sz.ty, 0, 0, none, true), 1, threads, 0);
         same((what + " misaligned lane").c_str(), global_words_body(store, sz.ty, 128, 256, misaligned), 1, threads, 0);
         same((what + " stride 12").c_str(), global_words_body(store, sz.ty, 12, 256, none), 1, threads, 0);
+        // On one stride but for the last lane (the stride test must look at every lane), and the same with lane 1 off the stride.
+        const char* last_off = "    setp.eq.u32 %p2, %r1, 31;\n    @%p2 add.u64 %rd7, %rd7, 8;\n";
+        const char* second_off = "    setp.eq.u32 %p2, %r1, 1;\n    @%p2 add.u64 %rd7, %rd7, 8;\n";
+        same((what + " last lane off the stride").c_str(), global_words_body(store, sz.ty, 128, 256, last_off), 1, threads, 0);
+        same((what + " lane 1 off the stride").c_str(), global_words_body(store, sz.ty, 128, 256, second_off), 1, threads, 0);
+        same((what + " guarded, consecutive").c_str(), global_words_body(store, sz.ty, sz.bytes, 256, none, false, true), 1, threads, 0);
+        same((what + " guarded, strided").c_str(), global_words_body(store, sz.ty, 128, 256, none, false, true), 1, threads, 0);
+        same((what + " guarded, one address").c_str(), global_words_body(store, sz.ty, 0, 256, none, false, true), 1, threads, 0);
         same((what + " past the array").c_str(), global_words_body(store, sz.ty, 1024, 256, none), 1, threads, 0);
       }
     }
