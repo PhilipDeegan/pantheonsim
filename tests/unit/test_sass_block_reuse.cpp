@@ -9,13 +9,16 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <vector>
 
 #include "vgpu/error.hpp"
 #include "vgpu/exec/launch.hpp"
+#include "vgpu/exec/tcgen05.hpp"
 #include "vgpu/exec/worker_pool.hpp"
 #include "vgpu/memory.hpp"
 #include "vgpu/registry.hpp"
@@ -58,8 +61,8 @@ struct Kernel {
   std::vector<Insn> code;
 };
 
-// A cubin for sm_86 with the kernels given, each taking one 8-byte pointer.
-std::string make_cubin(const std::vector<Kernel>& kernels) {
+// A cubin for sm_86 (or `sm`) with the kernels given, each taking one 8-byte pointer.
+std::string make_cubin(const std::vector<Kernel>& kernels, int sm = 86) {
   std::string names("\0.shstrtab\0", 11);
   std::vector<uint32_t> text_name, info_name;
   for (const Kernel& k : kernels) {
@@ -101,7 +104,7 @@ std::string make_cubin(const std::vector<Kernel>& kernels) {
   }
   out[0] = 0x7f, out[1] = 'E', out[2] = 'L', out[3] = 'F', out[4] = 2, out[5] = 1, out[6] = 1, out[7] = 0x41, out[8] = 8;
   const uint16_t type = 2, machine = 190, shentsize = 64, shnum = static_cast<uint16_t>(2 + 2 * kernels.size()), shstrndx = 1;
-  const uint32_t flags = 0x06000002u | (86u << 8);
+  const uint32_t flags = 0x06000002u | (static_cast<uint32_t>(sm) << 8);
   std::memcpy(&out[16], &type, 2), std::memcpy(&out[18], &machine, 2);
   std::memcpy(&out[0x28], &shoff, 8), std::memcpy(&out[0x30], &flags, 4);
   std::memcpy(&out[0x3a], &shentsize, 2), std::memcpy(&out[0x3c], &shnum, 2), std::memcpy(&out[0x3e], &shstrndx, 2);
@@ -109,27 +112,33 @@ std::string make_cubin(const std::vector<Kernel>& kernels) {
 }
 
 struct Env {
+  int sm;
   MemoryManager mem{1 << 24};
-  DeviceProfile prof = load_gpu("nvidia/a10");   // sm_86
+  DeviceProfile prof;
+  explicit Env(int sm_ = 86) : sm(sm_), prof(load_gpu(sm_ == 86 ? "nvidia/a10" : sm_ == 90 ? "nvidia/h100" : "nvidia/b200")) {}   // sm_86, sm_90, sm_100
   std::shared_ptr<sass::Module> load(const std::vector<Kernel>& kernels) {
     for (const Kernel& k : kernels)
       for (size_t i = 0; i < k.code.size(); ++i) {
-        const sass::Instr ins = sass::decode(k.code[i].w, 16 * i, 86);
-        if (sass::to_text(ins) != k.code[i].text)
-          throw vtest::Failure(k.name + " word " + std::to_string(i) + " is \"" + sass::to_text(ins) + "\", not \"" + k.code[i].text + "\"");
+        const sass::Instr ins = sass::decode(k.code[i].w, 16 * i, sm);
+        std::string want = k.code[i].text;
+        if (sm >= 90 && want.rfind("STG.E [", 0) == 0) want.insert(6, "desc[UR4]");   // (from sm_90 a store names its cache-policy descriptor; UR4 reads zero)
+        if (sass::to_text(ins) != want)
+          throw vtest::Failure(k.name + " word " + std::to_string(i) + " is \"" + sass::to_text(ins) + "\", not \"" + want + "\"");
       }
-    const std::string c = make_cubin(kernels);
+    const std::string c = make_cubin(kernels, sm);
     return sass::load(reinterpret_cast<const uint8_t*>(c.data()), c.size(), mem, prof);
   }
   std::shared_ptr<sass::Module> load(const std::vector<Insn>& code) { return load(std::vector<Kernel>{{"k", code}}); }
   // Runs the module's kernel over `blocks` blocks of `threads`, each storing to out[block]; returns out.
-  std::vector<uint32_t> run(sass::Module& m, uint32_t blocks, uint32_t threads, const char* kernel = "k", exec::LaunchStats* stats = nullptr) {
+  std::vector<uint32_t> run(sass::Module& m, uint32_t blocks, uint32_t threads, const char* kernel = "k", exec::LaunchStats* stats = nullptr,
+                              uint32_t shared_bytes = 0) {
     const uint64_t out = mem.alloc(blocks * 4);
     const std::vector<uint32_t> poison(blocks, 0x5A5A5A5Au);
     mem.write(out, poison.data(), blocks * 4);
     exec::LaunchConfig cfg;
     cfg.grid = {blocks, 1, 1};
     cfg.block = {threads, 1, 1};
+    cfg.shared_bytes = shared_bytes;
     std::vector<uint8_t> arg(8);
     std::memcpy(arg.data(), &out, 8);
     const exec::LaunchStats st = sass::launch(m, kernel, cfg, {arg}, mem, prof);
@@ -276,6 +285,196 @@ VTEST(a_diverged_warp_votes_among_the_lanes_that_run_it) {
   // (a block of 20 threads: the lanes past the block never exist)
   const std::vector<uint32_t> few = run_words(e, *m, 20);
   for (uint32_t l = 0; l < 20; ++l) VCHECK_EQ(few[l], l < 8 ? 0xffu : 1u);
+}
+
+
+// ---- state beyond the warps: block barriers, mbarriers, warpgroup MMAs, Tensor Memory, and the uniform registers of sm_100 ----
+// Runner::init_block sets these again only when a block may have changed them (a flag on the barriers, an empty() test, TensorMemory::pristine()).
+// Each test leaves one of them in a state a new block must not see, then runs a block that would misbehave if it did. In a debug build init_block
+// also compares every warp, barrier, mbarrier, warpgroup MMA and Tensor Memory with a new one's, so reaching the state is enough there.
+
+// The out pointer is at c[0x0][0x160] for any architecture here: the cubins have no PARAM_CBANK record, so the parameters start at the default base
+// (a real cubin from sm_90 says 0x210).
+Insn ptr_lo(int) { return kPtrLo; }
+Insn ptr_hi(int) { return kPtrHi; }
+std::vector<Insn> head(int sm) { return {kCtaid, ptr_lo(sm), ptr_hi(sm), kAddr}; }
+std::vector<Insn> cat(std::vector<Insn> a, const std::vector<Insn>& b) {
+  a.insert(a.end(), b.begin(), b.end());
+  return a;
+}
+std::string hex(uint32_t v) {
+  char b[16];
+  std::snprintf(b, sizeof b, "0x%x", v);
+  return b;
+}
+// UMOV URn, imm and MOV R9, URn for any uniform register (8 bits from sm_100).
+Insn umov(unsigned ur, uint32_t imm) {
+  static std::vector<std::string> keep;   // (the text outlives the Insn)
+  keep.reserve(64);
+  keep.push_back("UMOV UR" + std::to_string(ur) + ", " + hex(imm));
+  return {0x000fe20000000000ull, 0x0000000000007882ull | uint64_t{ur} << 16 | uint64_t{imm} << 32, keep.back().c_str()};
+}
+Insn r9_from_ur(unsigned ur) {
+  static std::vector<std::string> keep;
+  keep.reserve(64);
+  keep.push_back("MOV R9, UR" + std::to_string(ur));
+  return {0x000fc80008000f00ull, 0x0000000000097c02ull | uint64_t{ur} << 32, keep.back().c_str()};
+}
+
+// A barrier some of whose threads have arrived is not there in the next block, launch or kernel: a block of one warp arrives at barrier 1, which
+// waits for 128 threads (BAR.ARV does not wait, so the block ends with the barrier a quarter full); the next kernel's four warps then wait on it
+// for 128 threads, and complete only if it starts empty. (A barrier that kept the earlier warp would complete early, and the fourth warp would wait
+// for ever.)
+const Insn kBarArv = {0x000fec0000002000ull, 0x0042000000007b1dull, "BAR.ARV 0x1, 0x80"};
+const Insn kBarSync = {0x000fe20000010000ull, 0x0042000000007b1dull, "BAR.SYNC.DEFER_BLOCKING 0x1, 0x80"};
+
+VTEST(a_barrier_left_part_full_by_a_block_is_empty_in_the_next_block_and_the_next_launch) {
+  OneThread one;
+  for (int sm : {86, 90, 100}) {
+    Env e(sm);
+    const auto arrives = e.load({kBarArv, kExit});
+    const auto syncs = e.load(cat(head(sm), {kBarSync, kStoreR0, kExit}));
+    for (int round = 0; round < 3; ++round) {
+      e.run(*arrives, 1, 32);
+      const std::vector<uint32_t> got = e.run(*syncs, 1, 128);
+      VCHECK_EQ(got[0], 0u);
+      // (a grid of blocks of one warp each: the barrier has one block's arrival at a time, and never completes)
+      e.run(*arrives, 3, 32);
+      const std::vector<uint32_t> again = e.run(*syncs, 2, 128);
+      VCHECK_EQ(again[0], 0u);
+      VCHECK_EQ(again[1], 1u);
+    }
+  }
+}
+
+// An mbarrier a block touched (a SYNCS.ARRIVE makes the side record its transaction count lives in) is gone in the next block, launch and kernel.
+// One thread of one block expects 64 transaction bytes on the mbarrier at shared offset 0 and ends; a thread of the next block makes the barrier's
+// last arrival (0x100000 of them) and reads the word the arrival left. The phase flips only if no transaction is still due: a record kept from the
+// earlier block would hold it back, and the word's phase bit would read 0 and not 1.
+const Insn kSetR0To64 = {0x000fc60000000f00ull, 0x0000004000007802ull, "MOV R0, 0x40"};
+const Insn kSetR6ToCount = {0x000fc60000000f00ull, 0x0010000000067802ull, "MOV R6, 0x100000"};
+const Insn kMovR9R11 = {0x000fc80000000f00ull, 0x0000000b00097202ull, "MOV R9, R11"};
+const Insn kExpectTx = {0x000fe20008300404ull, 0x00000000ffff79a7ull, "SYNCS.ARRIVE.TRANS64.RED.A0TR RZ, [UR4], R0"};
+const Insn kArriveAll = {0x000fe20008500004ull, 0x00000006ffff79a7ull, "SYNCS.ARRIVE.TRANS64.ART0 RZ, [UR4], R6"};
+const Insn kArriveOnce = {0x000e62000810000aull, 0x000000ffff0a79a7ull, "SYNCS.ARRIVE.TRANS64.A1T0 R10, [UR10], RZ"};
+
+VTEST(an_mbarrier_a_block_used_is_gone_in_the_next_block_and_the_next_launch) {
+  OneThread one;
+  for (int sm : {90, 100}) {
+    Env e(sm);
+    const auto expects = e.load({kSetR0To64, kExpectTx, kExit});
+    const auto probes = e.load(cat({kSetR6ToCount, kArriveAll, kArriveOnce, kMovR9R11}, cat(head(sm), {kStoreR9, kExit})));
+    const uint32_t shared = 64;
+    for (int round = 0; round < 3; ++round) {
+      for (uint32_t v : e.run(*probes, 2, 1, "k", nullptr, shared)) VCHECK_EQ(v, 0x80000000u);
+      e.run(*expects, 1, 1, "k", nullptr, shared);
+      for (uint32_t v : e.run(*probes, 3, 1, "k", nullptr, shared)) VCHECK_EQ(v, 0x80000000u);
+      e.run(*expects, 2, 1, "k", nullptr, shared);   // (a grid: each block leaves its record, the next block finds none)
+      for (uint32_t v : e.run(*probes, 1, 1, "k", nullptr, shared)) VCHECK_EQ(v, 0x80000000u);
+    }
+  }
+}
+
+// A warpgroup MMA only some of the warpgroup's warps issued leaves its operands snapshot (the warp that comes last takes the last share): a one-warp
+// block issues HGMMA and ends, and the next block's first HGMMA must be the warpgroup's first again.
+const Insn kHgmma = {0x000fe20008000804ull, 0x00000000040479f0ull, "HGMMA.64x8x16.F32 R4, gdesc[UR4], R4, gsb0"};
+
+const Insn kTid32 = {0x000e220000002100ull, 0x0000000000007919ull, "S2R R0, SR_TID.X"};
+const Insn kP0TidGe32 = {0x000fe40003f06070ull, 0x000000200000780cull, "ISETP.GE.U32.AND P0, PT, R0, 0x20, PT"};
+const Insn kP0Exit = {0x000fea0003800000ull, 0x000000000000094dull, "@P0 EXIT"};
+
+VTEST(a_warpgroup_mma_only_some_warps_issued_is_not_there_in_the_next_block_and_the_next_launch) {
+  OneThread one;
+  Env e(90);
+  const auto mma = e.load({kTid32, kP0TidGe32, kP0Exit, kHgmma, kExit});   // warp 0 of a warpgroup issues it; warps 1 to 3 leave
+  for (int round = 0; round < 3; ++round) {
+    exec::LaunchStats st;
+    e.run(*mma, 3, 128, "k", &st, 1 << 16);
+    VCHECK_EQ(st.blocks, uint64_t{3});
+  }
+}
+
+// Tensor Memory a block allocated and did not free is free in the next: the same kernel, run in every block, is given the same granule.
+// UTCATOMSWS.FIND_AND_SET.ALIGN UP0, UR5, UR5 asks for UR5 granules and answers with the first.
+const Insn kTmemFind = {0x000e640008000800ull, 0x00000005000575e3ull, "UTCATOMSWS.FIND_AND_SET.ALIGN UP0, UR5, UR5"};
+
+VTEST(tensor_memory_a_block_allocated_is_free_in_the_next_block_and_the_next_launch) {
+  OneThread one;
+  Env e(100);
+  const auto allocs = e.load(cat(head(100), {umov(5, 1), kTmemFind, r9_from_ur(5), kStoreR9, kExit}));
+  for (int round = 0; round < 3; ++round)
+    for (uint32_t v : e.run(*allocs, 5, 32)) VCHECK_EQ(v, 0u);   // (never freed: a block that kept it would be given granule 1, 2, ...)
+}
+
+// From sm_100 a uniform register is named by 8 bits, so a program can write UR200: the next block, launch and kernel read zero in it.
+VTEST(uniform_registers_past_63_start_at_zero_from_sm_100) {
+  OneThread one;
+  Env e(100);
+  const auto sets = e.load(cat(head(100), {umov(200, 0x5678), r9_from_ur(200), kStoreR9, kExit}));
+  const auto sets_hi = e.load(cat(head(100), {umov(255 - 1, 0x9abc), r9_from_ur(254), kStoreR9, kExit}));
+  const auto reads = e.load(cat(head(100), {r9_from_ur(200), kStoreR9, kExit}));
+  const auto reads_hi = e.load(cat(head(100), {r9_from_ur(254), kStoreR9, kExit}));
+  const auto reads_64 = e.load(cat(head(100), {r9_from_ur(64), kStoreR9, kExit}));
+  for (int round = 0; round < 3; ++round) {
+    for (uint32_t v : e.run(*sets, 3, 64)) VCHECK_EQ(v, 0x5678u);
+    for (uint32_t v : e.run(*reads, 3, 64)) VCHECK_EQ(v, 0u);
+    for (uint32_t v : e.run(*sets_hi, 3, 32)) VCHECK_EQ(v, 0x9abcu);
+    for (uint32_t v : e.run(*reads_hi, 3, 32)) VCHECK_EQ(v, 0u);
+    for (uint32_t v : e.run(*reads_64, 2, 32)) VCHECK_EQ(v, 0u);
+    for (uint32_t v : e.run(*sets, 1, 32)) VCHECK_EQ(v, 0x5678u);
+    for (uint32_t v : e.run(*reads, 2, 32)) VCHECK_EQ(v, 0u);
+  }
+}
+
+// The return-address register (RPCMOV, kept per lane out of the warp's hot members: Warp::Rare) is zero in the next block, launch and kernel; the
+// block that sets it and the one that reads it are different kernels, so only the warp's reset can carry it over.
+const Insn kSetR2 = {0x000fc60000000f00ull, 0x1234567800027802ull, "MOV R2, 0x12345678"};
+const Insn kRpcLoFromR2 = {0x000fcc0000000000ull, 0x0000000200007352ull, "RPCMOV.32 Rpc.LO, R2"};
+const Insn kR9FromRpcLo = {0x000fe20000000000ull, 0x0000000000097353ull, "RPCMOV.32 R9, Rpc.LO"};
+
+VTEST(the_return_address_register_starts_at_zero_in_the_next_block_and_the_next_launch) {
+  OneThread one;
+  Env e(90);
+  const auto sets = e.load(cat(head(90), {kSetR2, kRpcLoFromR2, kR9FromRpcLo, kStoreR9, kExit}));
+  const auto reads = e.load(cat(head(90), {kR9FromRpcLo, kStoreR9, kExit}));
+  for (int round = 0; round < 3; ++round) {
+    for (uint32_t v : e.run(*sets, 3, 64)) VCHECK_EQ(v, 0x12345678u);
+    for (uint32_t v : e.run(*reads, 3, 64)) VCHECK_EQ(v, 0u);
+    for (uint32_t v : e.run(*sets, 1, 32)) VCHECK_EQ(v, 0x12345678u);
+    for (uint32_t v : e.run(*reads, 2, 32)) VCHECK_EQ(v, 0u);
+  }
+}
+
+// TensorMemory::pristine() is what init_block asks before it skips reset(): it must say no for every member reset() puts back, and yes after reset().
+VTEST(tensor_memory_is_pristine_only_when_every_member_is_what_reset_leaves) {
+  using TM = exec::TensorMemory;
+  VCHECK(TM{}.pristine());
+  const std::vector<std::function<void(TM&)>> dirty = {
+      [](TM& t) { t.cells.assign(8, 0); },
+      [](TM& t) { t.live[0] = 32; },
+      [](TM& t) { t.exclusive = true; },
+      [](TM& t) { t.relinquished = true; },
+      [](TM& t) { t.peer_alloc.emplace_back(0, 32); },
+      [](TM& t) { t.peer_dealloc.emplace_back(0, 0); },
+      [](TM& t) { t.collector_b[0].valid = true; },
+      [](TM& t) { t.collector_b[1].desc = 7; },
+      [](TM& t) { t.collector_b[2].b_fields = 7; },
+      [](TM& t) { t.collector_b[3].valid = true; },
+      [](TM& t) { t.collector_b[3].desc = 1; },
+      [](TM& t) { t.collector_b[3].b_fields = 1; },
+  };
+  for (size_t i = 0; i < dirty.size(); ++i) {
+    TM t;
+    dirty[i](t);
+    VCHECK(!t.pristine());
+    t.reset();
+    VCHECK(t.pristine());
+    VCHECK(t.cells.empty() && t.live.empty() && t.peer_alloc.empty() && t.peer_dealloc.empty() && !t.exclusive && !t.relinquished);
+  }
+  TM all;
+  for (const auto& d : dirty) d(all);
+  all.reset();
+  VCHECK(all.pristine());
 }
 
 // AddressSanitizer makes a block cost more than the pool's break-even (100 us), so the launches below are genuinely worth the pool there.

@@ -1341,6 +1341,15 @@ void Runner::init_block(Block& blk, uint64_t linear) {
   if (!blk.mbar.empty()) blk.mbar.clear();
   if (!blk.gmma.empty()) blk.gmma.clear();
   if (!blk.tmem.pristine()) blk.tmem.reset();
+#ifndef NDEBUG
+  // (the block's state beyond its warps, against a new Block's: the barriers, the mbarriers' side records, the warpgroup MMAs, Tensor Memory)
+  {
+    bool ok = blk.mbar.empty() && blk.gmma.empty() && blk.tmem.pristine();
+    for (const Block::Barrier& b : blk.bars_)
+      ok = ok && b.arrived == 0 && b.expected == 0 && b.mode == 0 && b.red == 0 && b.popc == 0 && b.and_ && !b.or_;
+    if (!ok) throw std::logic_error("init_block left a block that is not a new block's state");
+  }
+#endif
 }
 
 exec::LaunchStats Runner::run() {
