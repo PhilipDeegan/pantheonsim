@@ -12,8 +12,8 @@
 #     the AMD device files) are the simulated ones inside the new root;
 #   * a bad -v, --home or flag combination fails before a session starts;
 #   * where namespaces are refused the session does not start on the host's files.
-# The checks that need user namespaces skip (SKIP: and exit 0) where the host
-# refuses them; the argument and refusal checks run everywhere.
+# The checks that need user namespaces are left out (with a note) where the host
+# refuses them, as in run_shell_cli.sh; the argument and refusal checks run everywhere.
 set -uo pipefail
 root="$(cd "$(dirname "$0")/../../.." && pwd)"
 . "$root/tests/session_guard.sh"
@@ -89,10 +89,9 @@ expect "the namespace hook does not touch a session without --rootfs" "plain" "$
 
 # ---------------------------------------------------------------- everything below needs namespaces
 if ! session_isolation_ok; then
-  # ctest reads "SKIP:" as a skip whatever the status, so a failure above must not carry it.
-  if (( fail )); then echo "FAIL: and the checks that need namespaces could not run on this host"; exit 1; fi
-  echo "SKIP: this host refuses the user namespaces and mounts an isolated session needs"
-  exit 0
+  # Like the other session tests: the checks above ran, the rest cannot on this host.
+  echo "note: this host refuses the user namespaces and mounts an isolated session needs; the isolated checks did not run"
+  exit $fail
 fi
 
 # --- default behaviour is unchanged: the host's files are visible without --rootfs
@@ -106,8 +105,8 @@ out=$(rs -c "cat $work/host/secret; echo rc=\$?")
 contains "a host file is not visible without -v" "No such file" "$out"
 out=$(rs -c "test -e $work/host && echo yes || echo no")
 expect "the host's temporary directory is not there" "no" "$out"
-out=$(rs -c 'echo $HOME; pwd; id -u')
-expect "HOME and cwd are /root, and you are root" $'/root\n/root\n0' "$out"
+out=$(HOME=/home/someone USER=someone LOGNAME=someone rs -c 'echo $HOME $USER $LOGNAME; pwd; id -u')
+expect "HOME, USER and cwd are the session's, and you are root" $'/root root root\n/root\n0' "$out"
 for d in /root /work /opt /var/tmp /mnt /srv; do
   out=$(rs -c "ls -A $d" | own $d)
   expect "$d starts empty" "" "$out"
@@ -126,6 +125,8 @@ expect "/dev holds only the minimal nodes" "" "$extra"
 
 out=$(rs -c 'head -c 4 /dev/urandom | wc -c; echo x > /dev/null && echo null; head -c 3 /dev/zero | wc -c; ls /dev/pts')
 expect "/dev/urandom, /dev/null, /dev/zero and a devpts work" $'4\nnull\n3\nptmx' "$out"
+out=$(rs -c 'echo shm > /dev/shm/f && cat /dev/shm/f')
+expect "/dev/shm is writable" "shm" "$out"
 
 # --- the system still works, read-only
 out=$(rs -c 'ls /usr/bin | head -1 >/dev/null && sh -c "echo from-sh" && cat /etc/hostname 2>/dev/null; true')
@@ -193,6 +194,13 @@ mkdir -p "$work/symhost"; ln -s "$work/symhost" "$work/link"
 echo viasym > "$work/symhost/f"
 out=$(rs -v "$work/link:/viasym" -c 'cat /viasym/f')
 expect "a symlink as HOST is followed" "viasym" "$out"
+
+# --- :ro reaches a filesystem mounted inside the directory too
+mkdir -p "$work/tree/sub"; echo deep > "$work/tree/sub/f"
+out=$(unshare -r -m sh -c "mount -t tmpfs t '$work/tree/sub' && echo deep > '$work/tree/sub/f' &&
+  VGPU_QUIET=1 timeout 120 '$vgpu' shell -y --rootfs -v '$work/tree:/t:ro' -c 'echo x > /t/sub/g 2>&1; cat /t/sub/f'" </dev/null 2>&1)
+[[ "$out" == *"Read-only file system"* && "$out" == *deep ]] && ok "-v :ro covers a mount inside the directory" \
+  || bad "-v :ro covers a mount inside the directory" "$out"
 
 # --- --home keeps /root
 mkdir -p "$work/home"

@@ -2469,9 +2469,9 @@ add_test(NAME shell_cli COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_shell_c
 set_tests_properties(shell_cli PROPERTIES DEPENDS vgpu_cli
   ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}" TIMEOUT 300)
 # vgpu shell --rootfs: the session's own root, -v mounts, --home, and the refusal where
-# namespaces are not allowed. The checks that need namespaces skip on a host without them.
+# namespaces are not allowed. The checks that need namespaces are left out on a host without them.
 add_test(NAME shell_rootfs COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_shell_rootfs.sh)
-set_tests_properties(shell_rootfs PROPERTIES DEPENDS vgpu_cli SKIP_REGULAR_EXPRESSION "^SKIP:"
+set_tests_properties(shell_rootfs PROPERTIES DEPENDS vgpu_cli
   ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}" TIMEOUT 600)
 add_test(NAME amd_session COMMAND ${CMAKE_SOURCE_DIR}/amd/tests/e2e/run_amd_session.sh)
 set_tests_properties(amd_session PROPERTIES DEPENDS vgpu_cli
