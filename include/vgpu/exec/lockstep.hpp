@@ -69,6 +69,25 @@ inline constexpr uint64_t kLockstepOneThread = 16, kLockstepBlocksPerThread = 2;
 inline constexpr std::chrono::microseconds kLockstepGrowAfter{3000}, kLockstepGrowAgain{1000};
 // How often a thread whose blocks stored nothing looks whether they are standing still.
 inline constexpr std::chrono::microseconds kLockstepCheckEvery{250};
+// A look costs about a twelfth of the time between looks (below), and a launch's first look is judged by what the
+// last one cost per resident block (the kernels of one program have register files of one size): at most this long.
+inline constexpr unsigned kLockstepCheckCostRatio = 12;
+inline constexpr std::chrono::milliseconds kLockstepFirstCheckMax{500};
+
+// What a launch that has not looked yet waits before its first look: the last look's cost for each resident block, for all of
+// the blocks it holds now, twelve times over, but no less than kLockstepCheckEvery and no more than kLockstepFirstCheckMax.
+// (Out of line: the worker below is a hot loop's neighbour, and these run once per pass that stored nothing.)
+[[gnu::noinline]] inline std::chrono::steady_clock::duration lockstep_first_look(const std::atomic<uint64_t>& look_ns_per_block, size_t blocks) {
+  const uint64_t per_block = look_ns_per_block.load(std::memory_order_relaxed);
+  return std::min<std::chrono::steady_clock::duration>(
+      std::max<std::chrono::steady_clock::duration>(kLockstepCheckEvery, std::chrono::nanoseconds(per_block * blocks * kLockstepCheckCostRatio)),
+      kLockstepFirstCheckMax);
+}
+
+// Remembers what a look at `blocks` blocks cost, for the next launch's first.
+[[gnu::noinline]] inline void lockstep_note_look(std::atomic<uint64_t>& look_ns_per_block, std::chrono::steady_clock::duration cost, size_t blocks) {
+  look_ns_per_block.store(std::chrono::duration_cast<std::chrono::nanoseconds>(cost).count() / blocks, std::memory_order_relaxed);
+}
 
 struct LockstepShape {
   unsigned workers = 1;     // host threads
@@ -184,6 +203,9 @@ void lockstep_worker(std::atomic<uint64_t>& ticket, std::atomic<uint64_t>& beat,
   // This thread's blocks, or some other thread's, got somewhere.
   auto last_bump = moved_at;
   std::chrono::steady_clock::duration check_every = kLockstepCheckEvery;
+  // What the last look of any launch on this call site cost for each resident block, in nanoseconds (0: none yet).
+  static std::atomic<uint64_t> look_ns_per_block{0};
+  bool looked = false;   // this launch has taken a look
   const auto moved = [&](std::chrono::steady_clock::time_point t) {
     // (told at most every 20 microseconds: the others look at it every few hundred)
     if (t - last_bump >= std::chrono::microseconds(20)) {
@@ -248,12 +270,17 @@ void lockstep_worker(std::atomic<uint64_t>& ticket, std::atomic<uint64_t>& beat,
     }
     // Nothing stored or finished. Every so often, look whether the blocks are standing still (their
     // registers and program counters the same as at the last look).
+    // (a launch that has not looked yet waits as long as the last launch's look says it must, so a launch with
+    // big register files that finishes in a few milliseconds does not spend a third of its time on one look)
+    if (!looked) check_every = lockstep_first_look(look_ns_per_block, live.size());
     if (t - last_check >= check_every) {
       uint64_t h = 0x9e3779b97f4a7c15ull;
       for (const auto& b : live) h = (h ^ fingerprint(*b)) * 0x100000001b3ull;
       last_check = std::chrono::steady_clock::now();
       // (looking costs about a twelfth of the time between looks, however big the blocks are)
-      check_every = std::max<std::chrono::steady_clock::duration>(kLockstepCheckEvery, 12 * (last_check - t));
+      check_every = std::max<std::chrono::steady_clock::duration>(kLockstepCheckEvery, kLockstepCheckCostRatio * (last_check - t));
+      looked = true;
+      lockstep_note_look(look_ns_per_block, last_check - t, live.size());
       same = h == last_print ? same + 1 : 0;
       last_print = h;
       if (!same) nap_us = 0;
