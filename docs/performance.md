@@ -6925,11 +6925,46 @@ The share the survey measured (gaussian 12%, blockAccess 17%) was an upper bound
 
 ### Mutations (each rebuilt in Debug and run; "killed" = a test fails)
 * Killed: no clearing of a chunk on release (6 tests in `test_memalloc`/`test_memory`); pool limit ignored; RAM-limit clause removed; `<` for `<=` at the pool's edge; no `MADV_DONTNEED` for a chunk past the pool; no pool give-back when the host is short; no second look after the give-back (the sample count); arena step of half a chunk; `ur` not cleared; `ur_extent` 32 instead of 64 (all by the new tests, `test_sass_block_reuse` for the last two).
-* Also killed (in `test_sass_block_reuse`): `LaunchStats` not cleared, `up[7]` not set, `p[7]` not set, `store_gate` not set in `Warp::reset`. Survived: `rare()` not marking `rare_dirty` (no sm_86 kernel reaches RPCMOV, `device_error` or the cluster barrier; listed below).
+* Run again on the tree merged with `origin/main` (round sp22-zero), one at a time, each rebuilt, with the tests that failed listed by `mut.py`; all 15 killed:
+
+| mutant | killed by |
+|---|---|
+| `LaunchStats` not cleared in place | `a_blocks_counts_start_at_zero...` (also in a Release build: the counts are wrong) |
+| `up[7]` not set / `p[7]` not set / `store_gate` not set in `Warp::reset` | every kernel test, by `expect_new_warp` (Debug) |
+| `rare()` does not mark `rare_dirty` | `the_return_address_register_starts_at_zero...` (RPCMOV, so it is reachable on sm_90: the state a Release build also shows) |
+| `ur_extent` 64 for every architecture; 128 from sm_100 | `uniform_registers_past_63_start_at_zero_from_sm_100` (UR200 and UR254, read back by the next kernel: visible in Release) |
+| `Block::bar()` does not mark; the barriers never set again | `a_barrier_left_part_full...` (the next kernel's four warps deadlock on a barrier that kept one warp: Release too) |
+| `mbar` never cleared | `an_mbarrier_a_block_used_is_gone...` (the phase bit of the word after the last arrival: Release too) |
+| `gmma` never cleared | `a_warpgroup_mma_only_some_warps_issued...` (Debug only: the check in `init_block`) |
+| `tmem` never reset | `tensor_memory_a_block_allocated_is_free...` (the granule the next block is given: Release too) |
+| `pristine()` ignoring `live`, a collector's `desc`/`b_fields`, or `peer_dealloc` | `tensor_memory_is_pristine_only_when_every_member_is_what_reset_leaves` |
+
+  Because a thread keeps one `Block` across the tests of a process, a mutant that leaves state behind also fails the tests that run after the one aimed at it; the table names the aimed one.
+
+### New tests (round sp22-zero)
+* `test_sass_block_reuse` runs hand-built SASS for sm_86, sm_90 and sm_100 now (`Env(sm)`; the parameters stay at the default base, 0x160, because the cubins carry no PARAM_CBANK, and from sm_90 a store prints as `STG.E desc[UR4][...]`). Words come from the disassembler corpora in `nvidia/tests/data/sass`, or from them with a register or immediate changed; every word is checked against `sass::to_text` before it runs.
+* A barrier left a quarter full (`BAR.ARV 1, 128` by one warp) must not be there for four warps that `BAR.SYNC 1, 128` (sm_86, 90, 100); an mbarrier with a transaction due (`SYNCS.ARRIVE ... A0TR`) must not hold the phase back from the next block's last arrival (sm_90, 100); one warp of a warpgroup issuing `HGMMA` and ending leaves a snapshot that the next block must not find (sm_90; checked by the Debug comparison only); `UTCATOMSWS.FIND_AND_SET` without a free is given granule 0 again by every block (sm_100); `RPCMOV` (the `Rare` state) and UR200/UR254 (sm_100) read back as zero in the next kernel; `TensorMemory::pristine()` is false for each member `reset()` restores and true after it.
+* In a Debug build `init_block` now also compares the barriers, mbarriers, warpgroup snapshots and Tensor Memory with a new block's (the warps were compared already).
+
+### Re-measured on the merge with `origin/main` dad11eee (round sp22-zero)
+Same host and method as above (Release GCC 13.3 LTO, `VGPU_THREADS=1`, cpu 12, alternating A B, three library copies in rotation, `perf stat`), A = `origin/main` dad11eee, B = the merge. Both trees built on a tmpfs (the box's root disk is a USB drive under heavy I/O from other sessions, which starved the compiler's temporary files until `TMPDIR` pointed at tmpfs). Load average 14 to 25 on 16 CPUs throughout, so cycles are noisier than the instruction counts; the programs are the same or rebuilt from the same source (`churn` is a 20-line `cudaMalloc`, `cudaMemcpy`, `cudaFree` loop, rebuilt). Standard output with the timing lines dropped was identical in every run.
+
+| program | runs | instr B/A (p) | cycles B/A (p) | task-clock B/A (p) | page faults A, B |
+|---|---:|---:|---:|---:|---|
+| HeCBench atomicCost | 9 | 1.0040 (<0.001) | 0.978 (0.005) | 0.938 (0.11) | 7.21 M, 5.41 M |
+| rodinia gaussian -s 512 | 15 | 0.9939 (<0.001) | 0.964 (0.008) | 0.957 (0.07) | 1488, 962 |
+| gaussian, A against A | 15 | 1.0000 (0.28) | 1.006 (0.74) | 0.999 (0.59) | 1487, 1487 |
+| churn 256 MiB x 8 | 15 | 0.605 (<0.001) | 1.150 (<0.001) | **0.351** (<0.001) | 590 K, 66 K |
+| churn 256 MiB x 8, A against A | 15 | 1.0000 (0.82) | 0.977 (0.12) | 0.951 (1.0) | 590 K, 590 K |
+| churn 3000 MiB x 4 | 15 | 0.571 (<0.001) | 0.920 (<0.001) | 0.775 (<0.001) | 3.84 M, 2.29 M |
+| tiny (1 MiB x 1) | 21 | 0.9951 (<0.001) | 0.953 (0.006) | 0.875 (<0.001) | 819, 566 |
+| tiny, A against A | 21 | 1.0000 (0.29) | 0.981 (0.62) | 1.014 (0.83) | 819, 820 |
+
+The gains survived the merge and agree with the first measurement (atomicCost cycles 0.987 then and 0.978 now, gaussian 0.967 and 0.964, tiny 0.934 and 0.953, the 256 MiB churn's task-clock 0.358 and 0.351). atomicCost has 9 runs and no A against A (one run is 40 s and 14 GB of host memory on a shared box); its cycle gain is p=0.005, and its task-clock gain is not significant here.
 
 ### Not verified, not done
-* The `Rare` marking, the barrier flag and the `mbar`/`gmma`/`tmem` guards are exercised by no sm_86 kernel (they need RPCMOV or cluster barriers on sm_100+/sm_90, or an mbarrier); the debug check in `init_block` covers them in any debug run that uses those instructions. The barrier flag is equivalent after a normal block (a released barrier resets itself); it matters after a block that aborts with a barrier half-arrived.
-* sm_100 and later `ur_extent` (256) is not separately tested. ASan, TSan and the e2e tests (no nvcc here) are CI-only. THP behaviour was measured with `enabled=madvise`; on a host with `never` the arenas still avoid the second write and the fault count is unchanged.
+* ASan, TSan and the e2e tests are CI-only (server3 has no CUDA toolkit; the e2e tests need nvcc). THP behaviour was measured with `enabled=madvise`; on a host with `never` the arenas still avoid the second write and the fault count is unchanged.
+* The `HGMMA` snapshot guard is observed only by the Debug comparison; no Release-visible difference was found for a one-warp issue. Cluster-barrier state (`cga_target`, `device_error`) shares the `Rare` marking tested through RPCMOV, but no kernel here reaches `UCGABAR` or the device-runtime error path.
 * The pool's 1 GiB default is not configurable by environment (a `Config` field only); it helps loops that allocate, fill and free buffers up to that size, not programs that keep what they touch.
 
 ## Round sp21 (rodinia-profile): shared-memory bank counting and IMAD.HI (branch `sp21-rodinia`, base `origin/main` 179c886f)
