@@ -420,8 +420,10 @@ TIER_HANDLER(h_imad_wide) {
     clo = mlo;
     chi = mhi;
   }
-  uint32_t carry;
-  c.sk->imad_wide(rlo, rhi, a, b, clo, chi, (op.aux & 2) != 0, (op.aux & 1) ? static_cast<uint32_t>(tier_pmask(c, op.p)) : 0u, &carry);
+  uint32_t carry = 0;
+  // (the carry out is found only when a predicate takes it)
+  c.sk->imad_wide(rlo, rhi, a, b, clo, chi, (op.aux & 2) != 0, (op.aux & 1) ? static_cast<uint32_t>(tier_pmask(c, op.p)) : 0u,
+                  op.dst2 != tier::kNoReg ? &carry : nullptr);
   if (op.dst != tier::kNoReg) {   // write64: R254's partner is RZ
     tier_store(c, op.dst, ex, rlo);
     if (op.dst + 1u != kRZ) tier_store(c, static_cast<uint16_t>(op.dst + 1), ex, rhi);
@@ -429,32 +431,34 @@ TIER_HANDLER(h_imad_wide) {
   if (op.dst2 != tier::kNoReg) tier_setp(c, op.dst2, ex, carry);
 }
 
+// IMAD.HI: bits 32..63 of a * b + c + the carry-in bit (c a 64-bit pair, or a 32-bit register extended by the sign of the product's kind), and
+// bit 64 of the sum as the carry out. That is the wide multiply-add's high word and carry (the same kernel as h_imad_wide, with the low word
+// thrown away), not a 128-bit sum for each lane.
 TIER_HANDLER(h_imad_hi) {
   TIER_PRELUDE
-  alignas(32) uint32_t t[3][32], tlo[32], thi[32], r[32];
+  alignas(32) uint32_t t[3][32], tlo[32], thi[32], rlo[32], rhi[32], mlo[32], mhi[32];
   const uint32_t *a = tier_src<false>(c, op.s[0], t[0]), *b = tier_src<false>(c, op.s[1], t[1]);
   const bool sgn = op.aux & 2, pair = op.aux & 4;
-  const uint32_t *clo, *chi = nullptr;
-  if (pair) tier_src64(c, op.s[2], tlo, thi, clo, chi);
-  else clo = tier_src<false>(c, op.s[2], t[2]);
-  const bool neg = op.s[2].mod & tier::kNeg;
-  const Mask cin = (op.aux & 1) ? tier_pmask(c, op.p) : 0;
-  Mask carry = 0;
-  for (unsigned l = 0; l < 32; ++l) {
-    const uint64_t prod = sgn ? static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(a[l])) * static_cast<int32_t>(b[l]))
-                              : static_cast<uint64_t>(a[l]) * b[l];
-    uint64_t cc;
-    if (pair) {
-      cc = clo[l] | (static_cast<uint64_t>(chi[l]) << 32);
-      if (neg) cc = 0 - cc;
-    } else {
-      cc = static_cast<uint64_t>(sgn ? static_cast<int64_t>(static_cast<int32_t>(clo[l])) : clo[l]);
+  const uint32_t *clo, *chi;
+  if (pair) {
+    tier_src64(c, op.s[2], tlo, thi, clo, chi);
+    if (op.s[2].mod & tier::kNeg) {   // the 64-bit addend negated, lane by lane, into rows of their own
+      for (unsigned l = 0; l < 32; ++l) {
+        const uint64_t cc = 0 - (clo[l] | (static_cast<uint64_t>(chi[l]) << 32));
+        mlo[l] = static_cast<uint32_t>(cc);
+        mhi[l] = static_cast<uint32_t>(cc >> 32);
+      }
+      clo = mlo;
+      chi = mhi;
     }
-    const unsigned __int128 sum = static_cast<unsigned __int128>(prod) + cc + ((cin >> l) & 1);
-    r[l] = static_cast<uint32_t>(sum >> 32);
-    carry |= static_cast<Mask>((sum >> 64) != 0) << l;
+  } else {   // a 32-bit addend, extended to 64 bits as the product is
+    clo = tier_src<false>(c, op.s[2], t[2]);
+    for (unsigned l = 0; l < 32; ++l) mhi[l] = sgn ? static_cast<uint32_t>(static_cast<int32_t>(clo[l]) >> 31) : 0u;
+    chi = mhi;
   }
-  tier_store(c, op.dst, ex, r);
+  uint32_t carry;
+  c.sk->imad_wide(rlo, rhi, a, b, clo, chi, sgn, (op.aux & 1) ? static_cast<uint32_t>(tier_pmask(c, op.p)) : 0u, &carry);
+  tier_store(c, op.dst, ex, rhi);
   if (op.dst2 != tier::kNoReg) tier_setp(c, op.dst2, ex, carry);
 }
 
@@ -984,12 +988,38 @@ static void h_global(void* vc, const tier::MOp& op, Mask ex) {
   // all from one pass over the registers' rows (made here, and used by the paths below).
   simd::WarpRowsInfo ri{};
   bool rows = false;
-  if (ex == kAll) {
+  // A full warp whose lanes are on consecutive elements (a run), or all on one address (a load that every lane makes of the same word), is asked of
+  // the registers' rows alone (simd::warp_run_kernel: nothing stored, under half the work of the address pass above), the shape this instruction's
+  // warps had last time first (`op.shape`, only ever a place to start: a warp of another shape is one the kernel answers "no" to). When it says yes
+  // the 32 addresses and the window and stride answers are made only if the access does not go through below (the memory manager declines it, or it
+  // is in the constant window): then the kernel above runs, as if this had not been tried.
+  unsigned fast = 0;   // 1: a run, 2: one address
+  uint64_t fast_a0 = 0;
+  if (ex == kAll && blo) {
+    if (const simd::WarpRunFn run_kernel = simd::warp_run_kernel()) {
+      const unsigned shape = __atomic_load_n(&op.shape, __ATOMIC_RELAXED);
+      if (shape != tier::MOp::kShapeOther) {
+        const bool one = shape == tier::MOp::kShapeOne && !Store;
+        if (run_kernel(blo, bhi, one ? 0u : bytes)) {
+          fast = one ? 2 : 1;
+          fast_a0 = (bhi ? (static_cast<uint64_t>(bhi[0]) << 32) | blo[0] : uint64_t{blo[0]}) + urv + imm;
+        }
+      }
+    }
+  }
+  const auto make_rows = [&] {
     if (const simd::WarpRowsFn kernel = simd::warp_rows_kernel()) {
       kernel(blo, bhi, urv + imm, kConstWindow, addrs, ri);
       rows = true;
+      // (the shape the next warp of this instruction is asked for first)
+      const uint8_t shape = !ri.progression ? tier::MOp::kShapeOther
+                            : ri.stride == bytes ? tier::MOp::kShapeRun
+                            : (ri.stride == 0 && !Store) ? tier::MOp::kShapeOne
+                                                         : tier::MOp::kShapeOther;
+      __atomic_store_n(&op.shape, shape, __ATOMIC_RELAXED);
     }
-  }
+  };
+  if (ex == kAll && !fast) make_rows();
   if (ex && ((ex + (ex & -ex)) & ex) == 0) {
     const unsigned first = static_cast<unsigned>(std::countr_zero(ex));
     const unsigned count = popc(ex);
@@ -997,7 +1027,13 @@ static void h_global(void* vc, const tier::MOp& op, Mask ex) {
     // below, for an access that is not a run or that the memory manager declines).
     uint64_t g0;
     bool run;
-    if (rows) {   // (a run is the lanes on a stride of one element)
+    if (fast == 1) {
+      g0 = fast_a0;
+      run = true;
+    } else if (fast == 2) {   // (one address: not a run)
+      g0 = fast_a0;
+      run = false;
+    } else if (rows) {   // (a run is the lanes on a stride of one element)
       g0 = ri.a0;
       run = ri.progression && ri.stride == bytes;
     } else {
@@ -1043,6 +1079,31 @@ static void h_global(void* vc, const tier::MOp& op, Mask ex) {
       }
     }
   }
+  if (fast == 2 && fast_a0 - kConstWindow >= (uint64_t{1} << 32)) {
+    // Every lane loads one address: one load (MemoryManager::load_broadcast), the same as the batch below would do for it (a load declined falls through).
+    uint64_t fv[32];
+    if (mem.load_broadcast(fast_a0, 32, bytes, fv, &op.way)) {
+      if (dreg) {
+        uint32_t* d = c.R + op.dst * 32u;
+        if (bytes == 4) {
+          for (unsigned l = 0; l < 32; ++l) d[l] = static_cast<uint32_t>(fv[l]);
+        } else if (bytes < 4) {
+          for (unsigned l = 0; l < 32; ++l) d[l] = tier_extend(op.b, static_cast<uint32_t>(fv[l]));
+        } else {
+          for (unsigned l = 0; l < 32; ++l) {
+            d[l] = static_cast<uint32_t>(fv[l]);
+            d[32 + l] = static_cast<uint32_t>(fv[l] >> 32);
+          }
+        }
+      }
+      if (!count_global_progression(blk.st, false, fast_a0, 0, bytes, c.r->fastcount())) {
+        for (unsigned l = 0; l < 32; ++l) addrs[l] = fast_a0;   // (the registers may be written over by now: the addresses are the one)
+        count_access(blk.st, 0, false, addrs, ex, bytes);
+      }
+      return;
+    }
+  }
+  if (fast) make_rows();   // (an access that did not go through: the rest is as for any full warp)
   if (ex == kAll) {
     // A full warp: the addresses are the batch as they stand (no lane to skip, none to find again when the values go back to the
     // registers).
@@ -1289,7 +1350,7 @@ static void h_shared(void* vc, const tier::MOp& op, Mask ex) {
       }
     }
   }
-  count_shared_offsets(blk.st, Store, offs, ex, bytes);
+  count_shared_offsets(blk.st, Store, offs, ex, bytes, &op.way);
 }
 
 // Local memory: each lane's window of the warp's array, when every active lane's access is inside the thread's frame.
