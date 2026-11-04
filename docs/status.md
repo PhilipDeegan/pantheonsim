@@ -1,81 +1,77 @@
 # Status and limitations
 
-What PantheonSim does today, and what it deliberately does not. The [README](../README.md) has the short version.
+What PantheonSim runs today, and what it does not. The [README](../README.md) has the short version. [TODO.md](../TODO.md) is the long list of gaps and the history behind this page; where the two disagree, the code and the tests win, so please report it.
 
-The engine is vendor-neutral; NVIDIA and CUDA support lives in [`nvidia/`](../nvidia/README.md) and
-AMD and ROCm in [`amd/`](../amd/README.md). [ARCHITECTURE.md](../ARCHITECTURE.md) has the map.
+The engine is shared between vendors. NVIDIA and CUDA code is in [`nvidia/`](../nvidia/README.md), AMD and ROCm code in [`amd/`](../amd/README.md). [ARCHITECTURE.md](../ARCHITECTURE.md) has the layout.
 
-Working today, all CPU-only:
+## Limitations
 
-| Area | State |
-| --- | --- |
-| Device profiles | 48 profiles (`vgpu list-gpus`): 38 NVIDIA and 10 AMD. 14 NVIDIA profiles are read from physical cards (`verified: true`) across Turing, Ampere, Ada, Hopper, Grace Hopper and Blackwell (the RTX PRO 6000 Server Edition and RTX PRO 4500), each matching its device on 512 conformance values; the other 24 (H200, B200, B300, GB200, Rubin, Jetson Thor, RTX 5090, RTX 4090, RTX 3090 and more) are built from public documents only and marked `verified: false`: nothing in them was measured, and Rubin and Thor carry placeholder PCI ids because NVIDIA has published none. [nvidia/docs/profiles.md](../nvidia/docs/profiles.md) lists both groups. AMD: MI325X, RX 6800 and RX 6700 XT are read from physical cards; the other seven (MI250X, MI300X, MI350X, MI455X, RX 6900 XT, RX 7900 XTX, RX 9070 XT) are placeholders. Each profile's header says where its values came from |
-| `vgpu` CLI | `list-gpus`, `info`, `demo`, `run`, `shell`, `config`, `test --matrix`, `ncu`, `counters`, `debug`, `fault`, `regs`, `smi`, `serve` — see [cli.md](cli.md) |
-| Virtual VRAM | sparse/lazy backing — a virtual H200 claims 141 GB on a 16 GB host, past `VGPU_MEMORY_RAM_MB` it spills to disk, and a host-memory guard turns "the host is out of RAM" into a device out-of-memory error instead of an OOM kill; OOB / use-after-free / double-free / misalignment diagnostics |
-| PTX | lexer/parser for a growing subset (see [ARCHITECTURE.md](../ARCHITECTURE.md)); precise `unsupported` errors for the rest |
-| Execution | SIMT warp interpreter: 32-lane warps, divergence masks, shared memory, `bar.sync`, warp shuffles/vote, atomics, tensor-core `wmma`, f16/f16x2, deterministic scheduling |
-| Driver API | `libvgpucuda.so` + clean-room `vgpu_cuda.h`: init/discovery/context/memory/module/`cuLaunchKernel`, `cuLibrary`/`cuKernel`, `cuGetProcAddress` |
-| Runtime API | `libvgpucudart` (drop-in `libcudart.so.13`): the CUDA **Runtime** API + nvcc host-registration ABI, so unmodified nvcc apps run unchanged |
-| Fatbin | extracts embedded PTX and SASS cubins from nvcc fatbins (uncompressed, zstd and LZ4, so the fatbins of CUDA 12 and 13 both read) |
-| Virtual memory | the `cuMem*` mapping API: address space reserved without memory, physical handles with no address, mappings that are unusable until access is granted — so a buffer grows in place, which is what PyTorch's expandable segments and NCCL's windows need. Reserved-but-unmapped, no-access and read-only faults each say which they were |
-| Multi-GPU | a virtual rack of N devices with disjoint address windows; peer copies and per-device isolation match a real two-GPU machine; `CUDA_VISIBLE_DEVICES` and `CUDA_DEVICE_ORDER` read as the driver reads them, and every device attribute and `cudaDeviceProp` member (L2, bus width, texture limits, PCI identity, UUID matching NVML's) answers from one table checked against an RTX 3060 — see [nvidia/docs/devices.md](../nvidia/docs/devices.md) |
-| Vendor libraries | cuBLAS, cuBLASLt, cuDNN, cuFFT, cuRAND, cuSPARSE, cuSPARSELt, cuSOLVER, cuTENSOR, cuTensorNet, NCCL, NVRTC, NPP and nvJPEG under their real sonames, each differential-tested against NVIDIA's own library on a physical GPU; also cuStateVec, cuDSS (1.0 as libcudss.so.1, and 0.8 as libcudss.so.0), nvJitLink, nvFatbin, cuFile (GPUDirect Storage's compatibility mode), nvCOMP (its standard formats and GDeflate, interoperable with NVIDIA's) and NVSHMEM (one simulated GPU per PE process, NVIDIA's device API on the simulator's host library) — see [nvidia/docs/libraries.md](../nvidia/docs/libraries.md) |
-| PyTorch | PyTorch's official CUDA 13 build runs unmodified on the simulated NVIDIA GPUs, T4 to B200 and RTX 5090: GPT, ResNet, LSTM, U-Net, ViT, MoE and DLRM training all match the CPU — see [nvidia/docs/pytorch.md](../nvidia/docs/pytorch.md). PyTorch for ROCm runs on the simulated AMD GPUs — see [amd/README.md](../amd/README.md) |
-| Python JIT | Numba runs unmodified (its PTX is assembled through the driver's JIT link API); Triton runs unmodified under `vgpu run` and `vgpu shell` (`vgpu-ptxas` stands in for `ptxas`) — see [nvidia/docs/jit.md](../nvidia/docs/jit.md) |
-| Discovery | live telemetry + NVML; drop-in `nvidia-smi`, `rocm-smi`, `amd-smi`, `rocm_agent_enumerator`, and `lspci` output — see [docs/telemetry.md](telemetry.md) |
-| Registers | PCI configuration space from a register database: header, PM, MSI, PCI Express and AER, live link and error state, BAR sizing; `vgpu regs list/read/write/dump/log` with an access log; AMD MMIO (engine status, the SMU mailbox) from the amdgpu headers; a C API, `vgpu_regs.h` — see [docs/registers.md](registers.md) |
-| AMD | unmodified hipcc-built programs, from ROCm 6.4, 7.0, 7.1 or 7.2, run on a simulated MI300X: the HIP runtime ABI, CDNA3 (gfx942) code checked instruction by instruction against ROCm's llvm-objdump and executed on every host core, device-side `printf`, and every pantheon workload with `--verify`. AMD's `rocprofv3` runs unmodified, with the counters the interpreter counts exactly. Its traces of small HIP programs are compared with what rocprofv3 recorded on a real RX 6800 and RX 6700 XT, and the differences that remain are listed in [amd/docs/rocprofiler.md](../amd/docs/rocprofiler.md). So does rocBLAS: AMD's own quick tests pass (162,807 float and double ones, and the half, bfloat16, int8 and FP8 GEMMs run) — see [amd/README.md](../amd/README.md) |
-| Profiling | CUPTI under its real soname: the Activity API (kernels, copies, fills, waits, streams, devices, runtime API calls, memory and pool records, graph traces, events and overhead, correlated) and the Callback API (every runtime function, resource including modules and graphs, and synchronize domains); `torch.profiler` collects a GPU trace, checked against the trace NVIDIA's CUPTI prints on an RTX 3060; unmodified nvprof traces a program on the T4 profile. `vgpu ncu` is this project's own `ncu`; Nsight Systems and Nsight Compute as NVIDIA ships them are not supported (`nsys` collects no CUDA data). See [nvidia/docs/cupti.md](../nvidia/docs/cupti.md) |
-| NVENC / NVDEC | `libnvidia-encode.so.1` answering the API as an RTX 3060 does, with compressing H.264 (CABAC or CAVLC, 8x8 transform, P and B pictures, slices) and HEVC (intra, P and B pictures) encoders and rate control, a lossless PCM stream for the lossless tuning, all of which ffmpeg decodes (and, being deterministic, video-encode SDC tests run), and `libnvcuvid.so.1` decoding Motion JPEG, H.264 (Baseline, Main and High, progressive and interlaced), HEVC (Main, Main 10 and the 4:2:0 range extension tools) and MPEG-2 (Main profile, frame and field pictures) into the card's surfaces, bit-exact with the card except MPEG-2's inverse DCT, which is within a level — see [nvidia/docs/libraries.md](../nvidia/docs/libraries.md) |
-| Proof | an nvcc-compiled CUDA program **and** the unmodified pantheon stress kernels run on the CPU; `memory_read` differential-matches a physical RTX 3060 (incl. fault injection + device printf) |
+These come first because they decide whether the simulator fits your use.
 
-Known limitations (deliberate, documented):
+**No timing.** It models what a GPU computes, not how long it takes. Performance counters that need a timing model (`%pm0` to `%pm7`, stall reasons, cache hit rates) are not provided. `%clock`, `%clock64` and `%globaltimer` return a deterministic count of the block's instructions, not time. A speed regression or a timing-dependent bug needs a physical GPU. Execution is an interpreter on CPU cores, so runs are much slower than a GPU.
 
-- Kernels run from **SASS** when the binary carries it (the default engine on
-  every generation from sm_75 to sm_120a, see [nvidia/docs/sass.md](../nvidia/docs/sass.md))
-  and from **PTX** otherwise (embedded, or in a fatbin; zstd fatbins are
-  decompressed). `VGPU_SASS=0` forces the PTX path.
-- Unmodified apps must link **shared** cudart (`nvcc -cudart shared`) so the
-  loader can substitute VirtualGPU's `libcudart.so.13`. The source is untouched;
-  hosting a *statically* linked cudart needs NVIDIA's undocumented driver export
-  tables and is future work. This is what stops CuPy, which links cudart
-  statically — see [nvidia/docs/jit.md](../nvidia/docs/jit.md).
-- `wmma` fragment layout is VirtualGPU's own (PTX leaves it unspecified) —
-  see [ARCHITECTURE.md](../ARCHITECTURE.md) D8. bf16, `cp.async`, `mma.sync`, `ldmatrix`, the
-  extended-precision carry family, textures, surfaces, grid sync, named
-  barriers, Hopper's warpgroup MMA (`wgmma`), TMA (multicast, reductions and
-  im2col included), thread-block cluster barriers and distributed shared
-  memory are implemented -- checked against CuTe and CUTLASS's own Hopper
-  unit tests, its convolutions among them. Every gap fails loudly
-  (instruction, PTX line, kernel, profile), never silently.
-- NVENC (video encode) is served by `libvgpunvenc`, presented as
-  `libnvidia-encode.so.1`: the API as an RTX 3060 answers it, with compressing
-  H.264 (CABAC or CAVLC, 8x8 transform, P and B pictures, slices) and HEVC (intra,
-  P and B pictures) encoders and rate control, and the lossless tuning written as
-  lossless PCM pictures; any decoder reads them (ffmpeg's is the test) and encoder
-  stress and corruption checks run. NVDEC
-  (`libvgpunvcuvid`, presented as `libnvcuvid.so.1`) decodes Motion JPEG, H.264
-  (Baseline, Main and High profile, progressive and interlaced), HEVC (Main,
-  Main 10 and the 4:2:0 range extension tools) and MPEG-2 (Main profile), and
-  reports every other codec (MPEG-1 and 4, VC-1, VP8, VP9, AV1) unsupported. OptiX (ray tracing) is a separate
-  NVIDIA subsystem, not CUDA, and is out of scope.
-- AMD runs gfx942 (MI300X, MI325X), gfx950 (MI350X), gfx90a (MI250X),
-  gfx1030 (Radeon RX 6900 XT and RX 6800, RDNA2), gfx1031 (Radeon RX 6700 XT), gfx1100 (Radeon RX 7900 XTX, RDNA3) and
-  gfx1201 (Radeon RX 9070 XT, RDNA4) and gfx1250 (MI455X, CDNA 5) code, through its own HIP and HSA runtimes; rocBLAS, hipBLASLt, MIOpen and
-  PyTorch run on it — see [amd/README.md](../amd/README.md).
+**Synchronous execution.** A kernel launch runs to completion inside the launch call, and streams are synchronous. This has known consequences:
 
-## Roadmap (abridged)
+- `cudaLaunchHostFunc` and `cuLaunchHostFunc` run the host function inline. The call blocks, `cudaStreamQuery` and event queries report complete, and a host function that waits for something the caller does later hangs ([#487](https://github.com/pantheongpu/pantheonsim/issues/487)).
+- A wait on a false condition cannot be modelled on a synchronous stream, so waiting stream operations are limited ([TODO.md](../TODO.md), gap register).
 
-The full list is in [TODO.md](../TODO.md).
+**A known wrong result.** `shfl.sync` returns 0 for a lane of its member mask that is still in a long loop while the other lanes have reached the shuffle ([#488](https://github.com/pantheongpu/pantheonsim/issues/488)). The simulator does not report this. Other gaps (unsupported instructions or API calls) fail with an error that names the instruction, PTX line, kernel and profile.
 
-Done: shared memory, warp shuffles and the PTX and SASS coverage listed in
-TODO.md; `vgpu run` and `vgpu test --matrix`; random and adversarial warp
-scheduling with race detection; the AMD frontend (HIP/ROCm, CDNA2 to CDNA5 and
-RDNA2 to RDNA4); hardware characterization for 14 NVIDIA profiles and 3 AMD
-profiles. Still open:
+**Shared cudart only.** CUDA programs must link the shared runtime (`nvcc -cudart shared`) so the loader can substitute the simulator's `libcudart.so.13`. Hosting a statically linked cudart needs NVIDIA's undocumented driver export tables; this was investigated and is blocked (see [TODO.md](../TODO.md), "Next milestones"). CuPy links cudart statically and does not run ([nvidia/docs/jit.md](../nvidia/docs/jit.md)).
 
-1. Static-cudart hosting (driver export tables) → no `-cudart shared` rebuild
-   (investigated and blocked, see [TODO.md](../TODO.md))
-2. Differential fuzzing against physical GPUs (oracle machines) → the rest of
-   the verified profiles, a conformance database, compat scores
-3. The gap register at the end of TODO.md
+**Not supported:**
+
+- OptiX (ray tracing) is a separate NVIDIA subsystem and is out of scope.
+- NVIDIA's Nsight Systems and Nsight Compute. `vgpu ncu` is this project's own `ncu`; `nsys` runs but collects no CUDA data ([nvidia/docs/cupti.md](../nvidia/docs/cupti.md)).
+- NVDEC decodes Motion JPEG, H.264, HEVC and MPEG-2 only. MPEG-1, MPEG-4, VC-1, VP8, VP9 and AV1 report unsupported.
+- The `wmma` fragment layout is the simulator's own, because PTX leaves it unspecified ([ARCHITECTURE.md](../ARCHITECTURE.md), D8). Kernels that load, multiply and store fragments through `wmma` get the same results as hardware; a kernel that depends on NVIDIA's element distribution may differ.
+- Divergence uses min-PC reconvergence, not full immediate-post-dominator handling. Irreducible control flow is not handled, and no test pins that ([TODO.md](../TODO.md), "Partially implemented").
+
+## How accurate it is
+
+- **Profiles.** 48 in total: 38 NVIDIA and 10 AMD (`vgpu list-gpus`; `nvidia/profiles/` and `amd/profiles/`). A profile marked `verified: true` was read from a physical card. That is 14 NVIDIA profiles and 3 AMD profiles; the other 31 are built from public documents and nothing in them was measured. Each profile's header says where its values came from.
+  - Verified NVIDIA: T4, A10, A10G, A100 (two profiles, `a100` and `a100-sxm4-40gb`), H100 and H100 PCIe, L4, L40S, RTX 3060, RTX 3080 Ti, GH200, RTX PRO 6000 Server Edition and RTX PRO 4500. Each reproduces the 512 values of the conformance checks run against that card.
+  - Verified AMD: MI325X, RX 6800, RX 6700 XT.
+  - Unverified profiles include H200, B200, B300, GB200, RTX 4090 and RTX 5090 and the other AMD GPUs (MI250X, MI300X, MI350X, MI455X, RX 6900 XT, RX 7900 XTX, RX 9070 XT). Rubin (`vr200`) and Jetson Thor carry placeholder PCI ids because NVIDIA has published none.
+  - Full tables: [nvidia/docs/profiles.md](../nvidia/docs/profiles.md) and [amd/README.md](../amd/README.md).
+- **Libraries.** The NVIDIA library shims are compared with NVIDIA's own libraries on a physical GPU for the cases listed in [nvidia/docs/libraries.md](../nvidia/docs/libraries.md) ("Verified against real hardware"). Libraries with no NVIDIA binary to compare against, or that are written from public documentation, say so there.
+- **Tests.** `make test` runs the suite; the CI jobs are listed in [docs/ci.md](ci.md). Tests that compile CUDA or HIP skip when `nvcc` or `hipcc` is missing.
+- **Workloads.** The pantheon stress workloads run on the simulator with `--verify` and are described in [docs/pantheon-workloads.md](pantheon-workloads.md). `rt_virus` needs OptiX and is excluded.
+
+## What runs
+
+### NVIDIA and CUDA
+
+| Area | What works | Details |
+| --- | --- | --- |
+| Compilers | Programs built with `nvcc` from CUDA 12 or 13 (`-cudart shared`). Kernels run from SASS when the binary has it (sm_75 to sm_120a), else from PTX. `VGPU_SASS=0` forces PTX | [sass.md](../nvidia/docs/sass.md) |
+| PTX | A large subset of the ISA, including `wmma`, `mma.sync`, `ldmatrix`, `cp.async`, bf16, textures, surfaces, grid sync, named barriers, Hopper `wgmma`, TMA, cluster barriers and distributed shared memory. Checked against CuTe and CUTLASS Hopper unit tests | [ARCHITECTURE.md](../ARCHITECTURE.md), [TODO.md](../TODO.md) |
+| Driver and runtime API | `libvgpucuda.so` and `libvgpucudart` (presented as `libcudart.so.13`): contexts, memory, modules, streams, events, graphs, memory pools, `cuMem*` virtual memory, multi-GPU with peer copies. Every function declared in `cuda.h` and `cuda_runtime_api.h` is exported; ones not implemented return a "not supported" status | [docs/driver-api.md](driver-api.md), [nvidia/docs/devices.md](../nvidia/docs/devices.md) |
+| Virtual memory | Sparse backing, so a simulated H200 reports 141 GB on a smaller host. Past `ram_mb` memory spills to disk. A host-memory guard turns a host out-of-memory into a device out-of-memory error. Out-of-bounds, use-after-free, double-free and misaligned accesses are reported | [docs/config.md](config.md) |
+| Libraries | cuBLAS, cuBLASLt, cuDNN, cuFFT, cuRAND, cuSPARSE, cuSPARSELt, cuSOLVER, cuTENSOR, cuTensorNet, cuStateVec, cuDSS (0.8 and 1.0), NCCL, NVRTC, NPP, nvJPEG, nvJitLink, nvFatbin, cuFile (compatibility mode), nvCOMP, NVSHMEM, under their real sonames | [libraries.md](../nvidia/docs/libraries.md) |
+| Frameworks | PyTorch's official CUDA 13 build runs on the simulated NVIDIA GPUs; its 12 whole-model checks (GPT, ResNet, LSTM, U-Net, ViT, MoE, DLRM and others) were run on seven profiles (T4, A100, L4, RTX 3060, H100, B200, RTX 5090) and compared with the CPU. Numba and Triton run unmodified | [pytorch.md](../nvidia/docs/pytorch.md), [jit.md](../nvidia/docs/jit.md) |
+| Discovery | NVML, `nvidia-smi` and `lspci` output for the simulated GPUs | [docs/telemetry.md](telemetry.md) |
+| Registers | PCI configuration space from a register database, `vgpu regs list/read/write/dump/log`, a C API (`vgpu_regs.h`) | [docs/registers.md](registers.md) |
+| Profiling | CUPTI's Activity and Callback APIs under the real soname; `torch.profiler` collects a GPU trace; unmodified `nvprof` works on the T4 profile. Event and Profiling metrics APIs are absent | [cupti.md](../nvidia/docs/cupti.md) |
+| Video | NVENC (`libnvidia-encode.so.1`) writes H.264 and HEVC streams that ffmpeg decodes. NVDEC (`libnvcuvid.so.1`) decodes Motion JPEG, H.264 (Baseline, Main, High), HEVC (Main, Main 10, 4:2:0 range extensions) and MPEG-2 (Main) | [libraries.md](../nvidia/docs/libraries.md) |
+
+### AMD and ROCm
+
+| Area | What works | Details |
+| --- | --- | --- |
+| Programs | `hipcc`-built programs from ROCm 6.4, 7.0, 7.1 and 7.2, through the simulator's own HIP and HSA runtimes | [amd/README.md](../amd/README.md) |
+| Architectures | gfx90a (MI250X), gfx942 (MI300X, MI325X), gfx950 (MI350X), gfx1250 (MI455X), gfx1030 and gfx1031 (RX 6900 XT, RX 6800, RX 6700 XT), gfx1100 (RX 7900 XTX), gfx1201 (RX 9070 XT). gfx942 code is checked instruction by instruction against ROCm's `llvm-objdump` | [amd/README.md](../amd/README.md) |
+| Libraries and tools | rocBLAS, hipBLASLt, MIOpen, rocPRIM/hipCUB, rocRAND, rocFFT, rocSPARSE, rocSOLVER, RCCL, PyTorch for ROCm; `rocprofv3`, `rocm-smi` and `amd-smi`. rocBLAS passes 162,807 float and double tests of its own quick suite | [amd/README.md](../amd/README.md), [rocprofiler.md](../amd/docs/rocprofiler.md) |
+
+The `vgpu` command-line tool (`list-gpus`, `info`, `demo`, `run`, `shell`, `config`, `test --matrix`, `ncu`, `counters`, `debug`, `fault`, `regs`, `smi`, `serve`) is documented in [cli.md](cli.md). Random and adversarial warp scheduling and shared-memory race detection are in [config.md](config.md) (`scheduler`, `race`).
+
+## Open work
+
+[TODO.md](../TODO.md) holds the full gap register. The largest items:
+
+1. Static-cudart hosting (blocked, see above).
+2. Asynchronous streams and host functions, which would remove the synchronous-engine limits ([#487](https://github.com/pantheongpu/pantheonsim/issues/487)).
+3. The `shfl.sync` wait ([#488](https://github.com/pantheongpu/pantheonsim/issues/488)).
+4. Reading the remaining profiles from physical cards, and a differential-testing database against real GPUs.
+
+Some entries in TODO.md predate later work (for example, it still lists the driver graph API as absent although `nvidia/src/driver_graph.cpp` implements it); treat its gap register as a lead to check, not a verified list.

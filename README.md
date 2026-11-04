@@ -1,39 +1,47 @@
 # PantheonSim
 
-**Run CUDA and HIP programs, unmodified, on a CPU. No GPU needed.** It pretends to be an NVIDIA or AMD GPU (a T4, an H100, an MI300X), so programs built with the real `nvcc` or `hipcc` run on it unchanged. It checks what your code does, not how fast it runs: there is no timing model, so a run on a physical GPU before a release still counts.
+A CPU-only simulator of NVIDIA and AMD GPUs. It provides simulated driver, runtime and library files (`libcuda`, `libcudart`, the HIP runtime, `nvidia-smi` and others), so a program built with the real `nvcc` or `hipcc` can run on a machine with no GPU. A profile per GPU model (a T4, an H100, an MI300X and 45 others) sets what the program sees.
+
+It checks what a program computes, not how fast a GPU would run it. There is no timing model.
 
 [![CI](https://github.com/pantheongpu/pantheonsim/actions/workflows/ci.yml/badge.svg)](https://github.com/pantheongpu/pantheonsim/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/pantheongpu/pantheonsim)](https://github.com/pantheongpu/pantheonsim/releases)
 [![License](https://img.shields.io/github/license/pantheongpu/pantheonsim)](LICENSE)
 
-[![The PantheonSim playground: nvcc and nvidia-smi on eight simulated H100s](docs/img/playground.png)](https://pantheonsim.com/play/)
+## Limits
 
-## Try it in 60 seconds
+- No timing. Timings from a run mean nothing, and `%clock` and `%globaltimer` count instructions, not time. Run on a physical GPU before a release if speed or real hardware behaviour matters.
+- The simulator executes kernels on CPU cores, so it is much slower than a GPU.
+- A CUDA program must link the shared runtime (`nvcc -cudart shared`). Programs that link cudart statically, such as CuPy, do not run.
+- Launches and streams are synchronous: a kernel runs to completion inside the launch call, and `cudaLaunchHostFunc` runs the host function inline ([#487](https://github.com/pantheongpu/pantheonsim/issues/487)). Code that depends on work being in flight can hang or see work as already done.
+- Open bug: `shfl.sync` returns 0 for a lane of its mask that is still in a long loop ([#488](https://github.com/pantheongpu/pantheonsim/issues/488)).
+- Not supported: OptiX, and NVIDIA's own Nsight Systems and Nsight Compute (`vgpu ncu` is this project's replacement for `ncu`).
+- 31 of the 48 GPU profiles come from public documents only and were not measured on a card (marked unverified in the profile).
+An unsupported instruction or API fails with an error that names it. [Status and limits](docs/status.md) has the rest.
 
-With Docker (no GPU, no driver, no `--gpus` flag):
+## Quickstart with Docker
+
+No GPU, driver or `--gpus` flag is needed:
 
 ```bash
 docker run --rm ghcr.io/pantheongpu/pantheonsim:latest vgpu list-gpus
 docker run --rm -e VGPU_GPU=nvidia/h100 -e VGPU_DEVICE_COUNT=2 ghcr.io/pantheongpu/pantheonsim:latest nvidia-smi
 ```
 
-The second command prints `nvidia-smi` output for two simulated H100s. The image has no compiler (`nvcc` and `hipcc` are not in it); see [docs/docker.md](docs/docker.md) to build a program inside a container, or use the source build below.
+The second command prints `nvidia-smi` output for two simulated H100s. The image has no `nvcc` or `hipcc`; [docs/docker.md](docs/docker.md) shows how to build a program inside a container.
 
-**What it is:** a CPU-side simulator of NVIDIA and AMD GPUs, so programs compiled with the real `nvcc` or `hipcc` run on a machine without a GPU. **What it isn't:** a performance model (timings mean nothing), and not every CUDA or HIP feature is covered; [Status and limits](docs/status.md) lists what is.
-
-## Run it from source
+## Build from source
 
 ```bash
 make     # installs cmake and a C++ compiler if missing (asks first), then builds
-./run    # starts a simulated GPU machine and takes you inside; type exit to leave
+./run    # starts a simulated GPU machine and takes you inside it; type exit to leave
 ```
 
-`./run` reads `pantheonsim.yaml` and writes one on the first run. To start from a ready-made file instead, use the sample: `./run pantheonsim.example.yaml` runs it as it is (one simulated H100), and `cp pantheonsim.example.yaml pantheonsim.yaml` makes it your default to edit. It lists every setting, and "Choose your machine" below explains them.
+Requirements: Linux (WSL works), CMake and a C++20 compiler. Run both commands from the repository root. `make doctor` lists what is missing, `make deps` installs it, and `make build` builds without installing anything. The build takes a few minutes and uses half of the CPUs (`make JOBS=8` to choose). The simulator also uses half of the CPUs; set `threads: N` in the settings file, or `make run THREADS=N`, to change that.
 
-You need Linux (WSL works), a C++20 compiler and CMake, and no GPU. Run both commands from the repository root: `make: *** No targets specified` or `./run: No such file or directory` means you are in another directory or on an old branch, so `git checkout main && git pull` first. `make doctor` checks the tools and says what to install, `make deps` installs them, and `make build` builds without installing anything. The build takes a few minutes and uses half your CPUs (`make JOBS=8` to choose). The simulator also runs on half your CPUs; set `threads: N` in the settings file, or `make run THREADS=N`, to change that. `./run` before `make` builds for you.
+`./run` reads `pantheonsim.yaml` and writes one on the first run. `./run pantheonsim.example.yaml` runs the sample file as it is (one simulated H100); copy it to `pantheonsim.yaml` to make it your default.
 
 Other targets:
-
 ```bash
 make demo                           # run a built-in vectorAdd kernel on a simulated H100; ends with PASS
 make run APP=./my_app ARGS="..."    # run one program on the simulated GPU, without the machine shell
@@ -41,13 +49,13 @@ make test                           # build and run the test suite
 make help                           # every target and setting
 ```
 
-Inside, `nvidia-smi` shows the GPUs, and you can compile, download programs with `curl` or `git clone`, and run them; for Python packages use a virtual environment (`python3 -m venv ~/v && ~/v/bin/pip install ...`); system packages (apt) are installed on your own machine, outside.
+Inside the machine, `nvidia-smi` shows the GPUs. Compilers, `curl`, `git` and Python come from your own machine. Use a virtual environment for Python packages (`python3 -m venv ~/v && ~/v/bin/pip install ...`). To build your own programs you need the vendor compiler installed; see [docs/toolchains.md](docs/toolchains.md).
 
-## Choose your machine
+## Choose the GPU
 
-Which GPUs: `make list-gpus` (or `build/vgpu list-gpus`) prints every id you can use, 48 NVIDIA and AMD cards from a T4 to a B300 and from an RX 6700 XT to an MI455X. Use the id as printed: `gpu: nvidia/t4` in the settings file, or `make run GPU=nvidia/t4`. `build/vgpu info --gpu nvidia/t4` shows one card. Some profiles were measured on a physical card and some come from public documents only; [Status and limits](docs/status.md) says which.
+`make list-gpus` (or `build/vgpu list-gpus`) prints the 48 ids you can use: 38 NVIDIA (T4 to B300) and 10 AMD (RX 6700 XT to MI455X). Set one with `gpu: nvidia/t4` in the settings file, or `make run GPU=nvidia/t4`. `build/vgpu info --gpu nvidia/t4` shows one profile. 14 NVIDIA and 3 AMD profiles were read from physical cards; the rest come from public documents. [Status and limits](docs/status.md) lists which.
 
-Put the settings in a file, for example `my.yaml`, then `./run my.yaml`. [pantheonsim.example.yaml](pantheonsim.example.yaml) lists every setting and runs as it is (`./run pantheonsim.example.yaml`); copy it to `pantheonsim.yaml` to make it the default, which is also what `./run` writes for you on a first run:
+Put settings in a file such as `my.yaml` and run `./run my.yaml`:
 
 ```yaml
 gpu: nvidia/h100     # which GPU (build/vgpu list-gpus shows them all)
@@ -55,7 +63,7 @@ count: 8             # how many
 strict: true         # refuse undefined behaviour, such as dividing by zero
 ```
 
-Every setting the file accepts (the full text for each is in [Settings](docs/config.md), and `build/vgpu config keys` prints it from the program):
+All settings ([Settings](docs/config.md) describes each; `build/vgpu config keys` prints them):
 
 | Key | Values | Default | What it does |
 | --- | --- | --- | --- |
@@ -82,10 +90,10 @@ Every setting the file accepts (the full text for each is in [Settings](docs/con
 | `quiet` | `true` or `false` | `false` | Silence every simulator message on stderr |
 | `trace` | `true` or `false` | `false` | Log every runtime and driver entry point |
 
-In a browser: [pantheonsim.com/play](https://pantheonsim.com/play/). In CI: `pantheongpu/setup-pantheonsim@v0` ([docs/github-action.md](docs/github-action.md)), or `scripts/ci-setup.sh` on GitLab CI, CircleCI, Forgejo, Jenkins and Buildkite ([docs/ci-other-platforms.md](docs/ci-other-platforms.md)). In a container: `docker run --rm ghcr.io/pantheongpu/pantheonsim:latest vgpu list-gpus` ([docs/docker.md](docs/docker.md)).
+Other ways to run it: in a browser at [pantheonsim.com/play](https://pantheonsim.com/play/); in CI with `pantheongpu/setup-pantheonsim@v0` ([docs/github-action.md](docs/github-action.md)) or, on other CI systems, `scripts/ci-setup.sh` ([docs/ci-other-platforms.md](docs/ci-other-platforms.md)).
 
-## Docs
+## Documentation
 
-[Getting started](docs/getting-started.md) (step by step, your own programs, first-run fixes) | [Settings](docs/config.md) | [The machine](docs/machine-simulator.md) | [Compilers](docs/toolchains.md) | [Commands](docs/cli.md) | [Status and limits](docs/status.md) | [Architecture](ARCHITECTURE.md) | [Contributing](CONTRIBUTING.md) | [Code of conduct](CODE_OF_CONDUCT.md) | [Governance](GOVERNANCE.md) | [Security](SECURITY.md)
+[Getting started](docs/getting-started.md) | [Settings](docs/config.md) | [The machine](docs/machine-simulator.md) | [Compilers](docs/toolchains.md) | [Commands](docs/cli.md) | [Status and limits](docs/status.md) | [Architecture](ARCHITECTURE.md) | [Contributing](CONTRIBUTING.md) | [Code of conduct](CODE_OF_CONDUCT.md) | [Governance](GOVERNANCE.md) | [Security](SECURITY.md)
 
-Questions go in [Discussions](https://github.com/pantheongpu/pantheonsim/discussions), bugs in [issues](https://github.com/pantheongpu/pantheonsim/issues). Apache-2.0 (see LICENSE); CUDA is a trademark of NVIDIA, and this project is not affiliated with NVIDIA or AMD.
+Questions go in [Discussions](https://github.com/pantheongpu/pantheonsim/discussions), bugs in [issues](https://github.com/pantheongpu/pantheonsim/issues). Apache-2.0 (see LICENSE). CUDA is a trademark of NVIDIA; this project is not affiliated with NVIDIA or AMD.
