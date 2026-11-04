@@ -7,6 +7,28 @@ release says what runs and what it produces, never how fast a real GPU would run
 
 ## Unreleased
 
+- PTX: a negated predicate source (`and.pred %p2, !%p0, %p1;`, also `or`, `xor`, `not.pred` and the predicate of `selp`) is accepted. drjit-core
+  emits it for boolean operations, and the module used to fail to load with `expected operand, got '!'`.
+- PTX: `ldu.global` (the uniform load, scalar and `.v2`/`.v4`) runs as the `ld.global` it stands for.
+- PTX: the array-element address `var[imm]` (`st.local.b32 arr[0], %f0;`, also `[arr[1]]`) is accepted for `.local`, `.shared`,
+  `.global` and `.const` arrays. The index counts elements of the declared type; one outside the array is refused.
+- PTX: a `.func` can take its parameters and return its value in `.reg`s (`.func (.reg .b32 r) f(.reg .u64 data)`), and a call
+  (direct, or through a `.callprototype` with `.reg`s) passes registers or numbers for them.
+- libcuda exports the OpenGL, EGL and VDPAU interop functions (`cuGraphicsGLRegisterBuffer`,
+  `cuGraphicsGLRegisterImage`, `cuGLGetDevices`, `cuGLCtxCreate`, the legacy `cuGL*BufferObject` family,
+  `cuGraphicsEGLRegisterImage`, `cuEGLStream*`, `cuVDPAU*`, `cuGraphicsVDPAURegister*`) and `cuGetProcAddress`
+  finds them. They answer `CUDA_ERROR_NOT_SUPPORTED`, since a simulated GPU has no display stack; before, a loader
+  such as Dr.Jit that looks the names up when it loads libcuda turned its CUDA backend off.
+- `cuLaunchKernel`, `cuLaunchKernelEx` and graph kernel nodes take the `extra` argument form
+  (`CU_LAUNCH_PARAM_BUFFER_POINTER`, `CU_LAUNCH_PARAM_BUFFER_SIZE`, `CU_LAUNCH_PARAM_END`) that cudarc and Dr.Jit
+  launch with. The buffer holds the kernel's parameters at the offsets `cuFuncGetParamInfo` reports. A list with no
+  buffer or size, a size short of the parameters, a repeated or unknown key, no `CU_LAUNCH_PARAM_END`, or both
+  `kernelParams` and `extra` is `CUDA_ERROR_INVALID_VALUE`; it used to be `CUDA_ERROR_NOT_SUPPORTED` for every list.
+- cuDSS 1.0 runs. The simulator's cuDSS is now presented as `libcudss.so.1` (1.0: its version macros,
+  `cudaDataType_t` signatures, `cudssSetJitCacheDir` and the pinned-memory handler functions, the four new
+  config parameters, Bunch-Kaufman accepted) with `libcudss.so.0` (0.8) kept beside it, unchanged, so programs
+  built against either major run. A program built against NVIDIA's 1.0, such as SCS's `run_tests_cudss`, no
+  longer stops with "needs libcudss.so.1, but this build of the simulator has no libcudss.so" (#426).
 - A kernel run from PTX no longer fails to launch when its register estimate is up to twice the block's register
   file. The estimate is the peak of live virtual registers and ptxas needs fewer, so ggml's `rms_norm_f32`
   (88 estimated, 64 allowed at 1,024 threads) stopped Ollama running Gemma 3 on the RTX PRO 6000 profile, the one

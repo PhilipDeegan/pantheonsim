@@ -933,17 +933,26 @@ if(CUDA_ABI_INCLUDE)
   endforeach()
 
   # ---------------------------------------------------------------------------
-  # libvgpucudss: cuDSS, the sparse direct solver, presented as libcudss.so.0.
-  # Like cuStateVec, NVIDIA's carries a statically linked CUDA runtime that
-  # cannot reach a simulated driver, so the simulator answers the documented
-  # API itself, from its own declarations (nvidia/include/vgpu_cudss.h), and
-  # factors on the host (nvidia/src/cudss_solver.cpp). NVIDIA's exports its
-  # symbols with no version tag, so these carry none: the map only keeps the
-  # solver's internals out of the dynamic symbol table.
+  # libvgpucudss: cuDSS, the sparse direct solver, presented as libcudss.so.1
+  # (cuDSS 1.0) and, beside it, libcudss.so.0 (0.8): a program is built
+  # against one major or the other, and NVIDIA's apt repository carries both
+  # side by side. Like cuStateVec, NVIDIA's carries a statically linked CUDA
+  # runtime that cannot reach a simulated driver, so the simulator answers the
+  # documented API itself, from its own declarations (nvidia/include/vgpu_cudss.h),
+  # and factors on the host (nvidia/src/cudss_solver.cpp).
+  #
+  # The two are one source built twice: libvgpucudss with VGPU_CUDSS_API_0_8
+  # (the 0.8 declarations and defaults, exactly as before 1.0 existed) and
+  # libvgpucudss1 without. NVIDIA's 0.8 exports its symbols with no version
+  # tag, so the 0.8 build carries none; NVIDIA's 1.0 tags every one
+  # "libcudss.so.1", so a program linked against it asks for
+  # cudssCreate@libcudss.so.1, and this build defines exactly that. In both
+  # the map keeps the solver's internals out of the dynamic symbol table.
   # ---------------------------------------------------------------------------
   set(_cudss_map "${CMAKE_BINARY_DIR}/maps/libcudss.so.0.map")
   file(WRITE "${_cudss_map}" "{\n  global: cudss*;\n  local: *;\n};\n")
   add_library(vgpucudss SHARED nvidia/src/cudss_api.cpp nvidia/src/cudss_solver.cpp)
+  target_compile_definitions(vgpucudss PRIVATE VGPU_CUDSS_API_0_8)
   target_link_libraries(vgpucudss PRIVATE vgpucudart)
   target_include_directories(vgpucudss PRIVATE ${CUDA_ABI_INCLUDE} include)
   set_target_properties(vgpucudss PROPERTIES OUTPUT_NAME cudss SOVERSION 0 VERSION 0.8)
@@ -955,6 +964,23 @@ if(CUDA_ABI_INCLUDE)
     COMMAND ${CMAKE_COMMAND} -E create_symlink "../libcudss.so.0.8"
             "${CMAKE_BINARY_DIR}/shim/libcudss.so"
     COMMENT "Creating cuDSS shim symlinks (build/shim/libcudss.so.0)")
+
+  set(_cudss1_map "${CMAKE_BINARY_DIR}/maps/libcudss.so.1.map")
+  file(WRITE "${_cudss1_map}" "libcudss.so.1 {\n  global: cudss*;\n  local: *;\n};\n")
+  add_library(vgpucudss1 SHARED nvidia/src/cudss_api.cpp nvidia/src/cudss_solver.cpp)
+  target_link_libraries(vgpucudss1 PRIVATE vgpucudart)
+  target_include_directories(vgpucudss1 PRIVATE ${CUDA_ABI_INCLUDE} include)
+  # Its own directory: both are OUTPUT_NAME cudss, and each makes a libcudss.so.
+  set_target_properties(vgpucudss1 PROPERTIES OUTPUT_NAME cudss SOVERSION 1 VERSION 1.0.0
+                        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/cudss1")
+  target_link_options(vgpucudss1 PRIVATE "-Wl,--version-script=${_cudss1_map}")
+  # build/shim/libcudss.so stays the 0.8 library: a program built against the
+  # shim with -lcudss and no header choice gets what it always did.
+  add_custom_command(TARGET vgpucudss1 POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/shim"
+    COMMAND ${CMAKE_COMMAND} -E create_symlink "../cudss1/libcudss.so.1.0.0"
+            "${CMAKE_BINARY_DIR}/shim/libcudss.so.1"
+    COMMENT "Creating cuDSS shim symlink (build/shim/libcudss.so.1)")
 
   # ---------------------------------------------------------------------------
   # libvgpucufile: cuFile (GPUDirect Storage), presented as libcufile.so.0. A
@@ -1345,6 +1371,8 @@ target_compile_definitions(test_exec PRIVATE VGPU_KERNEL_DIR="${CMAKE_SOURCE_DIR
 vgpu_unit_test(test_runtime)
 vgpu_unit_test(test_exec2)
 vgpu_unit_test(test_exec3)
+# PTX forms JIT compilers emit: negated predicate sources, .reg .func parameters, var[imm] addresses, ldu.
+vgpu_unit_test(test_ptx_forms)
 # Hopper (sm_90a): the warpgroup MMA, against the ISA's own layout examples.
 vgpu_unit_test(test_hopper)
 # Blackwell (sm_100a): Tensor Memory and tcgen05, against the ISA's figures.
@@ -1433,6 +1461,8 @@ vgpu_unit_test(test_sass_s2r_fill)
 vgpu_unit_test(test_sass_ldgsts)
 # LD and ST of generic addresses: the tier's window rule against the interpreter and the rule written out.
 vgpu_unit_test(test_sass_generic_mem)
+add_test(NAME test_sass_generic_mem_simd_base COMMAND test_sass_generic_mem)
+set_tests_properties(test_sass_generic_mem_simd_base PROPERTIES ENVIRONMENT "VGPU_SIMD=base")
 # CALL.REL, RET, WARPSYNC and FCHK run by the tier's own code, and a whole warp's shared-memory offsets, against the interpreter's: registers and counters.
 vgpu_unit_test(test_sass_dispatch)
 target_include_directories(test_sass_dispatch PRIVATE src)
@@ -1531,6 +1561,39 @@ vgpu_unit_test(test_e2e_parity)
 # LU, LDL^T and Cholesky with their pivoting, inertia, on random matrices.
 vgpu_unit_test(test_cudss_solver nvidia/tests/unit/test_cudss_solver.cpp)
 vgpu_unit_test(test_cuda_attributes nvidia/tests/unit/test_cuda_attributes.cpp)
+# The two cuDSS ABIs the shim presents (libcudss.so.0 = 0.8, libcudss.so.1 = 1.0): one source built against each.
+if(TARGET vgpucudss AND TARGET vgpucudss1 AND TARGET vgpucudart)
+  foreach(_v IN ITEMS 0 1)
+    add_executable(test_cudss_abi_v${_v} nvidia/tests/unit/test_cudss_abi.cpp)
+    target_include_directories(test_cudss_abi_v${_v} PRIVATE tests/framework ${CUDA_ABI_INCLUDE})
+    target_link_libraries(test_cudss_abi_v${_v} PRIVATE vgpucudart ${CMAKE_DL_LIBS})
+    add_test(NAME test_cudss_abi_v${_v} COMMAND test_cudss_abi_v${_v})
+    set_tests_properties(test_cudss_abi_v${_v} PROPERTIES ENVIRONMENT "VGPU_GPU=nvidia/rtx3060;VGPU_QUIET=1")
+  endforeach()
+  target_compile_definitions(test_cudss_abi_v0 PRIVATE VGPU_CUDSS_API_0_8)
+  target_link_libraries(test_cudss_abi_v0 PRIVATE vgpucudss)
+  target_link_libraries(test_cudss_abi_v1 PRIVATE vgpucudss1)
+  add_executable(test_cudss_both nvidia/tests/unit/test_cudss_both.cpp)
+  target_include_directories(test_cudss_both PRIVATE tests/framework ${CUDA_ABI_INCLUDE})
+  target_link_libraries(test_cudss_both PRIVATE vgpucudart ${CMAKE_DL_LIBS})
+  add_dependencies(test_cudss_both vgpucudss vgpucudss1)
+  add_test(NAME test_cudss_both COMMAND test_cudss_both)
+  set_tests_properties(test_cudss_both PROPERTIES ENVIRONMENT "VGPU_GPU=nvidia/rtx3060;VGPU_QUIET=1")
+  # `vgpu run` on a program that needs libcudss.so.1 (SCS built against cuDSS 1.0), and on one that needs .so.0.
+  # The probes carry no RUNPATH to the build tree, so the shim directory is what finds the library.
+  foreach(_v IN ITEMS 0 1)
+    add_executable(cudss_soname_probe_v${_v} nvidia/tests/e2e/cudss_soname_probe.cpp)
+    target_include_directories(cudss_soname_probe_v${_v} PRIVATE ${CUDA_ABI_INCLUDE})
+    set_target_properties(cudss_soname_probe_v${_v} PROPERTIES SKIP_BUILD_RPATH ON)
+  endforeach()
+  target_compile_definitions(cudss_soname_probe_v0 PRIVATE VGPU_CUDSS_API_0_8)
+  target_link_libraries(cudss_soname_probe_v0 PRIVATE vgpucudss)
+  target_link_libraries(cudss_soname_probe_v1 PRIVATE vgpucudss1)
+  add_test(NAME cudss_run_sonames COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_cudss_sonames.sh
+           $<TARGET_FILE:cudss_soname_probe_v0> $<TARGET_FILE:cudss_soname_probe_v1>)
+  set_tests_properties(cudss_run_sonames PROPERTIES DEPENDS "vgpu_cli;cudss_soname_probe_v0;cudss_soname_probe_v1"
+    ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}" SKIP_REGULAR_EXPRESSION "^SKIP:" TIMEOUT 300)
+endif()
 target_sources(test_cudss_solver PRIVATE nvidia/src/cudss_solver.cpp)
 target_include_directories(test_cudss_solver PRIVATE nvidia/src)
 # nvCOMP's host codecs on their own: round trips at every size and effort,
@@ -1778,6 +1841,17 @@ foreach(_t gfx1100 gfx1201 gfx1030 gfx1250)
   add_test(NAME test_amd_gcn_memruns_${_t} COMMAND test_amd_gcn_memruns)
   set_tests_properties(test_amd_gcn_memruns_${_t} PROPERTIES ENVIRONMENT "VGPU_TEST_TARGET=${_t}")
 endforeach()
+
+# A byte or a short a lane over consecutive addresses as one call to the memory manager, against lane by lane (narrowruns.c).
+vgpu_unit_test(test_amd_gcn_narrowruns amd/tests/unit/test_gcn_narrowruns.cpp)
+target_compile_definitions(test_amd_gcn_narrowruns PRIVATE VGPU_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+foreach(_t gfx1100 gfx1201 gfx1030 gfx1250)
+  add_test(NAME test_amd_gcn_narrowruns_${_t} COMMAND test_amd_gcn_narrowruns)
+  set_tests_properties(test_amd_gcn_narrowruns_${_t} PROPERTIES ENVIRONMENT "VGPU_TEST_TARGET=${_t}")
+endforeach()
+# (The interpreter's own path, with the pre-decoded tier off.)
+add_test(NAME test_amd_gcn_narrowruns_notier COMMAND test_amd_gcn_narrowruns)
+set_tests_properties(test_amd_gcn_narrowruns_notier PROPERTIES ENVIRONMENT "VGPU_AMD_TIER=0")
 
 # A dispatch spread over host threads (amd/src/gcn_pool.hpp): the pool's tasks once each and all at once, forks, the caller's
 # floating-point environment; memory and counts the same on any thread count, over many dispatches and from several callers,
@@ -2568,6 +2642,27 @@ if(TARGET vgpucuda AND CUDA_ABI_INCLUDE)
   add_test(NAME test_driver_launch_ex COMMAND test_driver_launch_ex)
   set_tests_properties(test_driver_launch_ex PROPERTIES ENVIRONMENT "VGPU_GPU=nvidia/h100;VGPU_QUIET=1")
 endif()
+# cuLaunchKernel's `extra` argument form (pantheonsim #471).
+if(TARGET vgpucuda AND CUDA_ABI_INCLUDE)
+  add_executable(test_driver_launch_extra nvidia/tests/unit/test_driver_launch_extra.cpp)
+  # The driver's graph calls go to the runtime in the process (driver_graph.cpp), so it is linked in for the node case.
+  target_link_libraries(test_driver_launch_extra PRIVATE vgpucuda)
+  if(TARGET vgpucudart)
+    target_link_libraries(test_driver_launch_extra PRIVATE -Wl,--no-as-needed vgpucudart)
+  endif()
+  target_include_directories(test_driver_launch_extra PRIVATE tests/framework ${CUDA_ABI_INCLUDE})
+  add_test(NAME test_driver_launch_extra COMMAND test_driver_launch_extra)
+  set_tests_properties(test_driver_launch_extra PROPERTIES ENVIRONMENT "VGPU_GPU=nvidia/a100;VGPU_QUIET=1")
+endif()
+# The OpenGL, EGL and VDPAU interop names of libcuda, exported and refused (pantheonsim #470).
+if(TARGET vgpucuda AND CUDA_ABI_INCLUDE)
+  add_executable(test_driver_gl_stubs nvidia/tests/unit/test_driver_gl_stubs.cpp)
+  target_link_libraries(test_driver_gl_stubs PRIVATE vgpucuda ${CMAKE_DL_LIBS})
+  target_include_directories(test_driver_gl_stubs PRIVATE tests/framework ${CUDA_ABI_INCLUDE})
+  target_compile_definitions(test_driver_gl_stubs PRIVATE VGPU_CUDA_INCLUDE="${CUDA_ABI_INCLUDE}")
+  add_test(NAME test_driver_gl_stubs COMMAND test_driver_gl_stubs)
+  set_tests_properties(test_driver_gl_stubs PROPERTIES ENVIRONMENT "VGPU_GPU=nvidia/a100;VGPU_QUIET=1")
+endif()
 # Runtime entry points the toolkit exports and this one lacked (cudaMemset3D,
 # cudaChooseDevice, cudaDeviceGetByPCIBusId, the 2D array copies, the texture
 # descriptor getters, cudaFuncGetName and cudaFuncGetParamInfo, ...).
@@ -2771,7 +2866,7 @@ if(TARGET vgpucublas)
                           "blas_level23_paths:cublas" "blas_host_sums:cublas" "blas_grouped:cublas" "blas_packed_paths:cublas"
                           "blas_batched_paths:cublas" "blas_64_paths:cublas" "blas_legacy_paths:cublas"
                           "rand_paths:curand" "rand_host_fill:curand" "npp_host_ops:nppc:nppial:nppif:nppig:nppim:nppitc" "managed_paths:cuda" "array_paths:cuda" "complex_paths:cublas:cusolver"
-                          "nvrtc_paths:nvrtc:cuda" "statevec_paths:custatevec" "cudss_kkt:cudss" "cudss_paths:cudss"
+                          "nvrtc_paths:nvrtc:cuda" "statevec_paths:custatevec" "cudss_kkt:cudss" "cudss1_kkt:cudss1" "cudss_paths:cudss"
                           "cufile_paths:cufile" "nvcomp_paths:nvcomp" "nvcomp_manager:nvcomp" "nvcomp_streaming:nvcomp" "nvcomp_cpu:nvcomp_cpu:nvcomp"
                           "nvshmem_host:nvshmem_host" "solver_dense_paths:cusolver" "solver_rf_paths:cusolver"
                           "solver_sparse_ll_paths:cusolver:cusparse" "nvjpeg_paths:nvjpeg" "nvjpeg_damaged:nvjpeg"

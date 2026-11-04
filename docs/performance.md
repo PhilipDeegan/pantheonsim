@@ -6419,6 +6419,66 @@ bench.py canaries (13 workloads x SASS and PTX, 15 alternating runs, cpu 10, cou
 | rodinia gaussian | 0.880 | 0.898 | <0.001 |
 The gains add: the gather-bound rows keep part 1's gain (ATAX 0.797 alone), the short-kernel rows keep part 2's (gaussian 0.917 alone, hotspot 0.967 alone). Part 2 moves six bench.py canary rows more than 2% the wrong way (`wmma` PTX 0.978, `shared` PTX 0.975, `atomics` SASS 0.981, `atomics` PTX 0.975, `api` SASS 0.971, `api` PTX 0.973; 25 runs beside an A/A of 1.000-1.003) on workloads whose executed code it does not touch; read as code placement in the single LTO unit, not fixed (see the layout notes of rounds sp4 to sp10).
 
+## Round sp16 (AMD): byte and short global accesses of the AMD engine, as runs (branch `sp16-amd`, base 705ed36f)
+
+Profiled first (server3, Zen 4, `perf record -e cycles:u`, one host thread, `bench_amd <workload> full` on the MI300X profile, base 705ed36f). Shares of the cycles, outside the
+pre-decoded tier's arithmetic kernels:
+
+| workload | top symbols (share of cycles) |
+| --- | --- |
+| `narrow` | `wave_scalars` 31.8, `tier_global` 16.5, `MemoryManager::load_batch_in` 7.8, `store_batch_in` 7.5, `batch_addresses_ok` 6.7 |
+| `atomics` | `wave_atomics` 30.4, `global_access` 12.9, `rmw_batch_fn` 12.1, `atomic_result` 8.2 |
+| `buf` | `buffer_words` 26.0, `batch_addresses_ok` 13.9, `load_batch_in` 13.2, `buffer_access` 10.1 |
+| `flat` | `global_access` 18.7, `memory_run` 16.3, `flat_access` 15.6 |
+| `mem` | `memory_run` 13.7, `h_l64_avx2` 13.2, `run_groups` 10.6, `wave_scalars` 8.9, `tier_global` 8.0 |
+| `lds`, `ldsx`, `wave` | `h_ds_avx2` 20 to 27, `run_groups` 17 to 25, `memory_run` 12 to 18 |
+| `divergent`, `smem` | `run_groups` 25 and 27, `h_mad_u64_avx2` 12 (divergent) |
+| `valu_*` | the host program's own check (`main`, libm) is 43 to 69%; the engine is 22 to 31% |
+
+`wave_scalars` is the path for a byte or a short a lane: the addresses of the active lanes are collected, `load_batch` / `store_batch` make the accesses together, and the values go back
+lane by lane. A word or more a lane with consecutive addresses already went to memory as one call (`memory_run`: `load_run` / `store_run`); a byte or a short never did, though a
+`char` or `half` array read a lane at a time (images, strings, quantized weights, fp16 loads) is exactly consecutive addresses.
+
+### What changed
+
+`Machine::narrow_run` (`amd/src/gcn_exec.cpp`, out of line as `memory_run` is): the lanes from the current one that are active and take addresses a byte (or a short) apart go to memory as one
+`load_run` / `store_run` with the element as the unit, and a load widens each element into its lane (zero- or sign-extended). It declines, having done nothing, where `memory_run` does (fewer than two
+lanes, a fault armed, a host mapping, a run not inside one allocation, a misaligned run), and the lanes then go to `wave_scalars` and one at a time as before. The interpreter's `global_access` calls it
+for the plain-register forms; the tier's byte and short accesses moved out of `tier_global` into `tier_narrow` (`amd/src/gcn_tier_machine.inc`), so the word loop of `tier_global` has only lost its sub-dword
+branches. The load memo's rule (a lane that reads the address the lane before it read takes that value) is kept: a run does not start on such a lane, and the last element of a run is the next lane's memo.
+Same bits: results, error text and counters do not change.
+
+### Results (server3, `perf stat` user cycles and instructions, cpu 3, 15 alternating runs, A = 705ed36f built from this tree before the change, B = branch; `VGPU_THREADS=1`, `full` size)
+
+| workload / target | instructions B/A | cycles B/A | p |
+| --- | ---: | ---: | ---: |
+| `narrow` MI300X | 0.498 | **0.505** | <0.001 |
+| `narrow` RX 6800 | 0.713 | **0.774** | <0.001 |
+| `mem`, `flat`, `buf`, `atomics`, `lds`, `ldsx`, `divergent`, `wave`, `valu_int`, `valu_f32`, `smem` (MI300X) | 0.998 to 1.001 | 0.970 to 1.012 | `atomics` 0.970 and `ldsx` 1.012 (p < 0.01), the rest p > 0.01 |
+| the same eleven on the RX 6800 | 1.000 to 1.007 | 0.934 to 1.031 | see below |
+
+Rows that run no narrow instruction and still moved on the RX 6800: `mem` 1.031 and `lds` 1.026 (equal instructions to within 0.5% and 0.7%), `flat` 0.957 and `atomics` 0.934. Four code
+placement results of the library in both directions, as the sp13 and sp14 rounds saw for other changes (the A/A of the same binary against itself reads 0.992 to 1.004 on the rows tried), so they are not a claim either way.
+`bench.py --ab`'s counters-identical check says `yes` on the 24 rows of the first A/B (`/tmp` run of 12 workloads, both targets).
+
+### Tests (CMake-wired)
+
+* `test_amd_gcn_narrowruns` (new; kernels `amd/tests/data/narrowruns.c`, built for gfx942, 1030, 1100, 1201 and 1250 and run on all five, and once more with `VGPU_AMD_TIER=0` for the interpreter's own path): ten copy
+  and widening-load kernels (byte and short, signed and not, 64-bit and 32-bit offsets) over 18 address patterns (consecutive, reversed, strided, repeated, overlapping stores, misaligned, over chunk and allocation edges, off the end,
+  wild, random) and 7 lane masks, 3 draws each; the run path on and off against twin memories: memory images, resident bytes, error text, wave / instruction / VMEM / flat counts. And a pair of directed cases: sixteen lanes
+  storing a byte to one address (the last lane stays), and a signed load of bytes with the top bit set. The five code objects are in `codeobject_digests.txt` (`test_amd_codeobject_same_bits`).
+* Mutations of `narrow_run` (rebuilt and run on server3; each fails the test): sign extension ignored (both targets, 0 of 2 pass); a short stored as one byte (1 of 2 pass); the run not stopping at an inactive lane
+  (fails on gfx1030, passes on gfx942: the wave32 masks catch it); the next lane's memo taking the first element (1 of 2).
+* Also run and passing: `test_amd_gcn_memruns`, `test_amd_gcn_memory_same_bits` (tier on and off), `test_amd_gcn_same_bits`, `test_amd_gcn_tier_same_bits`, `test_amd_gcn_narrow`, `test_amd_gcn_memory`,
+  `test_amd_codeobject_same_bits`.
+
+### Not done
+
+* `wave_atomics` + `rmw_batch_fn` + `atomic_result` are 51% of `atomics`: the per-lane callback does a switch on the operation each lane; a batch specialised by operation (add, min, max, and, or, xor) would drop it. Not tried.
+* `buffer_words` (26% of `buf`) reads each lane's offset and bounds through generic code; raw buffer accesses with a plain-register offset have no run path. Not tried.
+* `run_groups` (the wave stepping loop, 10 to 27% of the memory and control rows) is where the per-instruction overhead of the interpreter sits, as `step_warp` is for SASS; the sp14 round's work on the SASS run loop has no AMD twin yet.
+* ASan, UBSan and TSan were not run on this change; it touches no threaded or atomic code, and the buffers are fixed-size stack arrays of twice the wave size.
+
 ## Round sp18 (SASS): the global-memory path (branch `sp18-sass`, base `sp17-speed` dd3adb43)
 
 The question: what does the SASS tier spend its instructions on in the gather-bound real programs, and in the issue loop? Measured first, on server3 (Zen 4), with `perf record -e instructions:u -c 1000000` on one thread (`VGPU_THREADS=1`, SASS, `nvidia/rtx3060`), PolyBench/GPU and Rodinia from the Round sp8 corpus, and the canary workloads with `-c 2000000`.
@@ -6479,6 +6539,47 @@ Step by step (single runs, instructions B/A on ATAX / GEMM / SYR2K): the new `wa
 * Calls inside the library go through the PLT (`batch_faults_clear`, `find_ordinary_miss`, `host_map_free_span`'s callees): `-Wl,-Bsymbolic-functions` would remove it but changes which copy of a function the shim libraries that each carry the core bind to; not looked at beyond the flag above.
 * `load_batch` (13 to 26% of the gather rows) is 14 instructions a lane and bound by the L1 misses; `load_broadcast` is still about 110 instructions a call (the fault checks, the lookup, the chunk test, the fill).
 * `POPC` calls libgcc's `__popcountdi2` per lane (3% of `int_alu`): the AVX2 unit is compiled with `target("avx2")` and no `popcnt`.
+
+## Round sp21 (AMD): float division on real HIP programs (branch `sp21-amd`, base `origin/main` 179c886f)
+
+Question: where does the AMD tier spend its time on real HIP programs, beyond PolyBench? Built for gfx942 with `hipcc -O2` after `hipify-perl`: 18 of 22 HeCBench programs (the reduced set's `-cuda` sources; `attention` needs `cooperative_groups/reduce.h`, `bh` a 64-bit `__shfl_sync` mask, `black-scholes` and `s3d` do not hipify cleanly) and 8 Rodinia apps (hotspot, gaussian, needle, pathfinder, bfs, lud, nn, srad; backprop's C files do not compile as hip). Profiled with the `LD_PRELOAD` `SIGPROF` sampler (`tools/bench-amd/profile`, `SIGPROF_STACK=1` for callers), one thread, `amd/mi300x`. Most of them finish in under a second at their reduced sizes; the ones with seconds in them:
+
+| program | top of the profile (self time) |
+|---|---|
+| bilateral | `h_div` 28 %, libm `ldexpf` 19 %, `modf` 14 %, `ilogb` 4 % (the libm entries are called from `h_div`: 265 of 342 `ldexpf` samples, all of the `ilogb`) |
+| aobench | `h_div` 19 %, `h_f32_avx2` 17 %, `ldexpf` 10 %, `run_groups` 12 % |
+| aidw | `h_div` 14 %, `h_f32_avx2` 13 %, `h_pk` 12 %, `ldexpf` 10 %, `modf` 6 % |
+| radixsort2 | `vector_alu` lambda 17 %, `run_groups` 15 %, `wave_scalars` 14 %, `h_cndmask_avx2` 8 %, `load_batch` 7 % |
+| shmembench | `h_ds_avx2` 38 %, `ds_run_read` 20 %, `run_groups` 19 %, `ds_run_write` 19 % (already SIMD; a bandwidth test) |
+
+### What changed
+`v_div_scale_f32/f64` (`div_scale` in `amd/src/gcn_divide.hpp`, run per lane by the tier's `h_div`) classified its operands with `fpclassify`, `isfinite`, `ilogb` and `scalbn` and scaled with `ldexp`, all libm calls: every float division is two `v_div_scale`. When S1 and S2 are normal numbers (the usual case) every test is now a test of the exponent and mantissa fields (`div_scale`), and the scaling by 2^+-64 / 2^+-128 moves the exponent field of a normal number (`scale_by_pow2`; zero, denormals, infinities, NaNs, or a result out of the normal range go to `ldexp`). Any other operand takes the old code, kept as `div_scale_reference`. The interpreter (`gcn_exec.cpp`) calls `div_scale_reference`: it stays the independent oracle for the tier's same-bits tests, and its machine code is what it was (editing the inlined code of `gcn_exec.cpp` re-rolled the layout of the whole AMD canary: first attempt with the interpreter on the new code lost 3 to 6 % on `valu_int`, `smem`, `mfma_i8`, `p_smem_wide`, `launch_*`).
+
+### Results (Zen 5, server2 cpu 13, `VGPU_THREADS=1`, user-time median of 9 alternating runs, A = origin/main, W = this branch, counters equal, program output (stdout without timing lines, and files) equal in every run)
+| program | A (s) | W (s) | W/A |
+|---|---:|---:|---:|
+| silu | 0.78 | 0.38 | **0.487** |
+| bilateral | 2.00 | 0.96 | **0.480** |
+| aobench | 0.90 | 0.61 | **0.678** |
+| aidw (10 0 1) | 41.7 | 32.0 | **0.767** |
+| hotspot (512) | 0.15 | 0.11 | 0.733 |
+| lud (1024) | 0.76 | 0.74 | 0.974 |
+| gaussian, needle, srad | 0.43, 0.24, 0.08 | same | 1.000 |
+| radixsort2 | 5.36 | 5.48 | 1.022 |
+| shmembench | 3.12 | 3.11 | 0.997 |
+Rows under 0.3 s time start-up as much as the tier; hotspot's 0.15 s is within a couple of timer ticks of 0.11 s, not a claim. radixsort2 and shmembench use no division and are the controls (no A/A copy was timed for the programs).
+
+`bench-amd` canary (mi300x, 44 rows, one thread, 15 runs, cpu 13; `--check-counters`: 66 workload/target pairs match): no division in the canary, so it only measures layout. W/A: `mfma` 1.012, `mfma_i8` 0.978 (A against a copy of A: 0.987), `smfmac` 1.006, `narrow` 0.970 (A/A 1.007), `p_smem_wide` 0.943 (A/A 0.989; stable in a re-run, 0.944), `mem` 0.992, `smem` 1.008, `flat` 1.003, `atomics` 0.984 (re-run 1.008), `divergent` 0.996, `valu_int` 0.992, `p_sbuf` 1.040 (A/A 0.960..1.012), `p_lane` 0.996; the other rows within 0.99..1.03. Two rows lose at equal counters and are not recovered: `p_smem_wide` -5.6 % and `narrow` -2 %, which moved with a no-op change to which unit holds the division code (a `noinline` wrapper of `div_scale` in the tier changed neither) and are the placement lottery of Round sp14 again. `lint_hot_unit_layout` passes.
+
+### Tried and dropped
+`v_ldexp_f32` (`k_fldexp`, `__builtin_ldexpf` per lane; 3 % of bilateral): the same bit trick (no libm call for a normal number that stays normal) made it 2 to 3 % faster there and `p_lane` 4.5 % slower at equal counters, from the placement of the handlers behind it in `gcn_tier.cpp`; not kept. Tier-mutants of that version (bound `<= 255`, shift 22) were killed by `test_amd_gcn_tier_same_bits`.
+
+### Tests and mutants
+`test_amd_gcn_divide` (existing, in CI): `a_float_div_scale_is_the_reference_for_every_operand`, `a_double_...` (the edge values squared, random operands of every exponent, exponent differences at the quotient's two ends, denormals; S0 each of the denominator, the numerator and a third value; the value's bits and the condition equal to `div_scale_reference`) and `scaling_by_a_power_of_two_is_ldexp` (every edge value and random ones, k from -300 to 300). The reference is the old code, so no golden value is recorded. The tier's `test_amd_gcn_tier_same_bits` (interpreter on the reference, tier on the new code, every `v_div_scale` of the corpora) passes. Mutants of the fast path, each built and run against the test: `d1 > -kMinExp` to `>=`: killed (2 tests fail); `e2 - e1 >= kFar` to `>`: killed; `diff < kMinExp` to `<=`: killed; mantissa test `<` to `<=`: killed; `e2 <= kTiny` to `<`: killed; the exponent range test of `scale_by_pow2` `< kMaxExp` to `<=`: killed (3 fail); `>= 1` to `>= 0`: killed (3 fail).
+
+### Not done
+* `radixsort2`'s `vector_alu` lambda / `wave_scalars` / `run_groups` share (the next biggest real-program cost seen) and the other division instructions (`v_div_fmas`/`v_div_fixup` are cheap, `scaled_fma` only runs with VCC set).
+* RX 6800 (gfx1030) builds of the programs were not timed; `div_scale` is shared, so the effect is the same code.
 
 ## Round sp19 (AMD): the LDS-load double free, and gathered dwordx3/dwordx4 stores on AMD (branch `sp19-amd`, base `sp18-amd` bf4e7622)
 
@@ -6776,3 +6877,111 @@ Three copies of A's bytes give 14.8 / 14.7 / 15.7 / 15.7, so `p_lane` moves by 6
 * The A/A control is one copy; the p_lane table shows that several copies are needed for a 15 ms row. Rows under 20 ms (`p_lane`, `p_dpp*`, `startup`) are not claimed either way.
 * The PolyBench programs here are the MINI datasets scaled by the corpus (0.1 s to 120 s); GEMM-class programs measure at 0.5 s and mostly time the host reference check as well.
 * Zen 4 was not part of this round. Timed windows were at load 4 to 7 from other sessions.
+
+## Round sp21 (rodinia-profile): shared-memory bank counting and IMAD.HI (branch `sp21-rodinia`, base `origin/main` 179c886f)
+
+The question: where do the Rodinia rows and the stencil PolyBench rows (hotspot, needle, pathfinder, gaussian, lud, backprop, 2DCONV, 3DCONV, JACOBI2D, FDTD-2D) spend their instructions, and which handlers have avoidable work? Measured on server3 (Zen 4), one thread, SASS, `nvidia/rtx3060`, `perf record -e instructions:u -c 1000000` and `-e cycles:u -c 400000`, corpora of `tools/bench/real`.
+
+### What the profile said (base build, share of instructions retired)
+* needle: `step_warp` 23%, **`sass_bank_passes_offsets` 17%**, `h_shared<false>` 10%, `sass_bank_passes_widened` 4.5%. lud: `h_shared<false>` 18%, **`sass_bank_passes_offsets` 13%** (and 60% of its cycles are the program's own `lud_verify`). hotspot: `step_warp` 18%, bank passes 7%, `h_shared<false>` 7%. backprop: `step_warp` 17%, **`h_imad_hi` 9.3%**, `load_batch` 7%. gaussian: `step_warp` 14%, `sectors_hash` 8%, `init_block` 14% of the cycles (38% of it two `rep stos`: the register file and the shared array of every block). pathfinder and lud are mostly the program's own host code and libc `random`. 2DCONV, 3DCONV, JACOBI2D: `step_warp` 14 to 26%, `load_run` 6 to 12%, `warp_rows_k` 5 to 9%, `run_allocation` 4%, `count_run` 3 to 7%.
+* `sass_bank_passes_offsets` counted, per call, from the entry that answered last, with a 32-entry table. Counting its calls (a temporary counter, not kept): needle 3.1 M calls, **21% of them misses** (each takes `sass_bank_passes_widened`, about 400 instructions) although the kernel has only some hundred shapes; lud 15.5 M calls, 88% full warps, the entry that answered last answered only 58% (a loop that alternates two shapes asks for the other one every time, and then pays the hash and a second compare); hotspot 85% last-entry hits. The misses of needle were not a capacity matter (a table of 128 changed nothing): the hash samples eight lanes of the key (1, 3, 6, 10, 15, 21, 26, 31), and a partial warp has most of those lanes at zero in the key (a lane that does not run is taken at the first lane's word), so the forty masks of a wavefront's diagonals were all one slot and evicted each other.
+* `h_imad_hi` made a 128-bit sum for each lane (about 25 instructions a lane, scalar), for the high word of a * b + c: the wide multiply-add kernel (`imad_wide`) already computes that sum modulo 2^64 with the carry out.
+
+### What changed
+1. **Bank passes**: (a) the hash takes the lane mask, so shapes that differ in the mask alone no longer share a slot; (b) 128 entries for the 32-bit table (`BankMemo::kEntries32`; the 64-bit table keeps 32); (c) `MOp::way` (unused by a shared access until now) is the instruction's own entry, asked first instead of the one that answered last (`sass_bank_passes_offsets(..., hint)`; only ever a place to look first, read and written relaxed, masked to the table); (d) the partial-mask rows come from a 16-row table instead of being built from the nibble with five vector operations a group.
+2. **IMAD.HI** through `c.sk->imad_wide` (low word thrown away, `rhi` stored, the carry out as before): the 32-bit addend extended by the sign of the product's kind, the negated 64-bit addend made in rows as `h_imad_wide` does.
+
+### Results (counters and outputs identical in every row: `VGPU_COUNTERS=1` stdout/stderr hashed with the timing lines dropped)
+Zen 4 (server3), one thread, cpu 4, `perf stat -e instructions:u,cycles:u`, alternating A B, 9 runs (FDTD-2D 3), medians, Mann-Whitney p on cycles; A = origin/main 179c886f, B = this branch, each built here and frozen. Load 1 to 9 from other sessions. A/A (A against itself, 9 runs): cycles 0.999 to 1.020 (backprop 1.020 p 0.10, JACOBI2D 1.010, the others 1.000 +- 0.002), instructions exactly 1.0000.
+| program | instructions B/A | cycles B/A | p |
+|---|---:|---:|---:|
+| rodinia needle | 0.9436 | 0.9287 | <0.001 |
+| rodinia backprop | 0.9267 | 0.9065 | <0.001 |
+| rodinia lud | 0.9889 | 0.9866 | <0.001 |
+| rodinia hotspot | 0.9992 | 0.9919 | 0.45 |
+| rodinia gaussian | 1.0000 | 1.0044 | 0.06 |
+| rodinia pathfinder | 1.0010 | 1.0061 | 0.20 |
+| polybench 2DCONV | 1.0000 | 1.0155 | 0.10 |
+| polybench 3DCONV | 1.0000 | 1.0134 | 0.007 |
+| polybench JACOBI2D | 1.0000 | 0.9932 | 0.35 |
+| polybench FDTD-2D (480 G cycles a run, 3 runs) | 1.0000 | 1.0203 | 0.05 |
+| polybench ATAX | 1.0000 | 0.9995 | 0.57 |
+| polybench GEMM | 1.0000 | 0.9916 | 0.12 |
+The stencil rows have no shared memory and no IMAD.HI: their instructions are exactly equal and the +1 to +2% of cycles on 2DCONV, 3DCONV and FDTD-2D is where the linker put the code (the hot units moved with the edits to `tier_ops.inc` / `exec_ops.inc`; a first build that also had the change below read gaussian +3.1% and FDTD-2D +1.5%, the same lottery with another roll). Not fixed, as in the rounds before (see sp4 to sp10). `lint_hot_unit_layout` passes. The bench.py canary could not be run: server3 has no nvcc for its program (the key of the cached program includes the nvcc path).
+
+### Tried and not kept
+* `MemoryManager::run_out` / `run_in` (the 128-byte runs of the stencil loads and stores) four words to a step instead of one: 6 instructions per 8 bytes become about 2.75; instructions -2.2% on 2DCONV, 3DCONV, JACOBI2D and -2.2% on FDTD-2D, cycles -0.3% to -2.8% (3DCONV 0.975, p 0.002), but gaussian +3.1% in the same build with equal instructions (layout). With the change taken out gaussian reads +0.4% (p 0.06). Reverted (commit kept in the history, then its revert): a win in instructions that the cycles do not show on three of four rows and that costs a layout roll.
+* A table of 128 entries alone (without the mask in the hash): needle's misses stay at 21%.
+* Left alone: `init_block`'s two `rep stos` (gaussian; the register file and shared array of every block must be zero, so it is the memory traffic), `sectors_hash` (gaussian), `step_warp` (flat, see sp18).
+
+### Tests (CMake-wired, no GPU) and mutations
+* `test_bank_memo`: `an_entry_hint_is_only_a_place_to_look_first` (hints: per instruction, another instruction's, any byte, none; four shapes with different answers, masks drawn from four; the table must not enter its back-off), `warps_that_differ_in_the_mask_alone_do_not_all_share_one_slot` (sixteen masks over lanes the hash does not sample), `every_nibble_of_a_partial_mask_selects_its_own_lanes_in_the_key` (two masks that differ in one group of four lanes, every pair of 16 patterns, 8 groups, six random word assignments each: random masks never differ in one group alone).
+* `test_sass_alu_runs`: `imad_hi_gives_the_interpreters_registers_and_counters_signed_unsigned_and_negated` (IMAD.HI and IMAD.HI.U32 with a pair addend R0:R1 .. R8:R9 or RZ, negated or not, 12 seeds, 32/33/100 threads, tier against `VGPU_FASTPATH=0`; also under `VGPU_TIER=0`). The 32-bit addend form (`!(aux & 4)`) is not reachable from an encoding this assembler makes and is not covered by a test; it is the `h_imad_wide` extension rule written the same way.
+* Mutants built and run on server3 (each killed): hash without the mask (hash-collision test); partial-mask rows 5, 6 and 15 wrong, row 8 zeroed (nibble tests; rows 5/6/15 survived the first two versions of the test, which is why the pairs test exists); hint hit answering with the wrong entry's passes; a hint miss that skips the key compare; IMAD.HI: negation ignored, low word stored, sign ignored, negated high word shifted by 33. Survived, equivalent in results: the hint ignored in favour of the last entry (a performance change only; checked by the instruction counts above).
+* Also run, all pass: `test_tier`, `test_sass_mem_rows` (and `VGPU_SIMD=base`), `test_memfast`, `test_sass_dispatch`, `test_sass_block_reuse`, `test_memalloc`, `test_exec`, `test_memhot_sp8`, `test_gather_sp10`, `test_sass_generic_mem` (and `VGPU_SIMD=base`), `test_warp_stride_access`, `test_sass_access_count`, `test_memrmw`, `test_memcopy_direct`, `test_fastpath`, `test_memcpy_chk`, `test_jit_resid`, `test_sass_atomics`, `test_sass_ldgsts`, `test_sched`, `lint_hot_unit_layout`. Not run: sanitizer builds, the AMD guards, the canary harness (CI).
+
+## Round sp21 (address rows) (branch `sp21-addr`, base `main` 85ec63a5)
+
+The question: how much of the SASS tier's instructions is a full warp's address row (`warp_rows_k`) and the `IMAD.WIDE` that makes the address, in programs whose accesses are runs or one address, and how much of it can go without a change of any result or counter?
+
+### What the profile said first (A = main 85ec63a5, server3, `perf record -e instructions:u -c 20000000`, one thread, SASS, `nvidia/rtx3060`; share of instructions retired)
+| program | `warp_rows_k` | `imad_wide_avx2` | `h_global` (both) | `step_warp` |
+|---|---:|---:|---:|---:|
+| babelstream (`-s 1048576 -n 3`) | 6.7% | 11.2% | 10.5% | 17.6% |
+| aligned-types | 5.3% | (`iadd3x_k` 16.5%) | 7.9% | 26.9% |
+| polybench 2MM | 15.3% | | 9.7% | |
+| polybench GEMM | 16.3% | | 11.0% | |
+| polybench FDTD-2D | 9.2% | 8.3% | 4.1% | 22.0% |
+The survey's 23% for `warp_rows_k` in babelstream (a cycles figure) was **not reproduced**: it is 6.7% of the instructions here, and the cycles samples of this run (a 240 s cut under load from other jobs: 67 samples) are too few to say more than "about 6%". The 2MM, GEMM and FDTD-2D shares are as estimated (9 to 16%). `imad_wide` is the larger of the two in babelstream (11%) and FDTD-2D (8%), and alignedTypes is not an address-row program (its top is `iadd3x_k`).
+
+### What changed
+* **A run or a one-address load is asked of the registers' rows alone** (`simd::warp_run_kernel`, `warp_run_k`, AVX2; null at `VGPU_SIMD=base|off`). For a full warp the 32 lanes' base pair is lane 0's plus `l * step` modulo 2^64 (the added offset is the same for every lane and cancels), found eight lanes to a step in 32-bit arithmetic without making the 64-bit addresses and without storing them: the low words against `lo0 + l * step`, the high words against `hi0 + carry`, where the carry is the low sum being below `lo0` (`l * step` is below 2^32, so it wraps at most once); with no high row the carry must be zero. About 45 instructions where `warp_rows_k` is about 115 and stores 32 addresses. `step` is the access size (a run) or 0 (every lane the same address).
+* **`h_global`** asks it first for a full warp (`MOp::shape`: the shape of the last full warp of this instruction, run / one address / neither, so that an instruction that is neither, a gather, pays nothing for it; relaxed atomic, only ever a place to start). A run goes straight to `load_run`/`store_run` with lane 0's address. A load of one address goes to `load_broadcast` and is counted by `count_global_progression` with stride 0, as before. When the memory manager declines, or the address is in the constant window, the address kernel runs as if this had not been tried (the registers are not yet written), so a decline, a fault and its error text are what they were. The addresses made after a successful one-address load, for the rare case that the closed-form count declines, are the one address (the destination may have overwritten the base).
+* **`IMAD.WIDE` finds its carry-out only when a predicate takes it** (`imad_wide_k` with a null `carry_out`; `Carry` and `Cin` are template parameters, so the two 64-bit unsigned compares per half and the carry-in add are not made for an address computation). The sum is the same.
+* Not done: **fusing `IMAD.WIDE` into the address kernel**. The pair is a register write that later instructions may read, and the tier has no liveness for registers, so the fused kernel would have to write it anyway; the saving is the one load of the pair, not the multiply. Not tried.
+
+### Results (server3, one thread, cpu 10, `perf stat -e instructions:u,cycles:u`, alternating A B A' (A' = A from another copy of the library dir, the A/A control), 15 runs; A and B each in 3 fresh copies of the library dir, runs cycle through them; medians; Mann-Whitney p on cycles; stdout and `VGPU_COUNTERS=1` text identical in every row (a separate pass over 15 programs, below))
+A = main 85ec63a5 built here and frozen, B = the branch. Load of the box 3 to 25 from other sessions during the runs; the A/A rows are the control.
+| program | runs | instructions B/A | cycles B/A | p | A/A instructions / cycles (p) |
+|---|---:|---:|---:|---:|---|
+| babelstream (-s 4194304 -n 4) | 15 | 0.921 | 0.947 | <0.001 | 1.000 / 1.003 (0.82) |
+| polybench GEMM | 15 | 0.927 | 0.957 | <0.001 | 1.000 / 1.003 (0.44) |
+| polybench 3MM | 15 | 0.922 | 0.949 | <0.001 | 1.000 / 1.002 (0.82) |
+| polybench GEMVER | 15 | 0.920 | 0.951 | <0.001 | 1.000 / 1.002 (0.82) |
+| polybench GESUMMV | 15 | 0.961 | 0.966 | 0.012 | 1.000 / 0.990 (0.10) |
+| polybench BICG | 15 | 0.947 | 0.962 | <0.001 | 1.000 / 0.999 (0.69) |
+| polybench MVT | 15 | 0.943 | 0.957 | <0.001 | 1.000 / 1.003 (0.47) |
+| polybench ATAX | 15 | 0.943 | 0.953 | <0.001 | 1.000 / 1.001 (0.37) |
+| polybench 2DCONV | 15 | 0.948 | 0.977 | <0.001 | 1.000 / 1.007 (0.82) |
+| polybench 3DCONV | 15 | 0.958 | 0.969 | <0.001 | 1.000 / 0.998 (0.58) |
+| polybench JACOBI1D | 15 | 0.944 | 0.940 | <0.001 | 1.000 / 0.994 (0.44) |
+| polybench JACOBI2D | 15 | 0.946 | 0.956 | <0.001 | 1.000 / 1.002 (0.42) |
+| polybench SYRK | 15 | 0.959 | 0.970 | 0.001 | 1.000 / 1.007 (0.72) |
+| polybench SYR2K | 15 | 0.954 | 0.966 | <0.001 | 1.000 / 0.999 (0.66) |
+| polybench FDTD-2D | 7 | 0.933 | 0.953 | 0.009 | not run (4 minutes a run) |
+| polybench 2MM | 7 | 0.924 | 0.979 | 0.11 (not significant) | not run (4 minutes a run) |
+
+The instruction ratios are the reliable column (they moved by under 0.001 from run to run; every A/A instruction ratio is 1.000). Cycles are 3 to 5 points less than instructions, as in sp14 and sp18 (the gathers wait on L1 misses). The A/A cycle ratios are 0.990 to 1.007, so a cycle gain under 2% is not claimed: 2DCONV's 0.977 (A/A 1.007) is the smallest one that is. **2MM and FDTD-2D have 7 runs each, not 15, and no A/A, because a run is 4 minutes; 2MM's cycle ratio (0.979, p 0.11) is not a significant gain**, its instructions are. **alignedTypes was not A/B'd** (a run is over 20 minutes; its profile above says `warp_rows_k` is 5.3% of its instructions and the change touches little else there, so at most a few percent is to be expected). Rodinia (hotspot, gaussian, needle) is not in the corpus on server3 and was not measured; a program with no full-warp run or broadcast and no `IMAD.WIDE` would see none of this.
+
+Where the gain comes from (instructions only, one run each, A, C = B with the `IMAD.WIDE` change taken out, B): babelstream 0.944 / 0.921, 2DCONV 0.958 / 0.948, SYRK 0.963 / 0.959, GEMM 0.928 / 0.927, 3MM 0.923 / 0.922, ATAX 0.943 / 0.943. The run and one-address test is most of it everywhere; the carry-less `IMAD.WIDE` is worth 2.3 points in babelstream, 1 in 2DCONV, and nothing where `IMAD.WIDE` is rare.
+
+The estimate in the survey (23% and 10.5% in babelstream) was too high; the measured upper bound on this change was the share of `warp_rows_k` plus `imad_wide` (18% of instructions in babelstream, 24% in FDTD-2D), and the result is 7.9% fewer instructions in babelstream and 6.7% in FDTD-2D.
+
+### Same bits
+Standard output (timing lines dropped) and the `VGPU_COUNTERS=1` text of every kernel (instructions, lanes, global/shared/local operations, bytes, sectors, requests, bank conflicts, class mix) are identical between A and B for babelstream (62 kernels), GEMM, 2MM, 3MM, GEMVER, GESUMMV, BICG, MVT, ATAX, 2DCONV, 3DCONV (254 kernels), JACOBI1D (20,000 kernels), JACOBI2D, SYRK, SYR2K, ADI (2,049 kernels) and FDTD-2D (1,500 kernels), at the sizes above.
+
+### Tests (CMake; framework-free `vtest`)
+* `test_sass_mem_rows` (and its `VGPU_SIMD=base` twin): `warp_run_kernel_is_the_definition`, 400,000 random rows against the lane definition (the pair is lane 0's plus `l * width` modulo 2^64) for widths 0, 1, 2, 4 and 8, rows with and without a high row, first lanes within a warp's reach of 2^32 (the carry at every lane and at none), near 2^64 (the wrap), a lane off by one bit of either word, by an element, by a missing or extra carry; at least 50,000 runs, 50,000 non-runs and 20,000 carried runs are required.
+* `test_sass_generic_mem` (now also as `test_sass_generic_mem_simd_base`, which the sp14 note said existed and did not): `full_warp_runs_at_the_end_of_the_allocation` (runs ending at the end of the allocation and 1, 4, 8, 32 bytes before and past it, every access size, guards; tier against the interpreter, the error text identical where the access faults, and it requires both outcomes); `global_accesses_over_several_warps` and `global_accesses_whose_shape_changes_from_warp_to_warp` (blocks of 64, 96 and 128 threads: the shape hint set by one warp is wrong for the next, mode 6: the first warp's lanes at one address, the later warps on a stride; full warps and the half warps a guard leaves; bytes, registers and every counter against the interpreter); `imad_wide_carry_out_predicate_guards_a_store` (lanes whose 64-bit sum wraps store under the carry-out predicate; 20, 32, 64 and 96 threads; the sums and the stores against the rule written out and the interpreter).
+* `test_simd`: `imad_wide` over the eight combinations of signed/unsigned, carry-in mask or none, carry-out asked or not (a null `carry_out` is never written through).
+* Also run, all pass, at the default level and `VGPU_SIMD=base`: `test_sass_alu_runs`, `test_sass_dispatch`, `test_sass_atomics`, `test_sass_block_reuse`, `test_sass_ldgsts`, `test_memcopy_direct`, `test_fastpath`, `test_exec`, `test_sass_lea`, `test_memcount_forms`, `test_memfast`, `test_tier`, `test_gather_sp10`, `test_warp_stride_access`, `test_sass_access_count` (36 runs of 18 programs). Sources build with `-Werror` on server3 (GCC 13) and compile with g++-12 `-fsyntax-only`.
+
+### Mutations (a one-line change on server3, the test named failed; reverted)
+Killed: run kernel's step `8 * bytes` to `8 * bytes + 1`; carry not subtracted from the high word; the no-high-row carry check removed; lane 0's high word not used (all `test_sass_mem_rows`). `h_global`: the run's base without `urv + imm`; the kernel asked with a width of 4 always; the one-address load counted with a stride of 4; the one-address load not sign-extended; its 8-byte high words not written (all `test_sass_generic_mem`). IMAD.WIDE: the tier asking for no carry ever (first survived, no test had a carry-out predicate through the tier: `imad_wide_carry_out_predicate_guards_a_store` was added and kills it); carry-in ignored when no carry-out is asked; carry-out from the first compare only (both `test_simd`).
+Survived, equivalent: the run taken in the constant window with the first window test removed (the next test in the same condition, `g0 >= kWinEnd || g0 + n - 1 < kConstWindow`, says the same); a declined run not making the address rows (the older scalar pass that builds them when `rows` is false then does, so the answer is the same and only slower); the constant-window test of the one-address load (the memory manager has no allocation there, so `load_broadcast` declines and the batch path faults as before). The shape hint is a performance hint only: no result depends on it, so no test can tell.
+
+### Not done / unverified
+* `e2e_sass_tier`, `e2e_sass_archs`, the AMD guards, ASan, UBSan and TSan builds (no nvcc on server3, no sanitizer build run): CI. The shape byte is read and written with relaxed `__atomic` builtins, as `way` is passed to relaxed atomics, for TSan.
+* alignedTypes and Rodinia not A/B'd (above); 2MM and FDTD-2D with 7 runs; the box carried load 3 to 25 from other sessions, so the cycle columns are less sharp than the instruction columns; the cycles profile of the first table was too sparse to use.
+* A strided gather (ATAX's `A[i][k]`) still goes through the full address pass, which needs its addresses; a progression of any stride other than 0 and the access size would need its address fill when the access falls back, and the gain there is the 8 stores of a kernel that is about 115 instructions.
+* The PTX engine and the AMD engine are untouched.
