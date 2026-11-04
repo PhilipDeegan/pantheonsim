@@ -454,7 +454,7 @@ struct BankTable {
 // run off the top of the space (the caller counts those). T is the address type (a lane's 64-bit address, or its 32-bit
 // offset); the lanes are the set bits of `m`, which is not zero and has no bit above 31.
 template <class T>
-inline bool bank_passes_bitmap(const T* addrs, uint64_t m, uint32_t bytes, uint32_t& out) {
+[[gnu::noinline]] inline bool bank_passes_bitmap(const T* addrs, uint64_t m, uint32_t bytes, uint32_t& out) {
   constexpr unsigned kRows = 64;
   T held[32];
   const T* a = addrs;   // (the lanes that run, side by side: a full warp's are the caller's array)
