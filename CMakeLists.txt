@@ -1371,6 +1371,7 @@ target_compile_definitions(test_exec PRIVATE VGPU_KERNEL_DIR="${CMAKE_SOURCE_DIR
 vgpu_unit_test(test_runtime)
 vgpu_unit_test(test_exec2)
 vgpu_unit_test(test_exec3)
+vgpu_unit_test(test_ptx_bitwise_not)
 # PTX forms JIT compilers emit: negated predicate sources, .reg .func parameters, var[imm] addresses, ldu.
 vgpu_unit_test(test_ptx_forms)
 # Hopper (sm_90a): the warpgroup MMA, against the ISA's own layout examples.
