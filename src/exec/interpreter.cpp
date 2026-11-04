@@ -1580,6 +1580,13 @@ struct BcCache {
   BlockFormat format = BlockFormat::None;
   DecodedBlock block{};
 };
+// The host thread's table of bank passes by warp shape (made on the thread's first warp that needs it).
+[[gnu::noinline]] memcount::PtxBankMemo& thread_bank_memo() {
+  thread_local std::unique_ptr<memcount::PtxBankMemo> memo;
+  if (!memo) memo = std::make_unique<memcount::PtxBankMemo>();
+  return *memo;
+}
+
 thread_local BcCache t_bc;
 
 uint64_t bc_texel_bits(const MemoryManager& mem, const TextureDesc& d, uint32_t x, uint32_t y, uint32_t z, uint32_t ch) {
@@ -5552,7 +5559,10 @@ class Interpreter {
       // access wider than a word touches consecutive words, which the hardware
       // takes in separate passes -- counting each word is what makes a
       // conflict-free 8-byte access come out as conflict-free.
-      const uint32_t worst = memcount::ptx_bank_passes(addrs.data(), m, W_, span);
+      // (The closed forms first; a warp on no stride goes to the host thread's table of passes by shape.)
+      uint32_t worst;
+      if (!memcount::ptx_bank_passes_closed(addrs.data(), m, W_, span, worst))
+        worst = memcount::ptx_bank_passes_open(thread_bank_memo(), addrs.data(), m, W_, span);
       stats_.shared_bank_conflicts += worst - 1;
       ++stats_.shared_requests;
       if (is_store) {
