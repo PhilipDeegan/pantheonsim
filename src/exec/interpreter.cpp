@@ -8648,8 +8648,11 @@ class Interpreter {
           if (op->ty.is_float())
             r[lane] = float_sign_op(op->ty.bits, v[lane], op->ftz, /*negate=*/false);
           else {
-            int64_t x = op->ty.bits == 64 ? static_cast<int64_t>(v[lane])
-                                          : int64_t{static_cast<int32_t>(v[lane])};
+            // A 16-bit register may hold zeros above bit 15 (mov.b16, cvt.u16.u32), so the value is
+            // the low `bits` bits sign-extended, not the 32-bit register read as s32.
+            const uint32_t bits = op->ty.bits;
+            int64_t x = bits >= 64 ? static_cast<int64_t>(v[lane])
+                                   : static_cast<int64_t>(v[lane] << (64 - bits)) >> (64 - bits);
             r[lane] = static_cast<uint64_t>(x < 0 ? -x : x);
           }
         }
