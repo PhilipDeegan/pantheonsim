@@ -14,6 +14,9 @@ release says what runs and what it produces, never how fast a real GPU would run
   only where the host has a toolkit. `-v HOST:DEST[:ro]` (repeatable) adds host paths the way `docker run -v` does and `--home DIR`
   keeps `/root`. Where user namespaces are refused it exits `1` rather than fall back to the host's files. Default behaviour is
   unchanged. See [docs/machine-simulator.md](docs/machine-simulator.md#a-private-root---rootfs).
+- PTX accepts unary `~` on an integer constant (`and.b64 %rd3, %rd3, ~0x2;`), alone, nested, with `-` or in
+  parentheses, at the width of the instruction; the lexer used to stop with `unexpected character '~'`
+  (pantheonsim #483).
 - PTX: a negated predicate source (`and.pred %p2, !%p0, %p1;`, also `or`, `xor`, `not.pred` and the predicate of `selp`) is accepted. drjit-core
   emits it for boolean operations, and the module used to fail to load with `expected operand, got '!'`.
 - PTX: `ldu.global` (the uniform load, scalar and `.v2`/`.v4`) runs as the `ld.global` it stands for.
