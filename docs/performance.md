@@ -7236,3 +7236,43 @@ A survey of the 123 real programs of the Phase 0 set (polybench, rodinia, HeCBen
 * The PTX engine (`VGPU_SASS=0`) and the AMD engine have their own search and the same blind spot is possible; not looked at.
 * `SummarizationKernel` also waits on cells other blocks write (its source says "must all be resident"); it is not taken by the lockstep path and finished in sequence in the runs here (its pre-passes are wait-free), but at 2 or more threads a bad order could still spin. It did not in the 12 runs above; not changed.
 * The e2e script itself was not run (needs nvcc); `ctest -R lockstep` and the sanitizer jobs are CI.
+
+## Round sp24 (fingerprint): the first lockstep look of a launch waits for what the last look cost (branch `sp24-fingerprint`, base `sp19-ptx` bccfa63b)
+
+The question: the lockstep fingerprint (the fold of every warp's registers and the shared memory of each resident block, `lockstep_worker` in `include/vgpu/exec/lockstep.hpp`) was still 25.6% of radixsort2's cycles after the eight-chain fold. Is it the fold, building the input, or the call, and what is the cheapest change that moves no result?
+
+### Diagnosis (server3, Zen 4, cpu 13, `VGPU_SASS=0`, `nvidia/rtx3060`, one thread, RelWithDebInfo with `-fno-omit-frame-pointer`)
+* `perf record -F 3000 --call-graph dwarf` puts 33.0% of radixsort2's cycles in the `{lambda(unsigned int)#1}` of `launch_grid` (the host thread's body, with `run_lockstep` and `lockstep_worker` inlined into it); `perf annotate -l` on that symbol puts **88.7% of its samples on two source lines, `lockstep.hpp:131` and `:132`, the fold's chain step** (`s[i] = (s[i] ^ w[i]) * kPrime; s[i] ^= s[i] >> 29`), 1.3% on the loop line (`:130`) and 2.6% on the `memcpy` of the words. So it is the fold itself, not the input and not the call.
+* Why a rule that bounds a look to a thirteenth of the time (`check_every = max(250 us, 12 x the look's cost)`) still gave a third: counters in `lockstep_worker` (temporary, not shipped) on radixsort2 `-float -keysonly -n=65536`: **400 launches, 400 looks, exactly one look per launch, 0 of them finding the blocks standing still, 0 naps**; 3.5 s of the 9.7 s the workers ran was those 400 looks (about 8.7 ms for 9 resident blocks, a PTX register file being every virtual register of the kernel). A launch of the sort lasts about 24 ms, its blocks store nothing for the first 250 us, so the one look every launch makes is the first one, at 250 us, before the 12x rule has measured anything. sortKV: 32 launches, 32 looks, 0.45 s of 0.97 s. SYRK and the other non-lockstep programs: 0 launches in `lockstep_worker`.
+* A look decides one thing, whether the thread sleeps between passes (`same >= 2`). It reaches no register, memory, counter or error text; when it is made is already a function of the wall clock (250 us, then 12x its own cost).
+
+### What changed
+`lockstep_worker` keeps, per call site (so per engine: PTX, SASS, AMD), what the last look cost **for each resident block** (`look_ns_per_block`, a relaxed atomic, 0 until a look has been made). A launch that has not looked yet takes its first look after `max(250 us, 12 x that x the blocks resident now)`, at most 500 ms (`lockstep_first_look`); once it has looked, `check_every` is what it was (`max(250 us, 12 x the look just made)`). Both helpers are `[[gnu::noinline]]`: see the layout paragraph below. Nothing is skipped or approximated: when a look is made it folds exactly what it folded.
+Same bits by construction: the only input changed is the time of a look, which already was a wall-clock quantity, and the look's only effect is the nap. A block that stands still is still found out (a look 250 us in when nothing has been learned, the third equal look sleeping, as before). The cost of the change is that a launch with big register files and a block really waiting for another is found waiting later (by up to 12 looks' worth, at most 0.5 s for the first look), which spins a host thread, with `yield()` between passes, a little longer before it naps.
+Not done, and why: folding only the live registers (the kernel's virtual register count is known, liveness is not; a dead register that differs would make two looks differ, a different fingerprint rule) and dirty-tracking (a spin loop writes registers every turn, so a dirty block would be folded every time; the blocks that are not dirty are not the cost here).
+
+### Results (A = `origin/sp19-ptx` bccfa63b, B = A + this branch, both Release/LTO built on server3, `perf stat -e instructions:u,cycles:u`, alternating 15 pairs, 3 fresh library copies a side, cpu 13, `VGPU_SASS=0`)
+Outputs and `VGPU_COUNTERS_FILE` (pid dropped), timing lines dropped, **identical** for radixsort2, sortKV, SYRK, ATAX, GEMVER, lud, hotspot, 3MM at one thread, for radixsort2 at `VGPU_THREADS=4`, and for radixsort2, sortKV, lud on the SASS engine (`VGPU_SASS=1`). sortKV at `VGPU_THREADS=4` has per-launch counters that differ between two runs of A itself (the look-back kernel's counters depend on how the threads interleave): outputs identical, counters not comparable there.
+
+| program | instructions B/A | cycles B/A (p) | cycles A/A (p) | load |
+|---|---:|---:|---:|---|
+| hecbench radixsort2 | 0.7187 | **0.7655** (0.000) | 0.9998 (0.98) | 1.1 to 1.2 |
+| hecbench sortKV | 0.6444 | **0.6888** (0.000) | 1.0019 (0.12) | 1.1 |
+| polybench SYRK | 1.0000 | 1.0146 (0.76) | 0.9845 (0.37) | 1 to 7 |
+| polybench ATAX | 1.0000 | 0.9862 (0.012) | | 4.5 to 7 |
+| polybench GEMVER | 1.0000 | 1.0078 (0.76) | | 4.5 to 8.7 |
+| rodinia lud | 1.0000 | 1.0007 (0.89) | 0.9993 (0.85) | 2 to 9 |
+| rodinia hotspot | 1.0000 | 0.9904 (0.08) | | 2.4 |
+SASS engine, 10 pairs: radixsort2 0.9878 (p 0.000), sortKV 0.9912 (p 0.008), instructions 0.994 and 0.996: under the 2% claim line, **no change claimed**. The AMD engine shares the template and was not run (no hipcc on server3).
+Only radixsort2 and sortKV move. Wall clock of the RelWithDebInfo runs, one each: radixsort2 10.9 s before, 9.5 s with the counters still in.
+
+### The layout trap (why the helpers are out of line)
+The first build of this change (the logic inline in the worker) gave ATAX 1.0414 and SYRK 1.0401 on cycles with instructions exactly 1.0000, in programs that never enter `lockstep_worker`. A control build `B0` with the new logic switched off (`per_block = 0`, so the worker behaves as in A) gave 1.0385 and 1.0564: **the loss is code layout, not the change** (the hot `exec_ld` / `load_batch` / `run_warp_until_yield` all moved by one to two points, `perf report` of ATAX). Moving the two small computations into `[[gnu::noinline]]` functions gave a layout with ATAX 0.9797 and SYRK 0.9922 (table above, the full run: 0.9862 and 1.0146 inside the noise). A change to any function inlined into `launch_grid` can do this, and the sign is luck: before reading a flat row of this kind as a cost of the change, build a control with the change neutralised.
+
+### Mutations (`tests/unit/test_lockstep_look.cpp`, built and run on server3; `test_lockstep_fold` and `test_lockstep_yield` pass unchanged)
+Killed: the cost not remembered (stored as 0), the blocks resident not multiplied in, the cost stored per launch rather than per block, the ratio 1 or 24 for the first look, the ceiling removed or lowered to 100 ms, the 250 us floor removed, the ratio after a look 1 or 100, the looks switched off, the nap switched off, `blocks + 1`.
+Survived, equivalent: `looked` never set. Every pass then recomputes `check_every` from the last look's cost per block, which is what the look set, except that the ceiling applies and that it follows the number of resident blocks as the window grows; kept as written so that the behaviour after a look is exactly what it was.
+Timing tests (looks 24 ms, 48 ms, 500 ms in with margins of 12 to 60 ms): a machine that stalls a thread for longer than that can fail them; they ran 5 times clean on server3 at load 2 to 8.
+
+### Not verified
+No AMD run. No kernel with a real cross-block wait at more than one thread on PTX (the programs here are single-thread); the one-core test_lockstep_yield stays green. Zen 5 and Intel not measured. The layout effect above is understood only by the control, not by a disassembly comparison.
