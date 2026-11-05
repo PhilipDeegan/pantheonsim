@@ -456,6 +456,7 @@ struct BankTable {
 template <class T>
 [[gnu::noinline]] inline bool bank_passes_bitmap(const T* addrs, uint64_t m, uint32_t bytes, uint32_t& out) {
   constexpr unsigned kRows = 64;
+  static_assert((kRows & (kRows - 1)) == 0, "rows are indexed modulo kRows");
   T held[32];
   const T* a = addrs;   // (the lanes that run, side by side: a full warp's are the caller's array)
   unsigned n = 32;
@@ -498,8 +499,11 @@ template <class T>
       cnt[i & 31] += (old & bit) == 0;
       const uint32_t j = i + 1;   // (the next word, for a lane whose bytes run over: otherwise a bit that is not there)
       bit = (a[k] & 3) + bytes > 4 ? uint32_t{1} << (j & 31) : 0u;
-      old = rows[j >> 5];
-      rows[j >> 5] = old | bit;
+      // A lane on the last word that does not run over still reads and writes (an unchanged) row for j: word kRows * 32 is row kRows,
+      // one past the array, so the row is taken modulo kRows (a lane that does run over has j below kRows * 32: the check above).
+      const uint32_t jr = (j >> 5) & (kRows - 1);
+      old = rows[jr];
+      rows[jr] = old | bit;
       cnt[j & 31] += (bit & ~old) != 0;
     }
   }

@@ -142,6 +142,22 @@ VTEST(the_bitmap_takes_2048_words_from_the_lowest_and_no_more) {
   }
 }
 
+VTEST(a_lane_on_the_last_word_beside_a_lane_that_runs_over_stays_inside_the_array) {
+  // (Some lane's bytes run into a second word, so the general loop runs; a lane on word 2047 whose bytes do not run over must not touch
+  // row 64 of 64: caught only under a sanitizer, the answer is right either way.)
+  uint64_t a[32];
+  uint32_t out = 0;
+  for (uint64_t lowest : {0ull, 5ull, 1000ull}) {
+    for (unsigned l = 0; l < 32; ++l) a[l] = 4 * (lowest + l);
+    a[30] = 4 * (lowest + 2047);        // (the last word, 2 bytes from its start: no run over)
+    a[31] = 4 * (lowest + 5) + 3;       // (3 + 2 > 4: runs into the next word)
+    VCHECK(mc::detail::bank_passes_bitmap(a, 0xFFFFFFFFu, 2, out));
+    VCHECK_EQ(out, passes_def(a, 0xFFFFFFFFu, 2));
+    a[30] = 4 * (lowest + 2047) + 3;    // (this one runs over into word 2048: the bitmap declines)
+    VCHECK(!mc::detail::bank_passes_bitmap(a, 0xFFFFFFFFu, 2, out));
+  }
+}
+
 VTEST(lanes_on_one_word_a_bank_each_and_all_in_one_bank) {
   uint64_t a[32];
   for (unsigned l = 0; l < 32; ++l) a[l] = 4096;
