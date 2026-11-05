@@ -8,6 +8,10 @@
 // and 15, which point the address registers into memory that exists, in consecutive lanes and scattered (5 to 9 do not exist), 18 and 19
 // (LDS accesses only) which give the lanes consecutive LDS addresses, all on and one run of them on, and 20 the integers' edges (carries, borrows).
 // Three seeds each (VGPU_TIER_SEEDS=n for more).
+// VGPU_TIER_SHARD=k/n runs the shapes whose number among those with a handler is k modulo n (0 <= k < n), so that ctest can run the n shards side by
+// side (CMakeLists.txt: test_amd_gcn_tier_same_bits_shardKofN); every shape's seed and flavours are what they are in the whole run, so the n shards
+// together run exactly the runs of the unsharded test, once each. VGPU_TIER_LIST=1 prints the shapes a run would take, one a line ("corpus:line"),
+// and runs nothing (tests/ci/check_shard_partition.sh checks that the shards' lists partition the whole list).
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -66,9 +70,20 @@ VTEST(every_tier_handler_gives_the_interpreters_bits) {
 #else
   constexpr uint64_t kDefaultSeeds = 3;
 #endif
+  uint64_t shard_k = 0, shard_n = 1;
+  if (const char* sh = std::getenv("VGPU_TIER_SHARD")) {
+    char* end = nullptr;
+    shard_k = std::strtoull(sh, &end, 10);
+    if (*end != '/') throw vtest::Failure(std::string("VGPU_TIER_SHARD wants k/n, got '") + sh + "'");
+    shard_n = std::strtoull(end + 1, &end, 10);
+    if (*end || shard_n == 0 || shard_k >= shard_n) throw vtest::Failure(std::string("VGPU_TIER_SHARD wants k/n with k < n, got '") + sh + "'");
+  }
+  const bool list_only = std::getenv("VGPU_TIER_LIST") != nullptr;
   const uint64_t seeds = std::getenv("VGPU_TIER_SEEDS") ? std::strtoull(std::getenv("VGPU_TIER_SEEDS"), nullptr, 0) : kDefaultSeeds;
   for (const Corpus& c : kCorpora) {
+    size_t line_no = 0;
     for (const std::string& line : lines_of(std::string(VGPU_SOURCE_DIR) + "/amd/tests/data/" + c.file)) {
+      ++line_no;
       if (line[0] == '#') continue;
       const size_t tab = line.find('\t');
       std::vector<uint8_t> code;
@@ -88,6 +103,11 @@ VTEST(every_tier_handler_gives_the_interpreters_bits) {
       ++shapes;
       if (!in.fast.run) continue;
       ++with_handler;
+      if ((with_handler - 1) % shard_n != shard_k) continue;   // (another shard's shape; with_handler still counts it, as the seeds below need)
+      if (list_only) {
+        std::printf("%s:%zu\n", c.file, line_no);
+        continue;
+      }
       // (A branch the corpus holds goes where it was: send it elsewhere, so that taking it shows.)
       if (in.name.rfind("s_branch", 0) == 0 || in.name.rfind("s_cbranch", 0) == 0) in.target = 0x1000;
       for (uint64_t seed = 0; seed < seeds; ++seed)
@@ -109,6 +129,7 @@ VTEST(every_tier_handler_gives_the_interpreters_bits) {
     }
   }
   amd::gcn::tier::set_enabled(was_on);
+  if (list_only) return;
   std::fprintf(stderr, "tier handlers: %zu of %zu shapes, %zu runs each way, %llu handed back to the interpreter\n", with_handler, shapes,
                runs, static_cast<unsigned long long>(amd::gcn::tier::bails()));
   if (wrong) {
