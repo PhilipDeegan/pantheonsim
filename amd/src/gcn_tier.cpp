@@ -126,7 +126,7 @@ constexpr uint32_t kVgprs = 256;
   X(MAX_I, k_max_i) X(BFI, k_bfi) X(ALIGNBIT, k_alignbit) X(ALIGNBYTE, k_alignbyte) X(ADD3, k_add3) X(OR3, k_or3)  \
   X(AND_OR, k_and_or) X(XAD, k_xad) X(LSHL_OR, k_lshl_or) X(LSHL_ADD, k_lshl_add) X(ADD_LSHL, k_add_lshl)          \
   X(BCNT, k_bcnt) X(BFE_U, k_bfe_u) X(MED3_U, k_med3_u) X(MED3_I, k_med3_i) X(MIN3_U, k_min3_u)                     \
-  X(MAX3_U, k_max3_u) X(XOR3, k_xor3) X(MBCNT_LO, k_mbcnt_lo) X(MBCNT_HI, k_mbcnt_hi) X(CVT_I32_F32, k_cvt_i32_f32) X(CVT_U32_F32, k_cvt_u32_f32) X(CVT_F32_U, k_cvt_f32_u) X(CVT_F32_I, k_cvt_f32_i) X(CVT_F32_UBYTE0, k_cvt_f32_ubyte0) X(ADD_U16, k_add_u16) X(SUB_U16, k_sub_u16) X(SUBREV_U16, k_subrev_u16) X(LSHLREV_B16, k_lshlrev_b16) X(LSHRREV_B16, k_lshrrev_b16) X(ASHRREV_I16, k_ashrrev_i16) X(MUL_LO_U16, k_mul_lo_u16) X(MIN_U16, k_min_u16) X(MAX_U16, k_max_u16) X(MIN_I16, k_min_i16) X(MAX_I16, k_max_i16) X(PACK_B32_F16, k_pack_b32_f16) X(BFE_I, k_bfe_i) X(PERM, k_perm) X(CVT_F16_F32, k_cvt_f16_f32) X(FFBH_U, k_ffbh_u) X(FFBL, k_ffbl) X(FFBH_I, k_ffbh_i) \
+  X(MAX3_U, k_max3_u) X(XOR3, k_xor3) X(MBCNT_LO, k_mbcnt_lo) X(MBCNT_HI, k_mbcnt_hi) X(CVT_I32_F32, k_cvt_i32_f32) X(CVT_U32_F32, k_cvt_u32_f32) X(CVT_F32_U, k_cvt_f32_u) X(CVT_F32_I, k_cvt_f32_i) X(CVT_F32_UBYTE0, k_cvt_f32_ubyte0) X(ADD_U16, k_add_u16) X(SUB_U16, k_sub_u16) X(SUBREV_U16, k_subrev_u16) X(LSHLREV_B16, k_lshlrev_b16) X(LSHRREV_B16, k_lshrrev_b16) X(ASHRREV_I16, k_ashrrev_i16) X(MUL_LO_U16, k_mul_lo_u16) X(MIN_U16, k_min_u16) X(MAX_U16, k_max_u16) X(MIN_I16, k_min_i16) X(MAX_I16, k_max_i16) X(PACK_B32_F16, k_pack_b32_f16) X(BFE_I, k_bfe_i) X(PERM, k_perm) X(CVT_F16_F32, k_cvt_f16_f32) X(FFBH_U, k_ffbh_u) X(FFBL, k_ffbl) X(FFBH_I, k_ffbh_i) X(BFREV, k_bfrev) \
   X(PK_MULLO, k_pk_mullo) X(PK_ADDU, k_pk_addu) X(PK_ADDI, k_pk_addi) X(PK_SUBU, k_pk_subu) X(PK_SUBI, k_pk_subi) X(PK_SHL, k_pk_shl) X(PK_SHR, k_pk_shr) \
   X(PK_ASHR, k_pk_ashr) X(PK_MAXI, k_pk_maxi) X(PK_MINI, k_pk_mini) X(PK_MAXU, k_pk_maxu) X(PK_MINU, k_pk_minu) X(PK_MADU, k_pk_madu) X(PK_MADI, k_pk_madi) \
   X(PK_ADDU_C, k_pk_addu_c) X(PK_ADDI_C, k_pk_addi_c) X(PK_SUBU_C, k_pk_subu_c) X(PK_SUBI_C, k_pk_subi_c) X(PK_MADU_C, k_pk_madu_c) X(PK_MADI_C, k_pk_madi_c)
@@ -1249,6 +1249,20 @@ TIER_DUAL(h_carry)
   const uint32_t* a = load32(o.src[0], R, t0, n);
   const uint32_t* b = load32(o.src[1], R, t1, n);
   const MaskTable& tab = mask_table();
+  uint32_t* d = R.vgpr[o.dst.index];
+  if (full(ex, n)) {
+    // Every lane: the select goes straight into the destination row, eight lanes at a time (each chunk is read before it is written, so a
+    // source that is the destination register is fine).
+    for (unsigned i = 0; i < n; i += 8) {
+      V8u m, x, y;
+      std::memcpy(&m, tab.m[(cond >> i) & 0xFF], 32);
+      std::memcpy(&x, a + i, 32);
+      std::memcpy(&y, b + i, 32);
+      x = (y & m) | (x & ~m);
+      std::memcpy(d + i, &x, 32);
+    }
+    return true;
+  }
   for (unsigned i = 0; i < n; i += 8) {
     V8u m, x, y;
     std::memcpy(&m, tab.m[(cond >> i) & 0xFF], 32);
@@ -1259,9 +1273,7 @@ TIER_DUAL(h_carry)
     // __memcpy_chk even at 32 bytes; this was 7% of the flat workload)
     __builtin_memcpy(r + i, &x, 32);
   }
-  uint32_t* d = R.vgpr[o.dst.index];
-  if (full(ex, n)) copy_row(d, r, n);
-  else merge(d, r, ex, n);
+  merge(d, r, ex, n);
   return true;
 }
 TIER_DUAL(h_cndmask)
@@ -2061,6 +2073,7 @@ const std::unordered_map<std::string_view, Entry>& table() {
     const auto I = [&](std::string_view n, int k, int arity, uint32_t fl = 0) { m[n] = {Cat::Int, k, arity, fl}; };
     I("v_mov_b32_e32", MOV, 1);
     I("v_not_b32_e32", NOT, 1);
+    I("v_bfrev_b32_e32", BFREV, 1);
     I("v_add_u32_e32", ADD, 2, kNoClamp);
     I("v_add_u32_e64", ADD, 2, kNoClamp);
     I("v_sub_u32_e32", SUB, 2, kNoClamp);
@@ -2129,6 +2142,7 @@ const std::unordered_map<std::string_view, Entry>& table() {
     // The same operations in their VOP3 form (the sources may be any of the operands, the modifiers and the constants the short form's are).
     I("v_mov_b32_e64", MOV, 1);
     I("v_not_b32_e64", NOT, 1);
+    I("v_bfrev_b32_e64", BFREV, 1);
     I("v_subrev_u32_e64", SUBREV, 2);
     I("v_mul_u32_u24_e64", MUL_U24, 2);
     I("v_mul_i32_i24_e64", MUL_I24, 2);
