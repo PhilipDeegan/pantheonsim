@@ -524,7 +524,8 @@ std::vector<Insn> shared_kernel(unsigned shape) {
 // array at the lanes' addresses, overwritten, loaded back from the same addresses, and the shared words read in order (which a store and a load that
 // agree on a wrong place would hide). `shape`: 0 a 16 byte element to a lane, 1 an 8 byte one, 2 the same as 0 but only word aligned, 3 two bytes
 // into a word (not whole words), 4 a stride of 20 bytes, 5 a stride of 12 with 8 bytes, 6 neighbours swapped (the same words, not in order), 7 the
-// 128 bit run starting at the last word the array holds for the block, 8 every lane on one element.
+// 128 bit run starting at the last word the array holds for the block, 8 every lane on one element, 9 the run with the last lane (lane 31, then
+// lanes 31 to 62 of the next warp) moved off it, 10 the 128 bit run stored from RZ.
 std::vector<Insn> wide_kernel(unsigned shape) {
   std::vector<Insn> code;
   code.push_back(s2r_tid(0));
@@ -543,12 +544,16 @@ std::vector<Insn> wide_kernel(unsigned shape) {
     case 5: code.push_back(imadi(9, 0, 12, kRZ)); break;
     case 6: code.push_back(movi(8, 1)), code.push_back(lop3(9, 0, 8, kRZ, 0x66)), code.push_back(imadi(9, 9, 16, kRZ)); break;   // (tid ^ 1)
     case 8: code.push_back(movi(9, 64)); break;
+    case 9:   // (tid + 1) & 32 is 32 for the threads 31 to 62: the last lane of a warp is 32 bytes past where the run puts it
+      code.push_back(iadd3i(8, 0, 1, kRZ)), code.push_back(movi(10, 32)), code.push_back(lop3(8, 8, 10, kRZ, 0xc0)), code.push_back(imadi(9, 0, 16, kRZ));
+      code.push_back(iadd3(9, 9, 8, kRZ));
+      break;
     case 1: code.push_back(imadi(9, 0, 8, kRZ)); break;
     default: code.push_back(imadi(9, 0, 16, kRZ)); break;
   }
   const unsigned size = w128 ? 6 : 5;
   const uint32_t off = shape == 2 ? 4 : shape == 7 ? 0x200 : 0x20;
-  code.push_back(sts(9, 4, off, size, 0));
+  code.push_back(sts(9, shape == 10 ? kRZ : 4, off, size, 0));
   for (unsigned r = 4; r < 8; ++r) code.push_back(movi(r, 0x77770000u + r));
   code.push_back(lds(4, 9, off, size, 0));
   code.push_back(imadi(8, 0, 4, kRZ));
@@ -606,7 +611,7 @@ VTEST(shared_memory_of_a_whole_warp_gives_the_interpreters_registers_and_counter
 }
 
 VTEST(wide_shared_memory_of_a_whole_warp_gives_the_interpreters_registers_and_counters) {
-  for (unsigned shape = 0; shape < 9; ++shape)
+  for (unsigned shape = 0; shape < 11; ++shape)
     compare_interpreter(wide_kernel(shape), {32, 64, 33, 5, 19, 96}, "wide shared memory, shape " + std::to_string(shape));
 }
 
