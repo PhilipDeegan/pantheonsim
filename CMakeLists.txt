@@ -1515,6 +1515,8 @@ vgpu_unit_test(test_launch_env)
 # Blocks that wait on one another, on fewer host cores than threads: a waiting thread gives its turn up (the CI flake of lockstep.gfx942).
 vgpu_unit_test(test_lockstep_yield)
 vgpu_unit_test(test_sass_lea)
+# ULDC c[bank][URa + offset]: the offset is signed and the address wraps in the 64 KiB bank (pantheonsim #499).
+vgpu_unit_test(test_sass_uldc_indexed)
 # The SIMD lane kernels, bit for bit against scalar code at every level the CPU has.
 vgpu_unit_test(test_simd)
 # An RTX 3060's tensor-core sum (include/vgpu/exec/tc_ampere.hpp): card-measured vectors, an independent form, special values.
