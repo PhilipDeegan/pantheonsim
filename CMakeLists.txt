@@ -1310,7 +1310,7 @@ else()
 endif()
 
 # CLI
-add_executable(vgpu_cli src/cli/main.cpp src/cli/demo.cpp src/cli/smi.cpp src/cli/serve.cpp src/cli/shell.cpp src/cli/run.cpp src/cli/debug.cpp src/cli/test.cpp src/cli/check.cpp src/cli/ncu.cpp
+add_executable(vgpu_cli src/cli/main.cpp src/cli/demo.cpp src/cli/smi.cpp src/cli/serve.cpp src/cli/shell.cpp src/cli/shell_rootfs.cpp src/cli/run.cpp src/cli/debug.cpp src/cli/test.cpp src/cli/check.cpp src/cli/ncu.cpp
                src/cli/fault.cpp src/cli/amdsmi.cpp src/cli/regs.cpp src/cli/lspci.cpp
                src/cli/config.cpp src/cli/config_cmd.cpp)
 target_link_libraries(vgpu_cli PRIVATE vgpu)
@@ -1418,6 +1418,8 @@ vgpu_unit_test(test_exec3)
 vgpu_unit_test(test_ptx_bitwise_not)
 # PTX forms JIT compilers emit: negated predicate sources, .reg .func parameters, var[imm] addresses, ldu.
 vgpu_unit_test(test_ptx_forms)
+# 16-bit signed integer forms on registers with zero upper bits (abs.s16 and its siblings).
+vgpu_unit_test(test_ptx_int16)
 # Hopper (sm_90a): the warpgroup MMA, against the ISA's own layout examples.
 vgpu_unit_test(test_hopper)
 # Blackwell (sm_100a): Tensor Memory and tcgen05, against the ISA's figures.
@@ -1483,6 +1485,8 @@ add_test(NAME test_memcount_forms_simd_base COMMAND test_memcount_forms)
 set_tests_properties(test_memcount_forms_simd_base PROPERTIES ENVIRONMENT "VGPU_SIMD=base" TIMEOUT 1500)
 # The table of bank passes by warp shape (sass_bank_passes_memo), against the definition of the passes.
 vgpu_unit_test(test_bank_memo)
+# The bitmap counting of the passes of 1 to 4 byte accesses (detail::bank_passes_bitmap), against the definition of the passes.
+vgpu_unit_test(test_bank_bitmap)
 # The single-lookup atomic read-modify-write and the one-lookup texel read, against the per-access code they replace.
 vgpu_unit_test(test_atom_rmw)
 # Module::code_at (a binary search over the code sections) against the scan it replaced.
@@ -2529,6 +2533,11 @@ set_tests_properties(smi_cli PROPERTIES DEPENDS vgpu_cli
 add_test(NAME shell_cli COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_shell_cli.sh)
 set_tests_properties(shell_cli PROPERTIES DEPENDS vgpu_cli
   ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}" TIMEOUT 300)
+# vgpu shell --rootfs: the session's own root, -v mounts, --home, and the refusal where
+# namespaces are not allowed. The checks that need namespaces are left out on a host without them.
+add_test(NAME shell_rootfs COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_shell_rootfs.sh)
+set_tests_properties(shell_rootfs PROPERTIES DEPENDS vgpu_cli
+  ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}" TIMEOUT 600)
 add_test(NAME amd_session COMMAND ${CMAKE_SOURCE_DIR}/amd/tests/e2e/run_amd_session.sh)
 set_tests_properties(amd_session PROPERTIES DEPENDS vgpu_cli
   ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}" TIMEOUT 300)

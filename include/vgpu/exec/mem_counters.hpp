@@ -445,6 +445,73 @@ struct BankTable {
     return m;
   }
 };
+
+// The passes of up to 32 lanes of 1 to 4 bytes each, counted without a branch that depends on the data. A lane covers its
+// address's word, and the next one when its bytes run over. The words go into a bitmap (a 32-bit row for each 32 words, one
+// bit for each bank counted from the lowest word's, which is the same grouping of the words as the real banks): a word that is
+// not set yet is a new word of its bank, and the bank's count goes up by one; the answer is the biggest count (at least 1).
+// The bitmap covers the 2048 words (8 KB) from the lowest word; false (nothing counted) when the lanes spread over more, or the addresses
+// run off the top of the space (the caller counts those). T is the address type (a lane's 64-bit address, or its 32-bit
+// offset); the lanes are the set bits of `m`, which is not zero and has no bit above 31.
+template <class T>
+[[gnu::noinline]] inline bool bank_passes_bitmap(const T* addrs, uint64_t m, uint32_t bytes, uint32_t& out) {
+  constexpr unsigned kRows = 64;
+  static_assert((kRows & (kRows - 1)) == 0, "rows are indexed modulo kRows");
+  T held[32];
+  const T* a = addrs;   // (the lanes that run, side by side: a full warp's are the caller's array)
+  unsigned n = 32;
+  uint64_t lo = ~uint64_t{0}, hi = 0, low = 0;
+  if (m == 0xFFFFFFFFull) {
+    for (unsigned l = 0; l < 32; ++l) {
+      const uint64_t x = addrs[l];
+      lo = x < lo ? x : lo;
+      hi = x > hi ? x : hi;
+      low |= x;
+    }
+  } else {
+    n = 0;
+    for (uint64_t r = m; r; r &= r - 1) {
+      const T x = addrs[std::countr_zero(r)];
+      held[n++] = x;
+      lo = x < lo ? x : lo;
+      hi = x > hi ? x : hi;
+      low |= x;
+    }
+    a = held;
+  }
+  if (hi > UINT64_MAX - 256) return false;
+  const uint64_t base = lo >> 2;   // (the banks are counted from the lowest word's: a shift of every bank by the same number groups the words as before)
+  if (((hi + bytes - 1) >> 2) - base >= kRows * 32) return false;
+  uint32_t rows[kRows] = {};
+  uint8_t cnt[32] = {};
+  if ((low & 3) + bytes <= 4) {   // (no lane's bytes run into a second word)
+    for (unsigned k = 0; k < n; ++k) {
+      const uint32_t i = static_cast<uint32_t>((a[k] >> 2) - base);
+      const uint32_t bit = uint32_t{1} << (i & 31), old = rows[i >> 5];
+      rows[i >> 5] = old | bit;
+      cnt[i & 31] += (old & bit) == 0;
+    }
+  } else {
+    for (unsigned k = 0; k < n; ++k) {
+      const uint32_t i = static_cast<uint32_t>((a[k] >> 2) - base);
+      uint32_t bit = uint32_t{1} << (i & 31), old = rows[i >> 5];
+      rows[i >> 5] = old | bit;
+      cnt[i & 31] += (old & bit) == 0;
+      const uint32_t j = i + 1;   // (the next word, for a lane whose bytes run over: otherwise a bit that is not there)
+      bit = (a[k] & 3) + bytes > 4 ? uint32_t{1} << (j & 31) : 0u;
+      // A lane on the last word that does not run over still reads and writes (an unchanged) row for j: word kRows * 32 is row kRows,
+      // one past the array, so the row is taken modulo kRows (a lane that does run over has j below kRows * 32: the check above).
+      const uint32_t jr = (j >> 5) & (kRows - 1);
+      old = rows[jr];
+      rows[jr] = old | bit;
+      cnt[j & 31] += (bit & ~old) != 0;
+    }
+  }
+  uint32_t worst = 1;
+  for (unsigned b = 0; b < 32; ++b) worst = cnt[b] > worst ? cnt[b] : worst;
+  out = worst;
+  return true;
+}
 }  // namespace detail
 
 // ---- bank passes
@@ -568,6 +635,8 @@ inline uint32_t sass_bank_passes_table(const uint64_t* addrs, uint64_t mask, uns
     // Up to a word's worth of bytes a lane covers its address's word, and the next one when it does not end in it: a
     // counted walk of the active lanes, a lane at a time.
     const uint64_t m = mask & detail::lane_mask(lanes);
+    uint32_t fast_out;
+    if (m && detail::bank_passes_bitmap(addrs, m, bytes, fast_out)) return fast_out;
     if (m) {
       const bool ok = detail::for_each_address(addrs, m, [&](uint64_t a) {
         if (a > UINT64_MAX - 256) return false;   // (as below)
@@ -635,6 +704,11 @@ struct BankMemo {
   Entry32 e32[kEntries32];
   uint32_t last32 = 0;              // the entry that answered last (a loop asks for one shape a few times running)
   uint32_t lookups32 = 0, hits32 = 0, skip32 = 0;
+  // (After the counters the table's calls touch together, so that those stay in one cache line.)
+  // The last warp asked about, as it came (every offset, the mask, the width) and its passes (zero: none yet): the passes are a function of
+  // those alone, and a load and a store of the same elements (an array's `a[i]++`) ask for them twice running, with no key to build.
+  uint32_t last_offs[32] = {};
+  uint32_t last_mask = 0, last_bytes = 0, last_passes = 0;
 };
 
 // sass_bank_passes, with the table in front of the counting (everything the closed forms count is still counted by them).
@@ -720,13 +794,29 @@ inline void store_v4(uint32_t* p, V4 v) { *reinterpret_cast<V4u*>(p) = v; }
   return sass_bank_passes(a, mask, 32, bytes);
 }
 
+// While the table is being left alone (a kernel whose shapes do not repeat: a gather, a histogram of random data) the warp asked about last is
+// kept whole, and answers the same warp again without counting it (a load and a store of the same elements, an array's `a[i]++`). Every offset,
+// the mask and the width are compared; a lane that does not run is compared too, so a warp whose idle lanes read other registers is counted
+// again, which is only slower. (While the table is on, a warp that comes again is its own hit.)
+[[gnu::noinline]] inline uint32_t sass_bank_passes_offsets_kept(BankMemo& memo, const uint32_t* offs, uint32_t m, uint32_t bytes) {
+  detail::V4 diff = {memo.last_bytes ^ bytes, memo.last_mask ^ m, 0, 0};
+  for (unsigned i = 0; i < 8; ++i) diff |= detail::load_v4(offs + 4 * i) ^ detail::load_v4(memo.last_offs + 4 * i);
+  if (((diff[0] | diff[1] | diff[2] | diff[3]) == 0) && memo.last_passes) return memo.last_passes;
+  const uint32_t passes = sass_bank_passes_widened(offs, m, bytes);
+  for (unsigned i = 0; i < 8; ++i) detail::store_v4(memo.last_offs + 4 * i, detail::load_v4(offs + 4 * i));
+  memo.last_mask = m;
+  memo.last_bytes = bytes;
+  memo.last_passes = passes;
+  return passes;
+}
+
 [[gnu::noinline]] inline uint32_t sass_bank_passes_offsets(BankMemo& memo, const uint32_t* offs, uint64_t lanes, uint32_t bytes,
                                                            uint8_t* hint = nullptr) {
   const uint32_t m = static_cast<uint32_t>(lanes);
   if (!fast() || bytes == 0 || bytes > 64 || !m) return sass_bank_passes_widened(offs, m, bytes);
   if (memo.skip32) {
     --memo.skip32;
-    return sass_bank_passes_widened(offs, m, bytes);
+    return sass_bank_passes_offsets_kept(memo, offs, m, bytes);
   }
   const uint32_t base = offs[std::countr_zero(m)] & ~3u;
   const detail::V4 bv = {base, base, base, base};
