@@ -1231,6 +1231,68 @@ template <bool Store>
   }
 }
 
+// A whole warp's 8 or 16 byte elements, lane l at o0 + bytes * l (a float4 array indexed by the thread): the bytes are one run, moved four
+// lanes at a time between the run and the register file's rows (a transpose), and the passes are the bytes / 4 the general count finds for 32
+// lanes end to end on whole words (memcount::bank_passes_progression: the 32 * bytes / 4 consecutive words, bytes / 4 to each bank). Offsets are
+// compared whole (a cluster rank in the high bits must be the same in every lane), and a run that would wrap 32 bits, or the 24 bits an offset
+// addresses, is left to the general code (false, nothing moved or counted). (A function of its own, so that h_shared's common paths keep their
+// registers.)
+template <bool Store>
+[[gnu::noinline]] static bool tier_shared_wide(Block& blk, uint8_t* sh, uint32_t* d, const uint32_t* offs, unsigned bytes) {
+#if defined(__SSE2__)
+  const uint32_t o0 = offs[0];
+  uint32_t seq = 0;
+  for (unsigned l = 0; l < 32; ++l) seq |= offs[l] ^ (o0 + bytes * l);
+  if (seq != 0 || (o0 & 3) != 0 || o0 > 0xffffffffu - 32 * 16 || (o0 & 0xffffff) + 32 * bytes > 0x1000000u) return false;
+  uint8_t* const at = sh + (o0 & 0xffffff);
+  if (bytes == 16) {
+    for (unsigned g = 0; g < 8; ++g) {
+      uint8_t* const p = at + 64 * g;
+      if (Store) {
+        __m128i r[4];
+        for (unsigned i = 0; i < 4; ++i)
+          r[i] = d ? _mm_loadu_si128(reinterpret_cast<const __m128i*>(d + 32 * i + 4 * g)) : _mm_setzero_si128();
+        const __m128i t0 = _mm_unpacklo_epi32(r[0], r[1]), t1 = _mm_unpacklo_epi32(r[2], r[3]);
+        const __m128i t2 = _mm_unpackhi_epi32(r[0], r[1]), t3 = _mm_unpackhi_epi32(r[2], r[3]);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(p), _mm_unpacklo_epi64(t0, t1));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(p) + 1, _mm_unpackhi_epi64(t0, t1));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(p) + 2, _mm_unpacklo_epi64(t2, t3));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(p) + 3, _mm_unpackhi_epi64(t2, t3));
+      } else if (d) {
+        __m128i v[4];
+        for (unsigned j = 0; j < 4; ++j) v[j] = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p) + j);
+        const __m128i t0 = _mm_unpacklo_epi32(v[0], v[1]), t1 = _mm_unpacklo_epi32(v[2], v[3]);
+        const __m128i t2 = _mm_unpackhi_epi32(v[0], v[1]), t3 = _mm_unpackhi_epi32(v[2], v[3]);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(d + 4 * g), _mm_unpacklo_epi64(t0, t1));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(d + 32 + 4 * g), _mm_unpackhi_epi64(t0, t1));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(d + 64 + 4 * g), _mm_unpacklo_epi64(t2, t3));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(d + 96 + 4 * g), _mm_unpackhi_epi64(t2, t3));
+      }
+    }
+  } else {
+    for (unsigned g = 0; g < 8; ++g) {
+      uint8_t* const p = at + 32 * g;
+      if (Store) {
+        const __m128 lo = d ? _mm_castsi128_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(d + 4 * g))) : _mm_setzero_ps();
+        const __m128 hi = d ? _mm_castsi128_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(d + 32 + 4 * g))) : _mm_setzero_ps();
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(p), _mm_castps_si128(_mm_unpacklo_ps(lo, hi)));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(p) + 1, _mm_castps_si128(_mm_unpackhi_ps(lo, hi)));
+      } else if (d) {
+        const __m128 a = _mm_castsi128_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(p)));
+        const __m128 b = _mm_castsi128_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(p) + 1));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(d + 4 * g), _mm_castps_si128(_mm_shuffle_ps(a, b, 0x88)));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(d + 32 + 4 * g), _mm_castps_si128(_mm_shuffle_ps(a, b, 0xDD)));
+      }
+    }
+  }
+  count_shared(blk.st, Store, 32, bytes, bytes / 4);
+  return true;
+#else
+  (void)blk, (void)sh, (void)d, (void)offs, (void)bytes;
+  return false;
+#endif
+}
+
 // Shared memory: the interpreter's fast case -- every active lane inside the block's own shared memory -- moved
 // straight between the register file and the block's array; anything else is exec_mem's.
 template <bool Store>
@@ -1308,6 +1370,7 @@ static void h_shared(void* vc, const tier::MOp& op, Mask ex) {
       return;
     }
   }
+  if ((bytes == 8 || bytes == 16) && ex == kAll && tier_shared_wide<Store>(blk, sh, d, offs, bytes)) return;
   const unsigned words = std::max(1u, bytes / 4);
   const bool by_groups = bytes == 4 && ex == kAll;
   if (by_groups) tier_shared_words<Store>(sh, d, offs);
