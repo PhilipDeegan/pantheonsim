@@ -7,6 +7,8 @@ release says what runs and what it produces, never how fast a real GPU would run
 
 ## Unreleased
 
+- PTX: `abs.s16` takes the sign from bit 15 of the register. It used to read the whole 32-bit register as s32, so a negative
+  value written with zero upper bits (`mov.b16 a, 0xff81`, `cvt.u16.u32`) came back unchanged instead of as `0x007f`.
 - PTX accepts unary `~` on an integer constant (`and.b64 %rd3, %rd3, ~0x2;`), alone, nested, with `-` or in
   parentheses, at the width of the instruction; the lexer used to stop with `unexpected character '~'`
   (pantheonsim #483).
