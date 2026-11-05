@@ -6900,6 +6900,95 @@ Three copies of A's bytes give 14.8 / 14.7 / 15.7 / 15.7, so `p_lane` moves by 6
 * The PolyBench programs here are the MINI datasets scaled by the corpus (0.1 s to 120 s); GEMM-class programs measure at 0.5 s and mostly time the host reference check as well.
 * Zen 4 was not part of this round. Timed windows were at load 4 to 7 from other sessions.
 
+## Round sp21z (zero-fill and block setup) (branch `sp21-zero`, base 85ec63a5)
+
+Two overheads from a survey of main: the zero-fill of device-memory chunks (HeCBench `atomicCost`: 7.2 M page faults, 8.8 s of 31 s in the kernel) and the per-block set-up of the SASS executor (`init_block`: rodinia gaussian 12%, HeCBench `blockAccess` 17%). Host: server3 (Ryzen 7 PRO 8840U, Zen 4), Release GCC 13.3 LTO, `VGPU_THREADS=1`, `perf stat` instructions:u and cycles:u (plus page faults, task-clock, user and system time), cpu 12, alternating A B (order flipped each pair), 15 runs (21 for the 4 ms row), three fresh copies of each side's library directory used in rotation, A = main 85ec63a5 built here and frozen, B = this branch. Mann-Whitney p. Standard output with the timing lines dropped identical in every run of both sides. Load 2 to 13 from other sessions on other cpus.
+
+### What the profile said, and a correction
+* `atomicCost` is **not** zero-fill churn. It never frees what it touches: its first kernel faults (the card is 12 GB, the second 7.4 GB buffer is refused, and every later call fails on the sticky error), so `cudaFree` never runs. The 7.2 M faults are first touches of 29 GB of live memory: 7.4 GB of chunks, the program's own two 7.4 GB host buffers (a copy into one, a compare reading the other), and the rest. A pool of cleared chunks (up to 20 GB, as an upper bound) changed the fault count by 0.01% and the cycles by +2.1% (the extra clearing, p<0.001). There is no free-then-zero to avoid there.
+* The lever for first-touch cost is huge pages: `GLIBC_TUNABLES=glibc.malloc.hugetlb=1` on the unchanged build took faults 7.2 M to 16 K, system time 9.7 s to 1.6 s, wall 35.8 s to 24.0 s (one run each; it also covers the program's own `malloc`, which the simulator cannot touch).
+* `init_block` on gaussian (`perf annotate`): the 2.4 KB `rep stos` that zeroes a new `Warp` was 32% of the function, the 392-byte `LaunchStats` temporary 6%, `mbar.clear()` (a `memset` of the hash buckets), `gmma.clear()`, the 16 barriers and `tmem.reset()` the rest; libc's `memset` of the register file (3 KB, also `rep stos`) another 4.7% of the program. A zeroing loop with AVX2 or SSE2 stores is not faster than `rep stos` on this core (microbenchmark, 2.4 KB: 31 ns AVX2, 36 ns `rep stosb`, 50 ns SSE2), so only writing less helps.
+
+### Part 1: chunks from huge-page arenas, and a bounded pool (`src/core/memory_backing.cpp`)
+* Heap chunks are carved from 64 MiB arenas (`mmap`, 2 MiB aligned, `madvise(MADV_HUGEPAGE)`), a fresh mapping reading as zero: no `new[]()`, no second pass writing zeros over memory the kernel has just zeroed, one fault per 2 MiB where the kernel has huge pages (and the same as before where it does not). A chunk that has no room in the pool goes back with `madvise(MADV_DONTNEED)` (zero on next touch, no memory until then; `memset` if the call fails) onto a cold list. Under AddressSanitizer chunks stay `new[]()`, so the red zones remain.
+* The pool of cleared chunks keeps any chunk now (it was those with at most 32 KiB written, 64 of them), up to `Config::pool_max_bytes` (1 GiB; also never more than the RAM limit leaves beside the chunks in use). The clearing is outside the lock. The host-memory guard counts the pool as the host's: a look that finds the host short gives the pool back and looks again (one extra sample, only then), so a pool never makes an allocation fail or spill that would have succeeded without it. Memory in use (`ram_bytes()`), the zero contents, the error text and the sample counts are as before; peak RSS is unchanged (atomicCost 14.43 GB both, churn 531 MB both).
+
+| program | runs | instr B/A | cycles B/A (p) | page faults A, B | task-clock B/A (p) | sys s A, B |
+|---|---:|---:|---:|---|---:|---|
+| HeCBench atomicCost | 15 | 1.0040 | 0.987 (0.0005) | 7.21 M, 5.41 M | 0.934 (0.004) | 7.56, 5.71 |
+| churn 256 MiB x 8 (alloc, copy in, free) | 15 | 0.605 | **1.148** (<0.001) | 590 K, 66 K | **0.358** (<0.001) | 1.10, 0.16 |
+| churn 3000 MiB x 4 | 15 | 0.571 | 0.905 (<0.001) | 3.84 M, 2.29 M | 0.756 (<0.001) | 6.19, 4.47 |
+| tiny (1 MiB x 1) | 21 | 0.995 | 0.934 (<0.001) | 818, 567 | 0.901 (<0.001) | 0.004, 0.004 |
+| churn 256 MiB x 8, A against A | 15 | 1.000 | 0.997 (0.53) | 590 K, 590 K | 1.001 (0.77) | 1.06, 1.07 |
+| tiny, A against A | 21 | 1.0005 | 1.030 (0.26) | 819, 819 | 0.997 (0.52) | |
+
+`cycles:u` counts user mode only. In the 256 MiB churn the work moved from the kernel (system time -86%, task-clock -64%, wall 2.5 s to 0.5 s) to the user side's first touches of huge pages, so user cycles rose 15%: read task-clock, not cycles, for that row. atomicCost is 6.6% less CPU time (wall -7% to -20% in single runs, noisy).
+
+### Part 2: block set-up (`src/sass/exec.cpp`)
+* `Warp::reset()` replaces `~Warp(); new Warp()` and the vector shuffle: it lists every member. The uniform registers are cleared up to `ur_extent` (64 words before sm_100, where UR63 is URZ and the 6-bit field cannot name more; 256 from sm_100) instead of 256; the 640 bytes of per-lane state only a few kernels use (`device_error`, `rpc`, `cga_target`) sit in `Warp::Rare`, reached only through `rare()`, which marks it, and cleared only if marked. `LaunchStats` is cleared in place (its counters are the words before `inst_by_opcode`). The 16 barriers are set again only if `Block::bar()` was called since; `mbar`, `gmma` and `tmem` only if not already empty (`TensorMemory::pristine()`). A `static_assert` pins `sizeof(Warp)`; a debug build checks every warp after `init_block` against a new `Warp`, member by member, which also proves the `ur_extent` bound (a uniform register written past it fails).
+* Not done: the register file (3 KB, now the largest part of what is left, 5% of gaussian). Skipping rows needs the widest destination of every opcode (a tcgen05.ld writes 128 registers), which was not audited, and the file is sized from the kernel's declared count plus 8, so there is little to skip.
+
+| program | runs | instr B/A | cycles B/A (p) | task-clock B/A (p) |
+|---|---:|---:|---:|---:|
+| rodinia gaussian (library with Part 2, pool experiment) | 15 | 0.9940 | **0.9626** (<0.001) | 1.010 (0.34) |
+| rodinia gaussian (final library) | 15 | 0.9940 | **0.9673** (<0.001) | 0.969 (0.09) |
+| rodinia gaussian, A against A | 15 | 1.0000 | 0.9984 (0.28) | 1.000 (0.97) |
+| HeCBench blockAccess (19 ms run: start-up dominates) | 15 | 1.0030 | 0.9753 (0.014) | 0.977 (0.46) |
+| blockAccess, A against A | 15 | 1.0000 | 0.9954 (0.15) | 0.991 (0.17) |
+| polybench LU | 15 | 1.0075 | 0.984 (0.12) | 1.023 (0.46) |
+| polybench LU, A against A | 15 | 1.0000 | 1.001 (0.90) | 1.003 (0.84) |
+
+The share the survey measured (gaussian 12%, blockAccess 17%) was an upper bound: with the changes the function is 5.9% of gaussian, and the gain is 3.3 to 3.7% there. Instructions go **up** on the rows where blocks are many (LU +0.75%, atomicCost +0.4%): a `rep stos` is one instruction and the explicit stores are several, so cycles, not instructions, are the measure here. LU (6 to 10% claimed) is below noise (-1.6%, p=0.12) and is not claimed; FDTD-2D was not measured (one run takes over 2 minutes, a 15-run pair over an hour on this box). `blockAccess` is a 19 ms process: its 17% is not in the device phase.
+
+### Tests (CMake-wired, framework-free; Debug build on server3, all pass)
+* `test_memalloc`: `chunks_given_back_are_kept_cleared_and_counted` (20000 bytes dirty, every byte dirty, 64 KiB promised, the last byte), `the_pool_keeps_no_more_than_its_limit` (limit 3 chunks, 0, and the edge: room for two chunks less a byte keeps one, exactly two keeps two), `the_pool_stays_inside_the_ram_limit`, `chunks_across_arenas_are_distinct_independent_and_zero_and_come_back_zero_from_the_kernel` (1100 chunks, over an arena's 1024, written with a pattern each, handed back with no pool and taken again).
+* `test_memory`: `host_guard_takes_the_pool_back_to_the_heap_when_the_host_is_short` (pool of 10 written-through chunks; plenty: one comes from the pool, none given back; short: pool emptied, two samples, refusal as before; one sample once the pool is empty; recovery: the chunks come out zero).
+* `test_sass_block_reuse`: `uniform_registers_start_at_zero_in_the_next_block_and_the_next_launch` (UR62, the highest a program can write, and UR0, set by one kernel and read by the next, across blocks of 1, 2 and 4 warps and launches) and `a_blocks_counts_start_at_zero_in_the_next_block_and_the_next_launch`.
+
+### Mutations (each rebuilt in Debug and run; "killed" = a test fails)
+* Killed: no clearing of a chunk on release (6 tests in `test_memalloc`/`test_memory`); pool limit ignored; RAM-limit clause removed; `<` for `<=` at the pool's edge; no `MADV_DONTNEED` for a chunk past the pool; no pool give-back when the host is short; no second look after the give-back (the sample count); arena step of half a chunk; `ur` not cleared; `ur_extent` 32 instead of 64 (all by the new tests, `test_sass_block_reuse` for the last two).
+* Run again on the tree merged with `origin/main` (round sp22-zero), one at a time, each rebuilt, with the tests that failed listed by `mut.py`; all 15 killed:
+
+| mutant | killed by |
+|---|---|
+| `LaunchStats` not cleared in place | `a_blocks_counts_start_at_zero...` (also in a Release build: the counts are wrong) |
+| `up[7]` not set / `p[7]` not set / `store_gate` not set in `Warp::reset` | every kernel test, by `expect_new_warp` (Debug) |
+| `rare()` does not mark `rare_dirty` | `the_return_address_register_starts_at_zero...` (RPCMOV, so it is reachable on sm_90: the state a Release build also shows) |
+| `ur_extent` 64 for every architecture; 128 from sm_100 | `uniform_registers_past_63_start_at_zero_from_sm_100` (UR200 and UR254, read back by the next kernel: visible in Release) |
+| `Block::bar()` does not mark; the barriers never set again | `a_barrier_left_part_full...` (the next kernel's four warps deadlock on a barrier that kept one warp: Release too) |
+| `mbar` never cleared | `an_mbarrier_a_block_used_is_gone...` (the phase bit of the word after the last arrival: Release too) |
+| `gmma` never cleared | `a_warpgroup_mma_only_some_warps_issued...` (Debug only: the check in `init_block`) |
+| `tmem` never reset | `tensor_memory_a_block_allocated_is_free...` (the granule the next block is given: Release too) |
+| `pristine()` ignoring `live`, a collector's `desc`/`b_fields`, or `peer_dealloc` | `tensor_memory_is_pristine_only_when_every_member_is_what_reset_leaves` |
+
+  Because a thread keeps one `Block` across the tests of a process, a mutant that leaves state behind also fails the tests that run after the one aimed at it; the table names the aimed one.
+
+### New tests (round sp22-zero)
+* `test_sass_block_reuse` runs hand-built SASS for sm_86, sm_90 and sm_100 now (`Env(sm)`; the parameters stay at the default base, 0x160, because the cubins carry no PARAM_CBANK, and from sm_90 a store prints as `STG.E desc[UR4][...]`). Words come from the disassembler corpora in `nvidia/tests/data/sass`, or from them with a register or immediate changed; every word is checked against `sass::to_text` before it runs.
+* A barrier left a quarter full (`BAR.ARV 1, 128` by one warp) must not be there for four warps that `BAR.SYNC 1, 128` (sm_86, 90, 100); an mbarrier with a transaction due (`SYNCS.ARRIVE ... A0TR`) must not hold the phase back from the next block's last arrival (sm_90, 100); one warp of a warpgroup issuing `HGMMA` and ending leaves a snapshot that the next block must not find (sm_90; checked by the Debug comparison only); `UTCATOMSWS.FIND_AND_SET` without a free is given granule 0 again by every block (sm_100); `RPCMOV` (the `Rare` state) and UR200/UR254 (sm_100) read back as zero in the next kernel; `TensorMemory::pristine()` is false for each member `reset()` restores and true after it.
+* In a Debug build `init_block` now also compares the barriers, mbarriers, warpgroup snapshots and Tensor Memory with a new block's (the warps were compared already).
+
+### Re-measured on the merge with `origin/main` dad11eee (round sp22-zero)
+Same host and method as above (Release GCC 13.3 LTO, `VGPU_THREADS=1`, cpu 12, alternating A B, three library copies in rotation, `perf stat`), A = `origin/main` dad11eee, B = the merge. Both trees built on a tmpfs (the box's root disk is a USB drive under heavy I/O from other sessions, which starved the compiler's temporary files until `TMPDIR` pointed at tmpfs). Load average 14 to 25 on 16 CPUs throughout, so cycles are noisier than the instruction counts; the programs are the same or rebuilt from the same source (`churn` is a 20-line `cudaMalloc`, `cudaMemcpy`, `cudaFree` loop, rebuilt). Standard output with the timing lines dropped was identical in every run.
+
+| program | runs | instr B/A (p) | cycles B/A (p) | task-clock B/A (p) | page faults A, B |
+|---|---:|---:|---:|---:|---|
+| HeCBench atomicCost | 9 | 1.0040 (<0.001) | 0.978 (0.005) | 0.938 (0.11) | 7.21 M, 5.41 M |
+| rodinia gaussian -s 512 | 15 | 0.9939 (<0.001) | 0.964 (0.008) | 0.957 (0.07) | 1488, 962 |
+| gaussian, A against A | 15 | 1.0000 (0.28) | 1.006 (0.74) | 0.999 (0.59) | 1487, 1487 |
+| churn 256 MiB x 8 | 15 | 0.605 (<0.001) | 1.150 (<0.001) | **0.351** (<0.001) | 590 K, 66 K |
+| churn 256 MiB x 8, A against A | 15 | 1.0000 (0.82) | 0.977 (0.12) | 0.951 (1.0) | 590 K, 590 K |
+| churn 3000 MiB x 4 | 15 | 0.571 (<0.001) | 0.920 (<0.001) | 0.775 (<0.001) | 3.84 M, 2.29 M |
+| tiny (1 MiB x 1) | 21 | 0.9951 (<0.001) | 0.953 (0.006) | 0.875 (<0.001) | 819, 566 |
+| tiny, A against A | 21 | 1.0000 (0.29) | 0.981 (0.62) | 1.014 (0.83) | 819, 820 |
+
+The gains survived the merge and agree with the first measurement (atomicCost cycles 0.987 then and 0.978 now, gaussian 0.967 and 0.964, tiny 0.934 and 0.953, the 256 MiB churn's task-clock 0.358 and 0.351). atomicCost has 9 runs and no A against A (one run is 40 s and 14 GB of host memory on a shared box); its cycle gain is p=0.005, and its task-clock gain is not significant here.
+
+### Not verified, not done
+* ASan, TSan and the e2e tests are CI-only (server3 has no CUDA toolkit; the e2e tests need nvcc). THP behaviour was measured with `enabled=madvise`; on a host with `never` the arenas still avoid the second write and the fault count is unchanged.
+* The `HGMMA` snapshot guard is observed only by the Debug comparison; no Release-visible difference was found for a one-warp issue. Cluster-barrier state (`cga_target`, `device_error`) shares the `Rare` marking tested through RPCMOV, but no kernel here reaches `UCGABAR` or the device-runtime error path.
+* The pool's 1 GiB default is not configurable by environment (a `Config` field only); it helps loops that allocate, fill and free buffers up to that size, not programs that keep what they touch.
+
 ## Round sp21 (rodinia-profile): shared-memory bank counting and IMAD.HI (branch `sp21-rodinia`, base `origin/main` 179c886f)
 
 The question: where do the Rodinia rows and the stencil PolyBench rows (hotspot, needle, pathfinder, gaussian, lud, backprop, 2DCONV, 3DCONV, JACOBI2D, FDTD-2D) spend their instructions, and which handlers have avoidable work? Measured on server3 (Zen 4), one thread, SASS, `nvidia/rtx3060`, `perf record -e instructions:u -c 1000000` and `-e cycles:u -c 400000`, corpora of `tools/bench/real`.
