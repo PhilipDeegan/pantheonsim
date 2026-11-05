@@ -2,6 +2,8 @@
 
 Updated: 2026-10-22 (rev 5; profile counts refreshed). See ARCHITECTURE.md for the design behind these.
 
+Not yet in the gap register below: `cudaLaunchHostFunc` runs the host function inline (#487) and `shfl.sync` does not wait for a member lane still in a long loop (#488). Some gap-register entries are older than the code (the driver graph API and stream memory operations are in `nvidia/src`); check an entry against the tree before relying on it.
+
 Rev 5 is an audit, not an addition: every claim below was checked against the tree at
 `origin/main` 2ce1f45 (code, the CMake test list, the docs, the git log). The checks were
 static -- a test named here was found in the tree and registered, not re-run for this
