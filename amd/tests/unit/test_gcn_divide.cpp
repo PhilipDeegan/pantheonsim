@@ -283,4 +283,115 @@ VTEST(scaling_by_a_power_of_two_is_ldexp) {
   check_scale_by_pow2<double>();
 }
 
+// The tier's rows of binary32 lanes (div_scale_row_plain_f32, div_fixup_row_plain_f32): a row that is called plain must give, in every lane, the
+// lane function's value (and, for scale, a clear condition). Lanes are spread over every pair of exponents within reach of each threshold
+// (the far distance, the quotient and reciprocal at the denormal edge with the mantissa tie-break, the tiny numerator, the underflow and
+// overflow distances), with the edge operands and random ones; a row of 32 lanes is plain only when all 32 are, so the 32 lanes of a row are
+// the same operand pair in every lane for the exact verdict per pair, and mixed rows (one lane off) must be refused.
+struct RowCounts {
+  long plain = 0, refused = 0;
+};
+
+template <typename Make>
+void for_each_pair(Make&& f) {
+  const std::vector<float> e = edges<float>();
+  for (float x : e)
+    for (float y : e) f(dv::bits_of(x), dv::bits_of(y));
+  const uint64_t ms[] = {0, 1, 2, 0x3FFFFF, 0x400000, 0x400001, 0x7FFFFE, 0x7FFFFF};
+  for (uint32_t e1 = 0; e1 <= 255; ++e1)
+    for (int delta = -160; delta <= 140; ++delta) {
+      const int e2 = static_cast<int>(e1) + delta;
+      if (e2 < 0 || e2 > 255) continue;
+      for (uint64_t m1 : ms)
+        for (uint64_t m2 : ms) f(dv::bits_of(make<float>(e1, m1, false)), dv::bits_of(make<float>(static_cast<uint32_t>(e2), m2, (m1 ^ m2) & 1)));
+    }
+  for (int i = 0; i < 200000; ++i) f(static_cast<uint32_t>(next()), static_cast<uint32_t>(next()));
+}
+
+VTEST(a_row_of_plain_div_scale_lanes_is_the_lane_function) {
+  RowCounts rc;
+  long bad = 0;
+  std::string first;
+  for_each_pair([&](uint32_t den, uint32_t num) {
+    uint32_t b[32], c[32];
+    for (int i = 0; i < 32; ++i) b[i] = den, c[i] = num;
+    const bool plain = dv::div_scale_row_plain_f32(b, c, 32);
+    // The reference: with S0 = either operand or a third value, the lane function leaves S0 alone and clears the condition.
+    const float d = dv::from_bits<float>(den), n = dv::from_bits<float>(num);
+    bool lane_plain = true;
+    for (float s0 : {d, n, 1.5f}) {
+      const auto r = dv::div_scale(s0, d, n);
+      if (r.vcc || dv::bits_of(r.value) != dv::bits_of(s0)) lane_plain = false;
+    }
+    // (For two normal numbers the verdict is exact: the row is plain exactly when the lane function does nothing.)
+    const uint32_t e1 = den >> 23 & 255u, e2 = num >> 23 & 255u;
+    if (e1 - 1u < 254u && e2 - 1u < 254u && plain != lane_plain && ++bad == 1) first = "(exactness) den " + std::to_string(den) + " num " + std::to_string(num);
+    if (plain) {
+      ++rc.plain;
+      if (!lane_plain && ++bad == 1) first = "den " + std::to_string(den) + " num " + std::to_string(num);
+    } else {
+      ++rc.refused;
+    }
+    // One lane off in an otherwise plain row refuses the row.
+    uint32_t b2[32], c2[32];
+    for (int i = 0; i < 32; ++i) b2[i] = 0x3F800000u, c2[i] = 0x40000000u;
+    VCHECK(dv::div_scale_row_plain_f32(b2, c2, 32));
+    b2[17] = den, c2[17] = num;
+    if (dv::div_scale_row_plain_f32(b2, c2, 32) != plain) ++bad;
+  });
+  if (bad) throw vtest::Failure(std::to_string(bad) + " rows disagree with div_scale; first: " + first);
+  VCHECK(rc.plain > 100000);     // (not vacuous)
+  VCHECK(rc.refused > 100000);   // (and not everything is plain)
+}
+
+VTEST(a_row_of_plain_div_fixup_lanes_is_the_lane_function) {
+  RowCounts rc;
+  long bad = 0;
+  std::string first;
+  const std::vector<float> e = edges<float>();
+  for_each_pair([&](uint32_t den, uint32_t num) {
+    uint32_t q[3] = {static_cast<uint32_t>(next()), 0x3F800000u, 0xFFC00001u};
+    q[next() % 3] = dv::bits_of(e[next() % e.size()]);
+    for (uint32_t quo : q) {
+      uint32_t a[32], b[32], c[32], r[32];
+      for (int i = 0; i < 32; ++i) a[i] = quo, b[i] = den, c[i] = num;
+      const bool plain = dv::div_fixup_row_plain_f32(a, b, c, r, 32);
+      if (!plain) {
+        ++rc.refused;
+        continue;
+      }
+      ++rc.plain;
+      const uint32_t want = dv::bits_of(dv::div_fixup(dv::from_bits<float>(quo), dv::from_bits<float>(den), dv::from_bits<float>(num)));
+      for (int i = 0; i < 32; ++i)
+        if (r[i] != want && ++bad == 1) first = "quo " + std::to_string(quo) + " den " + std::to_string(den) + " num " + std::to_string(num);
+    }
+  });
+  if (bad) throw vtest::Failure(std::to_string(bad) + " rows disagree with div_fixup; first: " + first);
+  VCHECK(rc.plain > 100000);
+  VCHECK(rc.refused > 100000);
+}
+
+// v_ldexp_f32's fast form (ldexp_f32) against libm's ldexpf, bit for bit (NaN payloads included), for the edge operands and random ones, with
+// exponents at every distance from the ends of the normal range and the extreme 32-bit values of k.
+VTEST(a_float_ldexp_is_libms_for_every_operand_and_exponent) {
+  std::vector<float> v = edges<float>();
+  for (int i = 0; i < 4000; ++i) v.push_back(make<float>(next() % 256, rmant(), next() & 1));
+  for (uint32_t e = 0; e <= 255; ++e)
+    for (uint64_t m : {uint64_t{0}, uint64_t{1}, uint64_t{0x400000}, uint64_t{0x7FFFFF}}) v.push_back(make<float>(e, m, e & 1));
+  std::vector<int32_t> ks;
+  for (int k = -300; k <= 300; ++k) ks.push_back(k);
+  for (int32_t k : {INT32_MIN, INT32_MIN + 1, -2147483000, -65536, 65536, 2147483000, INT32_MAX - 1, INT32_MAX, -1000000, 1000000}) ks.push_back(k);
+  long bad = 0, fast = 0;
+  std::string first;
+  for (float x : v)
+    for (int32_t k : ks) {
+      const uint32_t got = dv::bits_of(dv::ldexp_f32(x, k)), want = dv::bits_of(std::ldexp(x, k));
+      const uint32_t ef = dv::bits_of(x) >> 23 & 255u;
+      if (ef - 1u < 254u && static_cast<int64_t>(ef) + k >= 1 && static_cast<int64_t>(ef) + k <= 254) ++fast;
+      if (got != want && ++bad == 1) first = "ldexp(" + std::to_string(dv::bits_of(x)) + ", " + std::to_string(k) + ")";
+    }
+  if (bad) throw vtest::Failure(std::to_string(bad) + " results differ from libm; first: " + first);
+  VCHECK(fast > 100000);   // (not vacuous: the fast form was taken)
+}
+
 VTEST_MAIN

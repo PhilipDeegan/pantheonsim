@@ -340,4 +340,61 @@ inline T div_fixup(T s0, T s1, T s2) {
   return sign_out ? -std::fabs(s0) : std::fabs(s0);
 }
 
+// ldexpf(x, k) for any x and any k (v_ldexp_f32): for a normal x and a result that is normal too the exponent field moves and nothing else
+// does -- exact, with no rounding, which is what libm gives -- and everything else (zero, a denormal, an infinity, a NaN, a result that leaves
+// the normal range) is libm's call. The sum is made in 64 bits: k is any 32-bit integer.
+[[gnu::always_inline]] inline bool ldexp_f32_exact(uint32_t bits, int32_t k) {
+  const uint32_t ef = (bits >> 23) & 255u;
+  const int64_t en = static_cast<int64_t>(ef) + k;
+  return ef - 1u < 254u && en >= 1 && en <= 254;
+}
+// (The bits of the answer where ldexp_f32_exact holds.)
+[[gnu::always_inline]] inline uint32_t ldexp_f32_shift(uint32_t bits, int32_t k) { return bits + (static_cast<uint32_t>(k) << 23); }
+[[gnu::always_inline]] inline float ldexp_f32(float x, int32_t k) {
+  const uint32_t bits = bits_of(x);
+  if (__builtin_expect(ldexp_f32_exact(bits, k), 1)) return from_bits<float>(ldexp_f32_shift(bits, k));
+  return __builtin_ldexpf(x, k);
+}
+
+// ---- Rows of binary32 lanes (the tier's wave-wide forms)
+//
+// A wave's v_div_scale_f32 / v_div_fixup_f32 on the lanes where every operand is an ordinary number and nothing is scaled or special-cased:
+// the answer is a few bit operations on the exponent fields, the same for every lane, so a row of them is tested and computed without a branch
+// and a row with one lane outside it takes the lane-by-lane functions above (nothing is written by these before the verdict). Each returns
+// true when EVERY one of the `n` lanes (active or not) is in the plain case, which is cheap to be conservative about: a lane that is not
+// makes the caller do the lane-by-lane work, which is the reference. test_gcn_divide holds both against div_scale / div_fixup.
+
+// v_div_scale_f32 (S0, S1 = denominator, S2 = numerator): in the plain case the value is S0 and the condition is clear. Plain means that
+// S1 and S2 are normal numbers, their exponents are less than 96 apart, the reciprocal of S1 and the quotient are normal, and S2's exponent
+// is above 23 (the branches of div_scale that leave S0 unchanged and VCC clear).
+[[gnu::always_inline]] inline bool div_scale_row_plain_f32(const uint32_t* s1, const uint32_t* s2, unsigned n) {
+  uint32_t bad = 0;
+  for (unsigned i = 0; i < n; ++i) {
+    const uint32_t e1 = (s1[i] >> 23) & 255u, e2 = (s2[i] >> 23) & 255u;
+    const uint32_t m1 = s1[i] & 0x7FFFFFu, m2 = s2[i] & 0x7FFFFFu;
+    const int32_t diff = static_cast<int32_t>(e2) - static_cast<int32_t>(e1);
+    uint32_t b = (e1 - 1u >= 254u) | (e2 - 1u >= 254u);
+    b |= diff >= Fp<float>::kFar;
+    b |= (e1 >= 254u) | ((e1 == 253u) & (m1 != 0));                                           // the reciprocal is a denormal
+    b |= (diff < Fp<float>::kMinExp) | ((diff == Fp<float>::kMinExp) & (m2 < m1));            // the quotient is
+    b |= e2 <= static_cast<uint32_t>(Fp<float>::kTiny);
+    bad |= b;
+  }
+  return bad == 0;
+}
+
+// v_div_fixup_f32 (S0 = quotient, S1 = denominator, S2 = numerator): in the plain case (S1 and S2 normal numbers whose exponents are within
+// the range that neither underflows nor overflows) the answer is |S0| with the sign of S1 xor S2. Writes the row to `r`; the result is of
+// no use unless true is returned.
+[[gnu::always_inline]] inline bool div_fixup_row_plain_f32(const uint32_t* s0, const uint32_t* s1, const uint32_t* s2, uint32_t* r, unsigned n) {
+  uint32_t bad = 0;
+  for (unsigned i = 0; i < n; ++i) {
+    const uint32_t e1 = (s1[i] >> 23) & 255u, e2 = (s2[i] >> 23) & 255u;
+    const int32_t diff = static_cast<int32_t>(e2) - static_cast<int32_t>(e1);
+    bad |= (e1 - 1u >= 254u) | (e2 - 1u >= 254u) | (diff < Fp<float>::kUnderflow) | (diff >= Fp<float>::kOverflow);
+    r[i] = (s0[i] & 0x7FFFFFFFu) | ((s1[i] ^ s2[i]) & 0x80000000u);
+  }
+  return bad == 0;
+}
+
 }  // namespace vgpu::amd::gcn::divide
