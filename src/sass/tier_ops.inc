@@ -938,6 +938,31 @@ static void tier_global16(void* vc, const tier::MOp& op, Mask ex) {
       return;
     }
   }
+  if constexpr (!Store) {
+    // The lanes' 16 bytes as two batches of 8-byte pieces (as the general access reads them, and as LDGSTS does): one lookup a batch, not a lock a lane.
+    // A batch the memory manager declines made nothing happen: the loop below runs as it did.
+    uint64_t fa[32], fb[32], lo[32], hi[32];
+    unsigned n = 0;
+    for (Mask m = ex; m; m &= m - 1) {
+      const uint64_t a = addrs[std::countr_zero(m)];
+      fa[n] = a;
+      fb[n++] = a + 8;
+    }
+    if (n && mem.load_batch(fa, n, 8, lo, &op.way) && mem.load_batch(fb, n, 8, hi, &op.way)) {
+      if (d) {
+        unsigned i = 0;
+        for (Mask m = ex; m; m &= m - 1, ++i) {
+          const unsigned l = static_cast<unsigned>(std::countr_zero(m));
+          d[l] = static_cast<uint32_t>(lo[i]);
+          d[32 + l] = static_cast<uint32_t>(lo[i] >> 32);
+          d[64 + l] = static_cast<uint32_t>(hi[i]);
+          d[96 + l] = static_cast<uint32_t>(hi[i] >> 32);
+        }
+      }
+      count_access(blk.st, 0, Store, addrs, ex, 16);
+      return;
+    }
+  }
   for (Mask m = ex; m; m &= m - 1) {
     const unsigned l = static_cast<unsigned>(std::countr_zero(m));
     uint32_t v[4];

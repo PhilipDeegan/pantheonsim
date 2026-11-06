@@ -35,6 +35,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <type_traits>
 
 #include "vgpu/simd/fp16.hpp"
@@ -1149,12 +1150,14 @@ __attribute__((VGPU_TC86_T512, noinline, cold)) inline void frag_to_matrices(uns
     else return simd::f16_to_f32(h);   // (the scalar conversion, which F16C is checked against at start-up)
   };
   for (unsigned r = 0; r < K / 4; ++r) {   // (register r of A: row g + 8 (r & 1), columns 8 (r >> 1) + j)
-    const uint16_t* hw = reinterpret_cast<const uint16_t*>(a + size_t{r} * 32);
+    uint16_t hw[64];   // (the register's 64 halves in memory order)
+    std::memcpy(hw, a + size_t{r} * 32, sizeof hw);
     for (unsigned g = 0; g < 8; ++g)
       for (unsigned j = 0; j < 8; ++j) A[(g + 8 * (r & 1)) * K + 8 * (r >> 1) + j] = conv(hw[g * 8 + j]);
   }
   for (unsigned r = 0; r < K / 8; ++r) {   // (register r of B: column g, rows 8 r + j)
-    const uint16_t* hw = reinterpret_cast<const uint16_t*>(b + size_t{r} * 32);
+    uint16_t hw[64];
+    std::memcpy(hw, b + size_t{r} * 32, sizeof hw);
     for (unsigned g = 0; g < 8; ++g)
       for (unsigned j = 0; j < 8; ++j) B[(8 * r + j) * 8 + g] = conv(hw[g * 8 + j]);
   }
