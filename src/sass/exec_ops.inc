@@ -918,8 +918,10 @@ void Runner::exec_int(Block& blk, Warp& w, const Instr& ins, Mask ex) {
       const unsigned size = ins.f[0];
       const Operand& c = ins.src[0];
       if (ins.f[1]) {   // c[bank][URa + offset] (ULDC's indexed form; LDCU)
-        const uint64_t o = (c.reg == static_cast<unsigned>(m_.sm >= 100 ? 255 : 63) ? 0 : w.ur[c.reg]) +
-                           static_cast<uint64_t>(c.imm);
+        // The indexed ULDC's offset is signed and the address wraps in the 64 KiB bank (as LDC's does); LDCU's is not.
+        uint64_t o = (c.reg == static_cast<unsigned>(m_.sm >= 100 ? 255 : 63) ? 0 : w.ur[c.reg]) +
+                     static_cast<uint64_t>(c.imm);
+        if (ins.f[1] == 1) o &= 0xffff;
         const unsigned words = size == 6 ? 4 : size == 5 ? 2 : 1;
         if (words > 1) {
           Operand d = ins.dst[0];

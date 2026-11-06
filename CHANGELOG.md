@@ -7,6 +7,9 @@ release says what runs and what it produces, never how fast a real GPU would run
 
 ## Unreleased
 
+- SASS: `ULDC` with a uniform base register (`ULDC.64 UR6, c[0x3][UR8+-0x72e0]`) takes its offset as a signed 16-bit number and wraps in the
+  64 KiB bank, as `LDC` does. ptxas uses it to reach constant data past byte 32768, and the simulator read zero there on the Ampere and Ada
+  profiles (an inverse NTT in FIDESlib came out all zeros) (pantheonsim #499).
 - `vgpu shell --rootfs`: opt-in private root. The session gets its own root on a tmpfs (entered with `pivot_root` inside the mount
   namespace the shell already makes): the host's `/usr`, `/bin`, `/sbin`, `/lib*` and the `/etc` entries a loader, resolver, TLS
   and shell need come through read-only; `/root`, `/home`, `/opt`, `/tmp`, `/var/tmp` and `/work` start empty and are discarded on

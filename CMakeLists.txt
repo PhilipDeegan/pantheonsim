@@ -1525,6 +1525,8 @@ vgpu_unit_test(test_lockstep_fold)
 # When a lockstep launch first looks at its blocks (after what the last look cost, per resident block), and that a block standing still is found out.
 vgpu_unit_test(test_lockstep_look)
 vgpu_unit_test(test_sass_lea)
+# ULDC c[bank][URa + offset]: the offset is signed and the address wraps in the 64 KiB bank (pantheonsim #499).
+vgpu_unit_test(test_sass_uldc_indexed)
 # The SIMD lane kernels, bit for bit against scalar code at every level the CPU has.
 vgpu_unit_test(test_simd)
 # An RTX 3060's tensor-core sum (include/vgpu/exec/tc_ampere.hpp): card-measured vectors, an independent form, special values.
