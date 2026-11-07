@@ -3,6 +3,8 @@
 
 #include <dirent.h>
 #include <dlfcn.h>
+#include <elf.h>
+#include <link.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -59,14 +61,60 @@ uint64_t env_u64(const char* name, uint64_t dflt) {
   return std::strtoull(e, nullptr, 10);
 }
 
-// The identity of the code this runs: a hash of the shared object (or executable) that holds this function, once per
-// process. A rebuild is a different simulator and must not replay what the old one wrote.
+// The identity of the code this runs. Preferably the object's own GNU build id (the linker's hash of the whole file, read from the
+// loaded image: no i/o, so a short program pays nothing for it); without one, a hash of the shared object or executable that holds this
+// function, read once. A rebuild is a different simulator and must not replay what the old one wrote.
+struct BuildNote {
+  const void* addr = nullptr;
+  Hash128 id;
+  bool found = false;
+};
+
+int find_build_id(struct dl_phdr_info* info, size_t, void* data) {
+  BuildNote* out = static_cast<BuildNote*>(data);
+  const uintptr_t here = reinterpret_cast<uintptr_t>(out->addr);
+  bool inside = false;
+  for (int i = 0; i < info->dlpi_phnum; ++i) {
+    const ElfW(Phdr)& ph = info->dlpi_phdr[i];
+    if (ph.p_type != PT_LOAD) continue;
+    const uintptr_t lo = info->dlpi_addr + ph.p_vaddr;
+    if (here >= lo && here < lo + ph.p_memsz) inside = true;
+  }
+  if (!inside) return 0;
+  for (int i = 0; i < info->dlpi_phnum; ++i) {
+    const ElfW(Phdr)& ph = info->dlpi_phdr[i];
+    if (ph.p_type != PT_NOTE) continue;
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(info->dlpi_addr + ph.p_vaddr);
+    const uint8_t* end = p + ph.p_memsz;
+    while (p + sizeof(ElfW(Nhdr)) <= end) {
+      const ElfW(Nhdr)* n = reinterpret_cast<const ElfW(Nhdr)*>(p);
+      const uint8_t* name = p + sizeof(ElfW(Nhdr));
+      const uint8_t* desc = name + ((n->n_namesz + 3) & ~3u);
+      const uint8_t* next = desc + ((n->n_descsz + 3) & ~3u);
+      if (next > end) break;
+      if (n->n_type == NT_GNU_BUILD_ID && n->n_namesz == 4 && std::memcmp(name, "GNU", 4) == 0 && n->n_descsz > 0) {
+        out->id = hash_bytes(desc, n->n_descsz);
+        out->found = true;
+      }
+      p = next;
+    }
+  }
+  return 1;   // this is the object: stop
+}
+
 Hash128 build_identity() {
   static const Hash128 id = [] {
     Hasher h(0x6275696c);
 #ifdef VGPU_VERSION
     h.str(VGPU_VERSION);
 #endif
+    BuildNote note;
+    note.addr = reinterpret_cast<const void*>(&build_identity);
+    dl_iterate_phdr(find_build_id, &note);
+    if (note.found) {
+      h.hash(note.id);
+      return h.done();
+    }
     Dl_info info{};
     std::string path = "/proc/self/exe";
     if (dladdr(reinterpret_cast<void*>(&build_identity), &info) && info.dli_fname && *info.dli_fname) path = info.dli_fname;
@@ -125,10 +173,7 @@ Config Config::from_env() {
 
 struct DeviceMemo::Store {
   explicit Store(const Config& c) : cfg(c) {
-    if (!cfg.dir.empty()) {
-      ::mkdir(cfg.dir.c_str(), 0777);
-      scan_disk();
-    }
+    if (!cfg.dir.empty()) ::mkdir(cfg.dir.c_str(), 0777);   // (the size of what is there is worked out when something is first written)
   }
 
   using Ptr = std::shared_ptr<const Entry>;
@@ -165,6 +210,7 @@ struct DeviceMemo::Store {
   std::unordered_map<Hash128, std::list<Item>::iterator, KeyHash> index;
   uint64_t held = 0;
   uint64_t disk_bytes = 0;
+  bool disk_scanned = false;
   uint64_t tmp_seq = 0;
   std::mutex io_mu;
 
@@ -230,6 +276,10 @@ struct DeviceMemo::Store {
 
   bool write_disk(const Hash128& k, const Entry& e) {
     std::lock_guard<std::mutex> io(io_mu);
+    if (!disk_scanned) {
+      disk_scanned = true;
+      scan_disk();
+    }
     std::vector<uint8_t> v;
     v.insert(v.end(), kMagic, kMagic + 8);
     put_u64(v, k.a), put_u64(v, k.b);
@@ -390,7 +440,11 @@ struct DeviceMemo::Store {
 
 namespace {
 
-std::mutex g_reg_mu;
+// (leaked, like the lists: a device is destroyed during static destruction, after namespace-scope objects of this file)
+std::mutex& reg_mutex() {
+  static auto* m = new std::mutex;
+  return *m;
+}
 std::vector<DeviceMemo*>& registry() {
   static auto* r = new std::vector<DeviceMemo*>;
   return *r;
@@ -402,11 +456,11 @@ void register_memo(DeviceMemo* d) {
     return true;
   }();
   (void)once;
-  std::lock_guard<std::mutex> g(g_reg_mu);
+  std::lock_guard<std::mutex> g(reg_mutex());
   registry().push_back(d);
 }
 void unregister_memo(DeviceMemo* d) {
-  std::lock_guard<std::mutex> g(g_reg_mu);
+  std::lock_guard<std::mutex> g(reg_mutex());
   auto& r = registry();
   r.erase(std::remove(r.begin(), r.end(), d), r.end());
 }
@@ -428,7 +482,7 @@ std::FILE* stats_file(bool* close) {
 void report_all_at_exit() {
   std::vector<DeviceMemo*> all;
   {
-    std::lock_guard<std::mutex> g(g_reg_mu);
+    std::lock_guard<std::mutex> g(reg_mutex());
     all = registry();
   }
   bool close = false;
@@ -1259,7 +1313,10 @@ Hash128 DeviceMemo::memory_hash() const { return vgpu::memo::memory_hash(mem_); 
 // VGPU_MEMO_FINAL_HASH=<file>: at the end of the process (or of the device) one line per device with the hash of all its
 // live memory, whether or not the cache is on: what the differential runs compare.
 namespace {
-std::mutex g_fh_mu;
+std::mutex& fh_mutex() {
+  static auto* m = new std::mutex;
+  return *m;
+}
 std::vector<const MemoryManager*>& fh_list() {
   static auto* v = new std::vector<const MemoryManager*>;
   return *v;
@@ -1273,7 +1330,7 @@ void fh_write(const MemoryManager* m) {
   }
 }
 void fh_atexit() {
-  std::lock_guard<std::mutex> g(g_fh_mu);
+  std::lock_guard<std::mutex> g(fh_mutex());
   for (const MemoryManager* m : fh_list()) fh_write(m);
   fh_list().clear();
 }
@@ -1285,12 +1342,13 @@ void final_hash_register(const MemoryManager* m) {
     return true;
   }();
   (void)once;
-  std::lock_guard<std::mutex> g(g_fh_mu);
+  std::lock_guard<std::mutex> g(fh_mutex());
   fh_list().push_back(m);
 }
 
 void final_hash_write(const MemoryManager* m) {
-  std::lock_guard<std::mutex> g(g_fh_mu);
+  if (!std::getenv("VGPU_MEMO_FINAL_HASH")) return;
+  std::lock_guard<std::mutex> g(fh_mutex());
   auto& v = fh_list();
   const auto it = std::find(v.begin(), v.end(), m);
   if (it == v.end()) return;

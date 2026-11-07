@@ -782,6 +782,16 @@ VTEST(row_cooperative_cluster_and_warp_size_launches_are_refused) {
   }, 7, "nvidia/h100"), "cluster");
 }
 
+VTEST(row_a_graph_instantiated_for_device_launch_refuses_its_kernels) {
+  expect_poisoned("device-graph", run_row("devgraph", [](Rig& r) {
+    LaunchConfig c;
+    c.grid = {1, 1, 1};
+    c.block = {8, 1, 1};
+    c.current_graph_exec = 0x1234;   // what a kernel of a device-launch graph is told its own handle is
+    r.launch_cfg("fixed", c, {arg_u64(r.y)});
+  }), "device-graph");
+}
+
 VTEST(row_texture_objects_make_launches_uncacheable) {
   expect_poisoned("textures", run_row("textures", [](Rig& r) {
     r.dev.textures()[0x1000] = exec::TextureDesc{};
