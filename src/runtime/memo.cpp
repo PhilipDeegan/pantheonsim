@@ -16,6 +16,7 @@
 #include <fstream>
 #include <random>
 #include <set>
+#include <unordered_set>
 #include <variant>
 
 #include "vgpu/profiling.hpp"
@@ -142,6 +143,24 @@ struct DeviceMemo::Store {
   };
 
   Config cfg;
+  // Which keys have a file on disk, learned a bucket (the first two hex digits) at a time, the first time a key of that bucket is
+  // asked for: a miss then costs a hash lookup and not a failed open. Files other processes add later are not seen.
+  std::unordered_set<Hash128, KeyHash> on_disk;
+  bool bucket_loaded[256] = {};
+  void load_bucket(unsigned b) {
+    if (bucket_loaded[b]) return;
+    bucket_loaded[b] = true;
+    char sub[16];
+    std::snprintf(sub, sizeof sub, "%02x", b);
+    if (DIR* d = ::opendir((cfg.dir + "/" + sub).c_str())) {
+      while (const dirent* f = ::readdir(d)) {
+        if (std::strlen(f->d_name) != 36 || std::strcmp(f->d_name + 32, ".vgm") != 0) continue;
+        Hash128 k;
+        if (std::sscanf(f->d_name, "%16" SCNx64 "%16" SCNx64, &k.a, &k.b) == 2) on_disk.insert(k);
+      }
+      ::closedir(d);
+    }
+  }
   std::list<Item> lru;   // front: most recently used
   std::unordered_map<Hash128, std::list<Item>::iterator, KeyHash> index;
   uint64_t held = 0;
@@ -241,10 +260,16 @@ struct DeviceMemo::Store {
       return false;
     }
     disk_bytes += v.size();
+    on_disk.insert(k);
     return true;
   }
 
   Ptr read_disk(const Hash128& k) {
+    {
+      std::lock_guard<std::mutex> io(io_mu);
+      load_bucket(static_cast<unsigned>(k.a >> 56));
+      if (!on_disk.count(k)) return nullptr;
+    }
     std::lock_guard<std::mutex> io(io_mu);
     const std::string p = path_for(k);
     std::FILE* f = std::fopen(p.c_str(), "rb");
@@ -267,6 +292,7 @@ struct DeviceMemo::Store {
     std::fclose(f);
     const auto bad = [&]() -> Ptr {
       ::unlink(p.c_str());   // a file that does not parse is not an entry
+      on_disk.erase(k);
       return nullptr;
     };
     if (v.size() < 8 + 6 * 8 + 16 || std::memcmp(v.data(), kMagic, 8) != 0) return bad();
@@ -351,6 +377,9 @@ struct DeviceMemo::Store {
       if (::unlink(f.path.c_str()) == 0) {
         total -= f.size;
         ++*evicted;
+        const size_t slash = f.path.rfind('/');
+        Hash128 k;
+        if (slash != std::string::npos && std::sscanf(f.path.c_str() + slash + 1, "%16" SCNx64 "%16" SCNx64, &k.a, &k.b) == 2) on_disk.erase(k);
       }
     }
     disk_bytes = total;
@@ -432,6 +461,35 @@ DeviceMemo::~DeviceMemo() {
   }
 }
 
+// Every VGPU_ variable but the ones that cannot change what a kernel computes (where output goes, what is printed, the thread
+// count, which is in the key as one fact: blocks in order or not). A variable that does change results (VGPU_PTX_CONTRACT, the
+// profile, VGPU_DARK_FILL, ...) is in by not being out. Worked out again only when the environment's entries have moved.
+Hash128 DeviceMemo::env_hash() {
+  uint64_t sig = 0, n = 0;
+  for (char** e = environ; e && *e; ++e, ++n) sig = sig * 1000003u + reinterpret_cast<uintptr_t>(*e);
+  std::lock_guard<std::mutex> g(mu_);
+  if (n == env_n_ && sig == env_sig_ && env_valid_) return env_hash_;
+  static const char* const ignore[] = {"VGPU_MEMO",      "VGPU_COUNTERS", "VGPU_KERNEL_DIGEST", "VGPU_QUIET",    "VGPU_THREADS",
+                                       "VGPU_TELEMETRY", "VGPU_SESSION",  "VGPU_STATE_DIR",     "VGPU_SASS_LOG", "VGPU_SASS_CACHE",
+                                       "VGPU_JIT_STATS", "VGPU_TIER_STATS", "VGPU_HOST_GPU_LOG", "VGPU_REGISTERS_DIR"};
+  std::vector<std::string> vars;
+  for (char** e = environ; e && *e; ++e) {
+    if (std::strncmp(*e, "VGPU_", 5) != 0) continue;
+    bool skip = false;
+    for (const char* ig : ignore)
+      if (std::strncmp(*e, ig, std::strlen(ig)) == 0) skip = true;
+    if (!skip) vars.push_back(*e);
+  }
+  std::sort(vars.begin(), vars.end());
+  Hasher h(0x656e7673);
+  for (const std::string& v : vars) h.str(v.c_str());
+  env_hash_ = h.done();
+  env_n_ = n;
+  env_sig_ = sig;
+  env_valid_ = true;
+  return env_hash_;
+}
+
 Hash128 DeviceMemo::profile_hash(const DeviceProfile& p) const {
   Hasher h(0x70726f66);
   h.str(p.id.c_str()), h.str(p.model.c_str()), h.str(p.vendor.c_str()), h.str(p.architecture.c_str());
@@ -469,6 +527,7 @@ void DeviceMemo::note_reason(const char* why) { ++stats_.reasons[why]; }
 // ---- events -------------------------------------------------------------------------------------------------------
 
 void DeviceMemo::poison_locked(const char* why) {
+  ++alloc_epoch_;
   state_ = fresh_root();
   ptrs_ = true;
   cache_.clear();
@@ -561,6 +620,7 @@ void DeviceMemo::on_alloc(uint64_t base, uint64_t size) {
   h.hash(state_), h.u64(base), h.u64(size);
   state_ = h.done();
   ++event_seq_;
+  ++alloc_epoch_;
 }
 
 void DeviceMemo::on_free(uint64_t ptr) {
@@ -575,7 +635,9 @@ void DeviceMemo::on_free(uint64_t ptr) {
   h.hash(state_), h.u64(ptr);
   state_ = h.done();
   ++event_seq_;
+  ++alloc_epoch_;
   cache_.erase(ptr);
+  mat_hint_.erase(ptr);
 }
 
 void DeviceMemo::on_poison(const char* why) {
@@ -601,7 +663,7 @@ bool DeviceMemo::kernel_has_device_calls(const ptx::EntryFn& fn) {
   {
     std::lock_guard<std::mutex> g(mu_);
     const auto it = device_calls_.find(&fn);
-    if (it != device_calls_.end()) return it->second;
+    if (it != device_calls_.end()) return it->second.calls;
   }
   // A kernel that mallocs or prints, or calls the device runtime (cuda*: launches, graph launches, conditionals,
   // attribute queries), has effects outside memory that a replay would skip.
@@ -626,7 +688,11 @@ bool DeviceMemo::kernel_has_device_calls(const ptx::EntryFn& fn) {
       }
   }
   std::lock_guard<std::mutex> g(mu_);
-  device_calls_[&fn] = found;
+  KernelInfo& ki = device_calls_[&fn];
+  ki.calls = found;
+  Hasher nh(0x6e616d65);
+  nh.str(fn.name.c_str());
+  ki.name_hash = nh.done();
   return found;
 }
 
@@ -639,7 +705,7 @@ const char* DeviceMemo::ineligible(const KernelRef& k, Ticket& t) {
   if (c.cluster != std::array<uint32_t, 3>{0, 0, 0} || (k.fn && k.fn->req_cluster != std::array<uint32_t, 3>{0, 0, 0})) return "cluster";
   if (c.warp_size) return "warp-size";
   if (c.textures && !c.textures->empty() && !mut("no_poison_textures")) return "textures";
-  if (c.graph_launcher || c.current_graph_exec) return "device-graph";
+  if (c.current_graph_exec) return "device-graph";   // (a graph instantiated for device launch: its kernels may read their own handle)
   const exec::LaunchEnv& e = *k.env;
   if (e.race) return "env-race";
   if (e.trace || e.sass_trace) return "env-trace";
@@ -659,12 +725,18 @@ const char* DeviceMemo::ineligible(const KernelRef& k, Ticket& t) {
 
 // ---- the key ---------------------------------------------------------------------------------------------------------
 
-Hash128 DeviceMemo::launch_key(const KernelRef& k, const Hash128& state, const Ticket& t) const {
+Hash128 DeviceMemo::launch_key(const KernelRef& k, const Hash128& state, const Ticket& t) {
   const exec::LaunchConfig& c = *k.cfg;
   Hasher h(0x6c61756e);
   if (!mut("key_no_state")) h.hash(state);
   if (!mut("key_no_code")) h.hash(k.code);
-  h.str(k.name->c_str());
+  {
+    // (the name's hash is worked out once per kernel, by kernel_has_device_calls)
+    std::lock_guard<std::mutex> g(mu_);
+    const auto it = device_calls_.find(k.fn);
+    if (k.fn && it != device_calls_.end()) h.hash(it->second.name_hash);
+    else h.str(k.name->c_str());
+  }
   h.u64(k.sass ? 1 : 0);
   if (!mut("key_no_profile")) h.hash(profile_);
   h.hash(build_);
@@ -675,7 +747,7 @@ Hash128 DeviceMemo::launch_key(const KernelRef& k, const Hash128& state, const T
   if (!mut("key_no_shared")) h.u64(c.shared_bytes);
   h.u64(c.work_dim), h.u64(static_cast<uint64_t>(c.scheduler)), h.u64(c.scheduler_seed), h.u64(c.max_steps);
   for (uint32_t v : c.global_offset) h.u64(v);
-  h.u64(c.device_heap_bytes), h.u64(c.stack_bytes), h.u64(c.nonportable_cluster ? 1 : 0);
+  h.u64(c.device_heap_bytes), h.u64(c.stack_bytes), h.u64(c.nonportable_cluster ? 1 : 0), h.u64(c.graph_launcher ? 1 : 0);
   if (!mut("key_no_args")) {
     h.u64(k.args->size());
     for (const auto& a : *k.args) h.bytes(a.data(), a.size());
@@ -689,6 +761,7 @@ Hash128 DeviceMemo::launch_key(const KernelRef& k, const Hash128& state, const T
       if (v) h.str(v);
     }
     h.u64(t.sequential ? 1 : 0);
+    h.hash(env_hash());
   }
   return h.done();
 }
@@ -736,14 +809,54 @@ bool DeviceMemo::collect_bases(const KernelRef& k, Ticket& t) {
 
 uint64_t DeviceMemo::estimate_ns(const Ticket& t) {
   uint64_t bytes = 0;
-  std::lock_guard<std::mutex> g(mu_);
-  for (uint64_t base : t.bases) {
+  std::vector<uint64_t> unknown;
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    for (uint64_t base : t.bases) {
+      const auto h = mat_hint_.find(base);
+      if (h == mat_hint_.end()) {
+        unknown.push_back(base);
+        continue;
+      }
+      bytes += h->second;                                              // after
+      const auto it = cache_.find(base);
+      if (it == cache_.end() || !it->second.valid) bytes += h->second;  // and before
+    }
+  }
+  for (uint64_t base : unknown) {   // (a walk of the chunk table, once per allocation)
     const uint64_t m = mem_.memo_materialized(base);
-    bytes += m;                                                       // after
-    const auto it = cache_.find(base);
-    if (it == cache_.end() || !it->second.valid) bytes += m;           // and before
+    std::lock_guard<std::mutex> g(mu_);
+    mat_hint_[base] = m;
+    bytes += 2 * m;
   }
   return static_cast<uint64_t>(static_cast<double>(bytes) / bw_ * 1e9) + 3000 + 400 * t.bases.size();
+}
+
+// What recording would cost when a kernel may reach every allocation: from the sizes seen at the last walk of all of them, which
+// is renewed when allocations change and every so often otherwise (an estimate, never a claim).
+uint64_t DeviceMemo::estimate_all_ns() {
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    if (all_est_epoch_ == alloc_epoch_ && all_est_age_ < 64) {
+      ++all_est_age_;
+      return static_cast<uint64_t>(static_cast<double>(2 * all_est_bytes_) / bw_ * 1e9) + 3000;
+    }
+  }
+  uint64_t bytes = 0;
+  size_t n = 0;
+  for (const auto& [base, size] : mem_.live_ranges()) {
+    (void)size;
+    const uint64_t m = mem_.memo_materialized(base);
+    bytes += m;
+    ++n;
+    std::lock_guard<std::mutex> g(mu_);
+    mat_hint_[base] = m;
+  }
+  std::lock_guard<std::mutex> g(mu_);
+  all_est_bytes_ = bytes;
+  all_est_epoch_ = alloc_epoch_;
+  all_est_age_ = 0;
+  return static_cast<uint64_t>(static_cast<double>(2 * bytes) / bw_ * 1e9) + 3000 + 400 * n;
 }
 
 // The before-state of every allocation in t.bases, kept from the last launch's after-state when nothing touched it since.
@@ -759,6 +872,7 @@ bool DeviceMemo::capture_before(Ticket& t, uint64_t* hashed) {
     if (!mem_.memo_page_hashes(base, &pages, &mat)) return false;
     *hashed += mat;
     std::lock_guard<std::mutex> g(mu_);
+    mat_hint_[base] = mat;
     PageCache& pc = cache_[base];
     pc.pages = std::move(pages);
     uint64_t sz = 0, bb = 0;
@@ -854,19 +968,33 @@ bool DeviceMemo::begin_impl(const KernelRef& k, Ticket& t, exec::LaunchStats* ou
 
   // A miss. Is capturing its write set worth what it costs?
   bool record = true;
-  if (!collect_bases(k, t)) {
+  bool all;
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    all = ptrs_ && !mut("ptrs_never");
+  }
+  bool have_bases = false;
+  const auto refuse = [&] {
     t.eligible = false;
     t.why = "host-map-reachable";
     active_launches_.fetch_add(1);
     tainted_.store(false, std::memory_order_relaxed);
     return false;
-  }
+  };
   if (!cfg_.force_record && !t.verify_against) {
-    const uint64_t est = estimate_ns(t);
+    uint64_t est;
+    if (all) {
+      est = estimate_all_ns();   // (without listing every allocation: a launch not recorded does not need the list)
+    } else {
+      if (!collect_bases(k, t)) return refuse();
+      have_bases = true;
+      est = estimate_ns(t);
+    }
     std::lock_guard<std::mutex> g(mu_);
     const double allowed = cfg_.budget * static_cast<double>(stats_.exec_ns) + static_cast<double>(cfg_.credit_ns);
     record = static_cast<double>(stats_.fixed_ns + stats_.record_ns + est) <= allowed;
   }
+  if (record && !have_bases && !collect_bases(k, t)) return refuse();
   t.record = record;
   if (record) {
     uint64_t hashed = 0;
@@ -982,6 +1110,7 @@ void DeviceMemo::end(Ticket& t, const exec::LaunchStats& stats, uint64_t exec_ns
     }
     hashed += mat;
     std::lock_guard<std::mutex> g(mu_);
+    mat_hint_[base] = mat;
     const auto it = cache_.find(base);
     if (it == cache_.end() || !it->second.valid || it->second.pages.size() != pages.size()) {
       ok = false;
@@ -1113,19 +1242,64 @@ void DeviceMemo::end(Ticket& t, const exec::LaunchStats& stats, uint64_t exec_ns
 
 // ---- reporting -----------------------------------------------------------------------------------------------------------
 
-Hash128 DeviceMemo::memory_hash() const {
+Hash128 memory_hash(const MemoryManager& mem) {
   Hasher h(0x6d656d68);
-  for (const auto& [base, size] : mem_.live_ranges()) {
+  for (const auto& [base, size] : mem.live_ranges()) {
     std::vector<uint64_t> pages;
     uint64_t mat = 0;
     h.u64(base), h.u64(size);
-    if (mem_.memo_page_hashes(base, &pages, &mat))
+    if (mem.memo_page_hashes(base, &pages, &mat))
       for (uint64_t p : pages) h.u64(p);
   }
   return h.done();
 }
 
+Hash128 DeviceMemo::memory_hash() const { return vgpu::memo::memory_hash(mem_); }
+
+// VGPU_MEMO_FINAL_HASH=<file>: at the end of the process (or of the device) one line per device with the hash of all its
+// live memory, whether or not the cache is on: what the differential runs compare.
+namespace {
+std::mutex g_fh_mu;
+std::vector<const MemoryManager*>& fh_list() {
+  static auto* v = new std::vector<const MemoryManager*>;
+  return *v;
+}
+void fh_write(const MemoryManager* m) {
+  const char* p = std::getenv("VGPU_MEMO_FINAL_HASH");
+  if (!p || !*p) return;
+  if (std::FILE* o = std::fopen(p, "a")) {
+    std::fprintf(o, "%016llx %s\n", static_cast<unsigned long long>(m->va_base()), hex128(memory_hash(*m)).c_str());
+    std::fclose(o);
+  }
+}
+void fh_atexit() {
+  std::lock_guard<std::mutex> g(g_fh_mu);
+  for (const MemoryManager* m : fh_list()) fh_write(m);
+  fh_list().clear();
+}
+}  // namespace
+
+void final_hash_register(const MemoryManager* m) {
+  static const bool once = [] {
+    std::atexit(fh_atexit);
+    return true;
+  }();
+  (void)once;
+  std::lock_guard<std::mutex> g(g_fh_mu);
+  fh_list().push_back(m);
+}
+
+void final_hash_write(const MemoryManager* m) {
+  std::lock_guard<std::mutex> g(g_fh_mu);
+  auto& v = fh_list();
+  const auto it = std::find(v.begin(), v.end(), m);
+  if (it == v.end()) return;
+  fh_write(m);
+  v.erase(it);
+}
+
 void DeviceMemo::report(std::FILE* f) const {
+  if (reported_.exchange(true)) return;   // once: the destructor and the exit handler may both come
   const Stats s = stats();
   std::string reasons;
   for (const auto& [k, v] : s.reasons) reasons += (reasons.empty() ? "" : ",") + k + ":" + std::to_string(v);
@@ -1137,13 +1311,6 @@ void DeviceMemo::report(std::FILE* f) const {
                s.verify_mismatch, s.entries_put, s.entry_bytes, static_cast<double>(s.exec_ns) / 1e6, static_cast<double>(s.fixed_ns) / 1e6,
                static_cast<double>(s.record_ns) / 1e6, static_cast<double>(s.hit_ns) / 1e6, static_cast<double>(s.saved_ns) / 1e6,
                reasons.empty() ? "-" : reasons.c_str());
-  if (const char* p = std::getenv("VGPU_MEMO_FINAL_HASH"); p && *p) {
-    if (std::FILE* o = std::fopen(p, "a")) {
-      const Hash128 h = memory_hash();
-      std::fprintf(o, "%s\n", hex128(h).c_str());
-      std::fclose(o);
-    }
-  }
 }
 
 }  // namespace vgpu::memo

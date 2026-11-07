@@ -29,7 +29,7 @@ struct Config {
   uint64_t disk_cap = 4ull << 30;     // VGPU_MEMO_MAX_MB: least recently used entries go past this
   uint64_t mem_cap = 512ull << 20;    // VGPU_MEMO_MEM_MB: entries held in memory
   uint64_t entry_cap = 256ull << 20;  // the largest write set an entry may hold
-  double budget = 0.04;               // VGPU_MEMO_BUDGET: what capturing write sets may cost, as a share of kernel time
+  double budget = 0.03;               // VGPU_MEMO_BUDGET: what capturing write sets may cost, as a share of kernel time
   bool force_record = false;          // VGPU_MEMO_BUDGET=inf: capture every miss whatever it costs (measurement, tests)
   int verify = 0;                     // VGPU_MEMO_VERIFY=1: run every hit for real and compare (abort on a difference); 2: count
   uint64_t credit_ns = 150000;        // recording is free until it has cost this much
@@ -101,6 +101,11 @@ struct Ticket {
   std::string why;               // why it is not cacheable
 };
 
+// The hash of every live allocation of a device, and the end-of-process record of it (VGPU_MEMO_FINAL_HASH).
+Hash128 memory_hash(const MemoryManager& mem);
+void final_hash_register(const MemoryManager* m);
+void final_hash_write(const MemoryManager* m);   // (the device is going away: write its line now)
+
 class DeviceMemo final : public EventSink {
  public:
   DeviceMemo(MemoryManager& mem, const Config& cfg, const DeviceProfile& profile);
@@ -141,19 +146,21 @@ class DeviceMemo final : public EventSink {
   struct Store;
   bool begin_impl(const KernelRef& k, Ticket& t, exec::LaunchStats* stats);
   const char* ineligible(const KernelRef& k, Ticket& t);
-  Hash128 launch_key(const KernelRef& k, const Hash128& state, const Ticket& t) const;
+  Hash128 launch_key(const KernelRef& k, const Hash128& state, const Ticket& t);
   void poison_locked(const char* why);
   void advance_locked(const Ticket& t);
   void poison(const char* why);
   bool collect_bases(const KernelRef& k, Ticket& t);
   bool capture_before(Ticket& t, uint64_t* est_bytes);
   uint64_t estimate_ns(const Ticket& t);
+  uint64_t estimate_all_ns();
   bool replay(const Entry& e);
   void invalidate_range_locked(uint64_t addr, uint64_t len);
   void scan_pointers(uint64_t addr, const uint8_t* p, uint64_t len);
   bool kernel_has_device_calls(const ptx::EntryFn& fn);
   void note_reason(const char* why);
   Hash128 profile_hash(const DeviceProfile& p) const;
+  Hash128 env_hash();
   bool mut(const char* name) const { return !mutant_.empty() && mutant_ == name; }
 
   MemoryManager& mem_;
@@ -169,12 +176,24 @@ class DeviceMemo final : public EventSink {
   std::atomic<int> active_launches_{0};
   std::atomic<bool> tainted_{false};
   std::map<uint64_t, PageCache> cache_;
-  std::unordered_map<const ptx::EntryFn*, bool> device_calls_;
+  struct KernelInfo {
+    bool calls = false;    // reaches malloc, free, printf or a device-runtime call
+    Hash128 name_hash;
+  };
+  std::unordered_map<const ptx::EntryFn*, KernelInfo> device_calls_;
+  std::unordered_map<uint64_t, uint64_t> mat_hint_;   // bytes in real chunks of each allocation, as last seen (for the estimate)
+  uint64_t alloc_epoch_ = 0;                          // moves with every allocation, free and poison
+  uint64_t all_est_bytes_ = 0, all_est_epoch_ = ~0ull;
+  unsigned all_est_age_ = 0;
+  Hash128 env_hash_;
+  uint64_t env_n_ = 0, env_sig_ = 0;
+  bool env_valid_ = false;
   Stats stats_;
   double bw_ = 6.0e9;            // bytes a second hashing runs at, from what it has measured
   std::unique_ptr<Store> store_;
   std::string mutant_;
   uint64_t executed_ = 0;
+  mutable std::atomic<bool> reported_{false};
 };
 
 }  // namespace vgpu::memo

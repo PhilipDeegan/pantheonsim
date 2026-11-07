@@ -243,17 +243,23 @@ memo::Config base_config(const std::string& dir = "") {
   return c;
 }
 
+// Runs a shell command; its status is of no interest (a directory that is not there is what rm -rf is asked about).
+void sh(const std::string& cmd) {
+  const int rc = std::system(cmd.c_str());
+  (void)rc;
+}
+
 std::string temp_dir(const char* name) {
   char b[256];
   std::snprintf(b, sizeof b, "/tmp/vgpu-memo-test-%d-%s", static_cast<int>(::getpid()), name);
   const std::string cmd = std::string("rm -rf ") + b;
-  (void)std::system(cmd.c_str());
+  sh(cmd.c_str());
   return b;
 }
 
 void remove_dir(const std::string& d) {
   const std::string cmd = "rm -rf " + d;
-  (void)std::system(cmd.c_str());
+  sh(cmd.c_str());
 }
 
 std::vector<uint8_t> arg_u64(uint64_t v) {
@@ -462,7 +468,7 @@ VTEST(a_corrupt_entry_on_disk_is_a_miss_and_is_not_trusted) {
   (void)run_program(typical, &cfg);
   // Flip a byte in the middle of every entry.
   const std::string cmd = "find " + dir + " -name '*.vgm' -exec sh -c 'printf X | dd of=\"$1\" bs=1 seek=100 conv=notrunc 2>/dev/null' _ {} \\;";
-  (void)std::system(cmd.c_str());
+  sh(cmd.c_str());
   const Outcome warm = run_program(typical, &cfg);
   check_same(off, warm, "corrupt");
   remove_dir(dir);
@@ -477,7 +483,7 @@ VTEST(the_disk_cache_stays_under_its_cap_and_still_serves_what_is_left) {
   check_same(off, cold, "capped");
   VCHECK(cold.stats.disk_evicted > 0);
   const std::string cmd = "du -sb " + dir + " | cut -f1 > " + dir + ".size";
-  (void)std::system(cmd.c_str());
+  sh(cmd.c_str());
   std::FILE* f = std::fopen((dir + ".size").c_str(), "r");
   unsigned long long bytes = 0;
   if (f) {
