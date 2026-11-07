@@ -1441,7 +1441,7 @@ static void h_shared(void* vc, const tier::MOp& op, Mask ex) {
       }
     }
   }
-  count_shared_offsets(blk.st, Store, offs, ex, bytes, &op.way);
+  count_shared_offsets(blk.st, Store, offs, ex, bytes, &op.way, c.r->fastcount());
 }
 
 // Local memory: each lane's window of the warp's array, when every active lane's access is inside the thread's frame.

@@ -1493,6 +1493,17 @@ set_tests_properties(test_memcount_forms_simd_base PROPERTIES ENVIRONMENT "VGPU_
 vgpu_unit_test(test_bank_memo)
 # The bitmap counting of the passes of 1 to 4 byte accesses (detail::bank_passes_bitmap), against the definition of the passes.
 vgpu_unit_test(test_bank_bitmap)
+# The kernels that count a warp's bank passes when the closed forms and the table of shapes do not (the AVX2 window of 128 words, the four-word rows of a bank, and
+# sass_bank_passes_widened / sass_bank_passes_offsets over them), against the definition of the passes; and the same without the AVX2 kernel.
+vgpu_unit_test(test_bank_kernels)
+add_test(NAME test_bank_kernels_simd_base COMMAND test_bank_kernels)
+set_tests_properties(test_bank_kernels_simd_base PROPERTIES ENVIRONMENT "VGPU_SIMD=base" TIMEOUT 1500)
+set_tests_properties(test_bank_kernels PROPERTIES TIMEOUT 1500)
+# The AVX2 count of a warp's sectors when its lanes' sectors rise (simd::sector_up_kernel), against the definition of the sectors, and the same without AVX2.
+vgpu_unit_test(test_sector_kernels)
+add_test(NAME test_sector_kernels_simd_base COMMAND test_sector_kernels)
+set_tests_properties(test_sector_kernels_simd_base PROPERTIES ENVIRONMENT "VGPU_SIMD=base" TIMEOUT 1500)
+set_tests_properties(test_sector_kernels PROPERTIES TIMEOUT 1500)
 # The single-lookup atomic read-modify-write and the one-lookup texel read, against the per-access code they replace.
 vgpu_unit_test(test_atom_rmw)
 # Module::code_at (a binary search over the code sections) against the scan it replaced.

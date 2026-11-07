@@ -32,7 +32,11 @@
 #include <cstddef>
 #include <cstdint>
 
+namespace vgpu::exec::memcount {
+struct BankMemo;
+}
 namespace vgpu::simd {
+namespace memcount = ::vgpu::exec::memcount;
 
 enum class Level : int { Base = 0, Avx2 = 1, Avx512 = 2 };   // Avx2 = AVX2 + FMA + F16C; Avx512 = that and AVX-512 F/BW/DQ/VL/VNNI
 inline constexpr int kLevels = 3;
@@ -268,6 +272,40 @@ namespace detail {
 extern SectorWindowFn g_sector_window __attribute__((visibility("hidden")));
 }
 inline SectorWindowFn sector_window_kernel() { return detail::g_sector_window; }
+
+// The bank passes of a warp of 32 lanes given as 32-bit offsets, when every word its lanes touch lies within 128 consecutive words (a bitonic
+// network's partners, a merge's window, a few 8-byte elements): memcount's sass_bank_passes_offsets counting for it, in AVX2 registers, with no
+// table and no loop over the lanes. `m` is the lanes that run (not zero), `bytes` the width (1 to 16); a lane covers the words its bytes cover
+// (a lane that does not run is taken at the first running lane's offset, whose words are already counted). The words are the 128 from the
+// lowest word's in rows of 32; a bank's passes are the number of rows that have a word in its column, the most over the 32 banks, and the
+// rows' column counts are summed by AND and OR (at most four rows). False, nothing counted, when the words spread over more than 128 words, an
+// offset is within 16 of 2^32, or the host has no AVX2 (null kernel). The same count as the table of words, whatever the level.
+using BankWindowFn = bool (*)(const uint32_t* offs, uint32_t m, uint32_t bytes, uint32_t& out);
+namespace detail {
+extern BankWindowFn g_bank_window __attribute__((visibility("hidden")));
+}
+inline BankWindowFn bank_window_kernel() { return detail::g_bank_window; }
+
+// The distinct sectors of a warp's accesses whose lanes' sectors never go backwards in lane order -- coalesced accesses in several runs, a strided gather
+// that rises: memcount's sectors_monotone<true>, four lanes to a step in AVX2, or null without AVX2. For lanes `m`, which must be consecutive (not zero),
+// of `span` bytes (1 to 32) at addrs[lane]: with each lane's first and last sector f and e, and e' the last sector of the lane before it (none before the first),
+// the count is the sum over the lanes of (e - f) + (f != e'), and it is only taken (true, the count in `out`) when no lane has f < e'. False, nothing counted,
+// when the lanes have a gap, an address is 2^62 or over, or a lane's sector is below the last of the lane before it (the caller counts another way).
+using SectorUpFn = bool (*)(const uint64_t* addrs, uint64_t m, uint64_t span, uint64_t& out);
+namespace detail {
+extern SectorUpFn g_sector_up __attribute__((visibility("hidden")));
+}
+inline SectorUpFn sector_up_kernel() { return detail::g_sector_up; }
+
+// memcount::sass_bank_passes_offsets in AVX2 registers (or null without AVX2): the same answer and the same changes to `memo`, for a warp the tier's shared-memory handler
+// has as 32-bit offsets, with the first look at the table (the entry this instruction's last warp was found in, `hint`) made without building the key in memory. Called with
+// `lanes` (the 32 low bits are the lanes that run; not zero when the caller has counted a lane), `bytes` as the tier has them, and `fast` (VGPU_FASTCOUNT is not off): with
+// `fast` false the answer is the reference's, as the scalar function gives it.
+using BankOffsetsFn = uint32_t (*)(memcount::BankMemo& memo, const uint32_t* offs, uint64_t lanes, uint32_t bytes, uint8_t* hint);
+namespace detail {
+extern BankOffsetsFn g_bank_offsets __attribute__((visibility("hidden")));
+}
+inline BankOffsetsFn bank_offsets_kernel() { return detail::g_bank_offsets; }
 
 // The addresses of a full warp's global access (sassmem::full_warp_rows): addrs[l] = (lo[l] | hi[l] << 32) + add for the 32 lanes (`hi` null: lo[l] + add;
 // `lo` null: add), and in `info` the first lane's address, the stride of the first two lanes, whether some lane's address is in [window, window + 2^32),

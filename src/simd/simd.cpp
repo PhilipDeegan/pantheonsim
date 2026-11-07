@@ -5,6 +5,7 @@ asm(".pushsection .text,\"ax\",@progbits\n.p2align 12\n.popsection");
 // pragma.
 #include "vgpu/exec/tc_ampere.hpp"
 #include "vgpu/simd/simd.hpp"
+#include "vgpu/exec/mem_counters.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -245,6 +246,207 @@ bool f64_bin_lanes_k(unsigned op, uint64_t* r, const uint64_t* a, const uint64_t
   }
   return _mm256_movemask_pd(nan) != 0;
 }
+// ---- the counting kernels (memcount): after every other kernel of this unit, so that adding them moved none of the others
+
+// memcount::sass_bank_passes_offsets with the table's first look in AVX2 registers (BankOffsetsFn in simd.hpp). The scalar function builds the warp's key (the offsets
+// less the first running lane's word, a lane that does not run taken at that word) in memory and compares it with the entry the instruction's last warp was found in;
+// here the key lives in four registers, the comparison with the entry is four loads and four XORs, and only a warp that is not in that entry spills it (for the hash).
+// Everything else is the scalar function's, step for step, so that the table, the window counters and the answers are the same bit for bit.
+#if defined(__has_attribute)
+#if __has_attribute(no_stack_protector)
+#define VGPU_NO_SSP __attribute__((no_stack_protector))
+#endif
+#endif
+#ifndef VGPU_NO_SSP
+#define VGPU_NO_SSP
+#endif
+VGPU_NO_SSP uint32_t bank_offsets_k(exec::memcount::BankMemo& memo, const uint32_t* offs, uint64_t lanes, uint32_t bytes, uint8_t* hint) {
+  using exec::memcount::BankMemo;
+  const uint32_t m = static_cast<uint32_t>(lanes);
+  if (bytes - 1u >= 64u || !m) return exec::memcount::sass_bank_passes_widened(offs, m, bytes);
+  if (memo.skip32) {
+    --memo.skip32;
+    return exec::memcount::sass_bank_passes_offsets_kept(memo, offs, m, bytes);
+  }
+  const uint32_t base = offs[std::countr_zero(m)] & ~3u;
+  const __m256i bv = _mm256_set1_epi32(static_cast<int>(base));
+  __m256i v0, v1, v2, v3;
+  if (m == 0xFFFFFFFFu) {
+    v0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(offs));
+    v1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(offs) + 1);
+    v2 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(offs) + 2);
+    v3 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(offs) + 3);
+  } else {
+    const __m256i lane_bit = _mm256_setr_epi32(1, 2, 4, 8, 16, 32, 64, 128);
+    const auto pick = [&](unsigned i) {
+      const __m256i on = _mm256_cmpeq_epi32(_mm256_and_si256(_mm256_set1_epi32(static_cast<int>((m >> (8 * i)) & 0xffu)), lane_bit), lane_bit);
+      return _mm256_blendv_epi8(bv, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(offs) + i), on);
+    };
+    v0 = pick(0), v1 = pick(1), v2 = pick(2), v3 = pick(3);
+  }
+  const __m256i high = _mm256_or_si256(_mm256_or_si256(v0, v1), _mm256_or_si256(v2, v3));
+  if (!_mm256_testz_si256(high, _mm256_set1_epi32(static_cast<int>(0x80000000u)))) return exec::memcount::sass_bank_passes_widened(offs, m, bytes);
+  const __m256i k0 = _mm256_sub_epi32(v0, bv), k1 = _mm256_sub_epi32(v1, bv), k2 = _mm256_sub_epi32(v2, bv), k3 = _mm256_sub_epi32(v3, bv);
+  const auto same = [&](const BankMemo::Entry32& e) {
+    const __m256i d = _mm256_or_si256(
+        _mm256_or_si256(_mm256_xor_si256(k0, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(e.rel))),
+                        _mm256_xor_si256(k1, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(e.rel) + 1))),
+        _mm256_or_si256(_mm256_xor_si256(k2, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(e.rel) + 2)),
+                        _mm256_xor_si256(k3, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(e.rel) + 3))));
+    return e.bytes == bytes && _mm256_testz_si256(d, d);
+  };
+  uint32_t passes;
+  const uint32_t first = (hint ? __atomic_load_n(hint, __ATOMIC_RELAXED) : memo.last32) & (BankMemo::kEntries32 - 1);
+  bool hit = same(memo.e32[first]);
+  if (hit) {
+    passes = memo.e32[first].passes;
+    memo.last32 = first;
+  } else {
+    alignas(32) uint32_t key[32];
+    _mm256_store_si256(reinterpret_cast<__m256i*>(key), k0);
+    _mm256_store_si256(reinterpret_cast<__m256i*>(key) + 1, k1);
+    _mm256_store_si256(reinterpret_cast<__m256i*>(key) + 2, k2);
+    _mm256_store_si256(reinterpret_cast<__m256i*>(key) + 3, k3);
+    uint32_t h = bytes * 0x01000193u ^ m * 0x2545F491u;
+    h ^= key[1] * 0x9E3779B1u ^ key[3] * 0x85EBCA77u ^ key[6] * 0xC2B2AE3Du ^ key[10] * 0x27D4EB2Fu ^ key[15] * 0x165667B1u ^
+         key[21] * 0x9E3779B1u ^ key[26] * 0x85EBCA77u ^ key[31] * 0xC2B2AE3Du;
+    h ^= h >> 15;
+    const uint32_t idx = h % BankMemo::kEntries32;
+    BankMemo::Entry32& e = memo.e32[idx];
+    hit = idx != first && same(e);
+    memo.last32 = idx;
+    if (hint) __atomic_store_n(hint, static_cast<uint8_t>(idx), __ATOMIC_RELAXED);
+    if (hit) {
+      passes = e.passes;
+    } else {
+      passes = exec::memcount::sass_bank_passes_widened(offs, m, bytes);
+      e.bytes = bytes;
+      e.passes = passes;
+      _mm256_storeu_si256(reinterpret_cast<__m256i*>(e.rel), k0);
+      _mm256_storeu_si256(reinterpret_cast<__m256i*>(e.rel) + 1, k1);
+      _mm256_storeu_si256(reinterpret_cast<__m256i*>(e.rel) + 2, k2);
+      _mm256_storeu_si256(reinterpret_cast<__m256i*>(e.rel) + 3, k3);
+    }
+  }
+  memo.hits32 += hit;
+  if (++memo.lookups32 == BankMemo::kWindow) {
+    if (memo.hits32 * 3 < BankMemo::kWindow) memo.skip32 = BankMemo::kSkip;
+    memo.lookups32 = memo.hits32 = 0;
+  }
+  return passes;
+}
+
+// The AVX2 form of memcount's sectors_monotone<true> over a run of consecutive lanes (SectorUpFn in simd.hpp). Four lanes to a step: f = a >> 5, e = (a + span - 1) >> 5;
+// the sector the lane before ends in is the same group's e rotated by one lane, the first lane's from the group before (the first lane of all has none: -1, below any
+// sector and different from it, so it adds its own sector too). A lane with f below that sector gives the warp up, at the end of its group.
+bool sector_up_k(const uint64_t* addrs, uint64_t m, uint64_t span, uint64_t& out) {
+  if (span - 1 > 31) return false;   // (also span 0)
+  const unsigned lo = static_cast<unsigned>(std::countr_zero(m));
+  const uint64_t run = m >> lo;
+  if (run & (run + 1)) return false;
+  const unsigned n = 64 - static_cast<unsigned>(std::countl_zero(run));
+  const __m256i extra = _mm256_set1_epi64x(static_cast<long long>(span - 1));
+  const __m256i zero = _mm256_setzero_si256();
+  const __m256i ones = _mm256_set1_epi64x(-1);
+  const __m256i lane_idx = _mm256_set_epi64x(3, 2, 1, 0);
+  __m256i carry = ones, sum = zero, fresh = zero, big = zero;
+  for (unsigned i = 0; i < n; i += 4) {
+    __m256i a, valid = ones;
+    if (i + 4 <= n) {
+      a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(addrs + lo + i));
+    } else {   // (the last group: only the lanes that run are read, the others repeat the last one and add nothing)
+      uint64_t tail[4];
+      const unsigned k = n - i;
+      for (unsigned j = 0; j < 4; ++j) tail[j] = addrs[lo + i + (j < k ? j : k - 1)];
+      a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(tail));
+      valid = _mm256_cmpgt_epi64(_mm256_set1_epi64x(static_cast<long long>(k)), lane_idx);
+    }
+    big = _mm256_or_si256(big, a);
+    const __m256i f = _mm256_srli_epi64(a, 5);
+    const __m256i e = _mm256_srli_epi64(_mm256_add_epi64(a, extra), 5);
+    const __m256i prev = _mm256_blend_epi32(_mm256_permute4x64_epi64(e, 0x93), carry, 0x03);   // (e of the lane before: [carry, e0, e1, e2])
+    carry = _mm256_permute4x64_epi64(e, 0xFF);   // (the last lane's e, for the next group; for a tail group, unused)
+    // (addresses are under 2^62 while they are used below: the signed compare is the unsigned one)
+    const __m256i back = _mm256_and_si256(_mm256_cmpgt_epi64(prev, f), valid);
+    if (!_mm256_testz_si256(back, back)) return false;
+    sum = _mm256_add_epi64(sum, _mm256_and_si256(_mm256_sub_epi64(e, f), valid));
+    fresh = _mm256_sub_epi64(fresh, _mm256_andnot_si256(_mm256_cmpeq_epi64(f, prev), valid));   // (-1 for each lane with f != e')
+  }
+  if (!_mm256_testz_si256(big, _mm256_set1_epi64x(static_cast<long long>(0xC000'0000'0000'0000ull)))) return false;
+  const __m256i t = _mm256_add_epi64(sum, fresh);
+  const __m128i h = _mm_add_epi64(_mm256_castsi256_si128(t), _mm256_extracti128_si256(t, 1));
+  out = static_cast<uint64_t>(_mm_cvtsi128_si64(h)) + static_cast<uint64_t>(_mm_extract_epi64(h, 1));
+  return true;
+}
+
+// The AVX2 form of memcount's bank passes for a warp within 128 words (BankWindowFn in simd.hpp). Each lane's words become one bit of a row (row = the
+// word less the lowest word, over 32; bit = the word less the lowest, mod 32 -- a bank, rotated by the lowest word's, which moves every bank alike);
+// a lane that does not run is the first running lane's offset. The rows are OR-ed over the lanes (a compare per row, four rows), and a bank's count
+// is the number of rows with its bit: at least two rows share a bit, at least three, all four (the bit-sliced maximum of four counts).
+inline uint32_t bk_hmin(__m256i v) {
+  __m128i a = _mm_min_epu32(_mm256_castsi256_si128(v), _mm256_extracti128_si256(v, 1));
+  a = _mm_min_epu32(a, _mm_shuffle_epi32(a, 0x4E));
+  a = _mm_min_epu32(a, _mm_shuffle_epi32(a, 0xB1));
+  return static_cast<uint32_t>(_mm_cvtsi128_si32(a));
+}
+inline uint32_t bk_hmax(__m256i v) {
+  __m128i a = _mm_max_epu32(_mm256_castsi256_si128(v), _mm256_extracti128_si256(v, 1));
+  a = _mm_max_epu32(a, _mm_shuffle_epi32(a, 0x4E));
+  a = _mm_max_epu32(a, _mm_shuffle_epi32(a, 0xB1));
+  return static_cast<uint32_t>(_mm_cvtsi128_si32(a));
+}
+inline uint32_t bk_hor(__m256i v) {
+  __m128i a = _mm_or_si128(_mm256_castsi256_si128(v), _mm256_extracti128_si256(v, 1));
+  a = _mm_or_si128(a, _mm_shuffle_epi32(a, 0x4E));
+  a = _mm_or_si128(a, _mm_shuffle_epi32(a, 0xB1));
+  return static_cast<uint32_t>(_mm_cvtsi128_si32(a));
+}
+bool bank_window_k(const uint32_t* offs, uint32_t m, uint32_t bytes, uint32_t& out) {
+  if (m == 0 || bytes == 0 || bytes > 16) return false;
+  const __m256i vfirst = _mm256_set1_epi32(static_cast<int>(offs[std::countr_zero(m)]));
+  const __m256i lane_bit = _mm256_setr_epi32(1, 2, 4, 8, 16, 32, 64, 128);
+  const __m256i vb1 = _mm256_set1_epi32(static_cast<int>(bytes - 1));
+  __m256i w0[4], wl[4];
+  __m256i top = _mm256_setzero_si256(), wmin = _mm256_set1_epi32(-1), wmax = _mm256_setzero_si256();
+  for (unsigned i = 0; i < 4; ++i) {
+    const __m256i bits = _mm256_and_si256(_mm256_set1_epi32(static_cast<int>((m >> (8 * i)) & 0xffu)), lane_bit);
+    const __m256i on = _mm256_cmpeq_epi32(bits, lane_bit);
+    const __m256i o = _mm256_blendv_epi8(vfirst, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(offs) + i), on);
+    top = _mm256_max_epu32(top, o);
+    w0[i] = _mm256_srli_epi32(o, 2);
+    wl[i] = _mm256_srli_epi32(_mm256_add_epi32(o, vb1), 2);
+    wmin = _mm256_min_epu32(wmin, w0[i]);
+    wmax = _mm256_max_epu32(wmax, wl[i]);
+  }
+  if (bk_hmax(top) > 0xFFFFFFF0u) return false;   // (o + bytes - 1 must not wrap)
+  const uint32_t lowest = bk_hmin(wmin);
+  if (bk_hmax(wmax) - lowest > 127) return false;
+  const __m256i vlow = _mm256_set1_epi32(static_cast<int>(lowest));
+  const __m256i c31 = _mm256_set1_epi32(31), one = _mm256_set1_epi32(1);
+  const __m256i r1 = one, r2 = _mm256_set1_epi32(2), r3 = _mm256_set1_epi32(3);
+  __m256i a0 = _mm256_setzero_si256(), a1 = a0, a2 = a0, a3 = a0;
+  const unsigned words = (bytes + 6) >> 2;   // (the most words a lane's bytes cover: 3 + bytes bytes from the word's start)
+  for (unsigned j = 0; j < words; ++j) {
+    const __m256i vj = _mm256_set1_epi32(static_cast<int>(j));
+    for (unsigned i = 0; i < 4; ++i) {
+      const __m256i word = _mm256_min_epu32(_mm256_add_epi32(w0[i], vj), wl[i]);   // (a lane with fewer words repeats its last)
+      const __m256i rel = _mm256_sub_epi32(word, vlow);
+      const __m256i row = _mm256_srli_epi32(rel, 5);
+      const __m256i bit = _mm256_sllv_epi32(one, _mm256_and_si256(rel, c31));
+      a0 = _mm256_or_si256(a0, _mm256_and_si256(bit, _mm256_cmpeq_epi32(row, _mm256_setzero_si256())));
+      a1 = _mm256_or_si256(a1, _mm256_and_si256(bit, _mm256_cmpeq_epi32(row, r1)));
+      a2 = _mm256_or_si256(a2, _mm256_and_si256(bit, _mm256_cmpeq_epi32(row, r2)));
+      a3 = _mm256_or_si256(a3, _mm256_and_si256(bit, _mm256_cmpeq_epi32(row, r3)));
+    }
+  }
+  const uint32_t R0 = bk_hor(a0), R1 = bk_hor(a1), R2 = bk_hor(a2), R3 = bk_hor(a3);
+  const uint32_t two = (R0 & R1) | (R0 & R2) | (R0 & R3) | (R1 & R2) | (R1 & R3) | (R2 & R3);
+  const uint32_t three = (R0 & R1 & R2) | (R0 & R1 & R3) | (R0 & R2 & R3) | (R1 & R2 & R3);
+  const uint32_t four = R0 & R1 & R2 & R3;
+  out = 1u + (two != 0) + (three != 0) + (four != 0);
+  return true;
+}
+
 }  // namespace avx2_impl
 #pragma GCC pop_options
 
@@ -505,6 +707,9 @@ namespace detail {
 std::atomic<const Kernels*> g_kernels __attribute__((visibility("hidden"))){&kBase};
 bool g_enabled __attribute__((visibility("hidden"))) = true;
 SectorWindowFn g_sector_window __attribute__((visibility("hidden"))) = nullptr;
+BankWindowFn g_bank_window __attribute__((visibility("hidden"))) = nullptr;
+SectorUpFn g_sector_up __attribute__((visibility("hidden"))) = nullptr;
+BankOffsetsFn g_bank_offsets __attribute__((visibility("hidden"))) = nullptr;
 WarpRowsFn g_warp_rows __attribute__((visibility("hidden"))) = nullptr;
 WarpRunFn g_warp_run __attribute__((visibility("hidden"))) = nullptr;
 }  // namespace detail
@@ -532,6 +737,9 @@ namespace testing {
 void use_sector_window_kernel(bool on) {
 #ifdef VGPU_SIMD_X86
   detail::g_sector_window = on && level() == Level::Avx2 ? avx2_impl::sector_window_k : nullptr;
+  detail::g_bank_window = on && level() == Level::Avx2 ? avx2_impl::bank_window_k : nullptr;
+  detail::g_sector_up = on && level() == Level::Avx2 ? avx2_impl::sector_up_k : nullptr;
+  detail::g_bank_offsets = on && level() == Level::Avx2 ? avx2_impl::bank_offsets_k : nullptr;
   detail::g_warp_rows = on && level() == Level::Avx2 ? avx2_impl::warp_rows_k : nullptr;
   detail::g_warp_run = on && level() == Level::Avx2 ? avx2_impl::warp_run_k : nullptr;
 #else
