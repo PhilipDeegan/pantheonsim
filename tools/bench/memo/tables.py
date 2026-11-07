@@ -94,6 +94,19 @@ def overhead(dirs):
         print("Programs more than 5 %% over off when cold: %d; more than 10 %%: %d." % (len(over5), len(over10)))
         for k, c, a, o in sorted(over5, key=lambda x: -x[1]):
             print("  %s: cold %.3f, A/A %.3f, off %.3f s" % (k, c, a, o))
+        big = [r for r in rows if r[1] >= 0.05]
+        small = [r for r in rows if r[1] < 0.05]
+        if big:
+            tb_off = sum(r[1] for r in big)
+            tb_cold = sum(r[1] * r[3] for r in big)
+            worst = max(big, key=lambda r: r[3])
+            print("Programs of 50 ms or more: %d; cold %+.2f %% against off in total, worst %s at %+.1f %% (its A/A: %+.1f %%); over 5 %%: %d, over 10 %%: %d." % (
+                len(big), 100 * (tb_cold / tb_off - 1), worst[0], 100 * (worst[3] - 1), 100 * (worst[2] - 1),
+                sum(1 for r in big if r[3] > 1.05), sum(1 for r in big if r[3] > 1.10)))
+        if small:
+            dmax = max(small, key=lambda r: (r[3] - 1) * r[1])
+            print("Programs under 50 ms (a run is mostly process start): %d; the largest absolute cost of the cache's cold run is %.2f ms (%s, off %.1f ms)." % (
+                len(small), 1000 * (dmax[3] - 1) * dmax[1], dmax[0], 1000 * dmax[1]))
         # the A/A spread says how much of that is noise
         aas = [r[2] for r in rows if r[1] >= 0.3]
         if aas:

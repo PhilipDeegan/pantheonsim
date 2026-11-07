@@ -1162,7 +1162,7 @@ Device::Device(DeviceProfile profile, int ordinal, telemetry::Publisher* telemet
   install_fault_hook();
   if (const char* fh = std::getenv("VGPU_MEMO_FINAL_HASH"); fh && *fh) memo::final_hash_register(&mem_);
   // VGPU_MEMO=1: launch-level result caching (vgpu/runtime/memo.hpp). Not with a real GPU in the loop.
-  if (const memo::Config mc = memo::Config::from_env(); mc.enabled && !std::getenv("VGPU_HOST_GPU")) enable_memo(mc);
+  if (const memo::Config mc = memo::Config::from_env(); mc.enabled && !std::getenv("VGPU_HOST_GPU") && !std::getenv("VGPU_HOSTGPU_CAPTURE")) enable_memo(mc);
 }
 
 Device::~Device() {

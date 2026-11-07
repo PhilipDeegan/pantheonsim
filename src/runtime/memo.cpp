@@ -40,8 +40,8 @@ inline bool is_device_ptr(uint64_t v) { return v >= kDeviceVaBase && v < kDevice
 
 // Whether any aligned word of the `n` bytes at device address `addr` could be a device address.
 bool has_pointer_like(uint64_t addr, const uint8_t* p, uint64_t n) {
-  uint64_t i = (8 - addr % 8) % 8;
-  for (; i + 8 <= n; i += 8) {
+  uint64_t i = (4 - addr % 4) % 4;   // every 4-aligned word: a pointer in a packed struct or stored as two halves' neighbours
+  for (; i + 8 <= n; i += 4) {
     uint64_t w;
     std::memcpy(&w, p + i, 8);
     if (is_device_ptr(w)) return true;
@@ -938,12 +938,12 @@ bool DeviceMemo::capture_before(Ticket& t, uint64_t* hashed) {
     uint64_t mat = 0;
     if (!mem_.memo_page_hashes(base, &pages, &mat)) return false;
     *hashed += mat;
+    uint64_t sz = 0, bb = 0;
+    mem_.find_allocation(base, &bb, &sz);   // (outside mu_: the table's lock is taken inside alloc, which calls on_alloc)
     std::lock_guard<std::mutex> g(mu_);
     mat_hint_[base] = mat;
     PageCache& pc = cache_[base];
     pc.pages = std::move(pages);
-    uint64_t sz = 0, bb = 0;
-    mem_.find_allocation(base, &bb, &sz);
     pc.size = sz;
     pc.valid = true;
   }
@@ -1073,6 +1073,7 @@ bool DeviceMemo::begin_impl(const KernelRef& k, Ticket& t, exec::LaunchStats* ou
   active_launches_.fetch_add(1);
   tainted_.store(false, std::memory_order_relaxed);
   g_smid_by_worker.store(false, std::memory_order_relaxed);
+  g_reads_gridid.store(false, std::memory_order_relaxed);
   mem_.memo_host_touched(true);   // (cleared: end() asks whether this launch reached pinned or managed memory)
   return false;
 }
@@ -1084,13 +1085,21 @@ bool DeviceMemo::replay(const Entry& e) {
     if (!mem_.find_allocation(r.addr, &base, &size) || r.addr + r.len > base + size || r.addr + r.len < r.addr) return false;
     if (mem_.memo_host_maps() && (mem_.memo_is_host_addr(r.addr) || mem_.memo_is_host_addr(r.addr + r.len - 1))) return false;
   }
-  ScopeGuard scope(kReplay);
-  for (const Run& r : e.runs) {
-    if (r.uniform) mem_.fill(r.addr, &r.byte, 1, r.len);
-    else mem_.write(r.addr, r.data.data(), r.len);
+  try {
+    ScopeGuard scope(kReplay);
+    for (const Run& r : e.runs) {
+      if (r.uniform) mem_.fill(r.addr, &r.byte, 1, r.len);
+      else mem_.write(r.addr, r.data.data(), r.len);
+    }
+  } catch (...) {
+    poison("replay-failed");   // memory may be half written
+    throw;
   }
   std::lock_guard<std::mutex> g(mu_);
-  for (const Run& r : e.runs) invalidate_range_locked(r.addr, r.len);
+  for (const Run& r : e.runs) {
+    invalidate_range_locked(r.addr, r.len);
+    if (!r.uniform) scan_pointers(r.addr, r.data.data(), r.len);   // a replayed pointer table is a pointer table
+  }
   return true;
 }
 
@@ -1124,6 +1133,7 @@ void DeviceMemo::end(Ticket& t, const exec::LaunchStats& stats, uint64_t exec_ns
   if (concurrent && !mut("no_poison_concurrent")) poison_why = "concurrent-host-event";
   else if (taint) poison_why = "device-side-alloc-or-free";
   else if (mem_.memo_host_touched(false) && !mut("no_poison_host_maps")) poison_why = "touched-host-memory";
+  else if (g_reads_gridid.load(std::memory_order_relaxed)) poison_why = "reads-gridid";
   else if (stats.atomics > 0 && !t.sequential && !mut("no_poison_atomics")) poison_why = "atomics-on-several-threads";
   else if (g_smid_by_worker.load(std::memory_order_relaxed) && !t.sequential && t.blocks > 1 && !mut("no_poison_smid"))
     poison_why = "smid-by-host-thread";
@@ -1196,6 +1206,7 @@ void DeviceMemo::end(Ticket& t, const exec::LaunchStats& stats, uint64_t exec_ns
   }
   // Runs: consecutive changed pages read as one.
   uint64_t total = 0;
+  bool new_ptrs_unknown = false;
   std::vector<uint8_t> buf;
   for (size_t i = 0; i < changed.size();) {
     size_t j = i + 1;
@@ -1204,6 +1215,10 @@ void DeviceMemo::end(Ticket& t, const exec::LaunchStats& stats, uint64_t exec_ns
            changed[j - 1].len == MemoryManager::kMemoPage) {
       len += changed[j].len;
       ++j;
+    }
+    if (total + len + 32 > cfg_.entry_cap) {
+      total = cfg_.entry_cap + 1;   // too big to keep: not read
+      break;
     }
     Run r;
     r.addr = changed[i].addr;
@@ -1224,6 +1239,7 @@ void DeviceMemo::end(Ticket& t, const exec::LaunchStats& stats, uint64_t exec_ns
     i = j;
   }
   const bool oversize = total > cfg_.entry_cap;
+  if (oversize) new_ptrs_unknown = true;
   if (mut("drop_byte") && !entry.runs.empty()) {
     Run& r = entry.runs.back();
     if (!r.uniform && !r.data.empty()) r.data.back() ^= 0x5a;
@@ -1231,7 +1247,7 @@ void DeviceMemo::end(Ticket& t, const exec::LaunchStats& stats, uint64_t exec_ns
   }
 
   // What the pointer scan of the new bytes says about device pointers living in memory.
-  bool new_ptrs = false;
+  bool new_ptrs = new_ptrs_unknown;   // (a write set cut short at the cap was not scanned whole)
   for (const Run& r : entry.runs)
     if (!r.uniform && has_pointer_like(r.addr, r.data.data(), r.len)) new_ptrs = true;
 

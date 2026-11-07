@@ -173,8 +173,9 @@ def main():
                 elif r["off"]["rc"] != 0:
                     r["note"] = "fails without the cache (rc=%s)" % r["off"]["rc"]
                 else:
-                    r["off2"] = go(None)   # more runs without the cache: what differs between them is the program's own nondeterminism
-                    r["off3"] = go(None)
+                    if r["off"]["wall"] < 30:   # (longer programs are not run again: they are the bulk of the time)
+                        r["off2"] = go(None)   # more runs without the cache: what differs between them is the program's own nondeterminism
+                        r["off3"] = go(None)
                     r["cold"] = go(inf)
                     r["warm"] = go(inf)
                     r["verify"] = go(dict(inf, VGPU_MEMO_VERIFY="2"))

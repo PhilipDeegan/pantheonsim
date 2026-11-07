@@ -66,6 +66,8 @@ class Hasher {
 // (a grid with more blocks than SMs): what that kernel computes then is not a function of its inputs, so a launch that
 // sets it on more than one thread is not cached.
 inline std::atomic<bool> g_smid_by_worker{false};
+// Set when a kernel reads %gridid, a process-wide launch counter that a replayed launch does not advance: such a launch is not cached.
+inline std::atomic<bool> g_reads_gridid{false};
 
 // Who is calling into the memory manager. A host call (the runtime's cudaMemcpy, a library's write) is an event in the
 // device's history. A kernel's own writes are not: the launch's before/after diff holds them. The engine's worker
