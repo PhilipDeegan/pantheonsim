@@ -717,7 +717,8 @@ void randomize_g(GSim& s, std::mt19937_64& rng, bool long_region) {
   s.extra = static_cast<uint32_t>(rng() % 5);
   s.divergent = rng() % 7;
   s.steps = rng() % 50;
-  s.max_steps = rng() % 4 == 0 ? s.steps + rng() % 120 : ~uint64_t{0};
+  // (Always finite: a loop the generated code runs on past its turn's calls -- a mutant that drops the budget -- ends at the step limit and the state differs from the model's, instead of never ending.)
+  s.max_steps = rng() % 4 == 0 ? s.steps + rng() % 120 : s.steps + 300 + rng() % 5000;
   s.visit = 0;
   s.gate = rng() % 3 == 0;
   (void)long_region;

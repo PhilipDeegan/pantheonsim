@@ -259,6 +259,7 @@ Config Config::from_env() {
   c.cxx = env("VGPU_JIT_CXX");
   c.extra_flags = env("VGPU_JIT_FLAGS");
   if (const std::string r = env("VGPU_JIT_RESIDENCE"); r == "0") c.residence = false;
+  if (const std::string r = env("VGPU_JIT_SPECIALIZE"); r == "0") c.specialize = false;
   if (const std::string t = env("VGPU_JIT_TIMEOUT"); !t.empty()) c.timeout_s = static_cast<unsigned>(std::strtoul(t.c_str(), nullptr, 10));
   if (const std::string m = env("VGPU_JIT_MEM_MB"); !m.empty()) c.mem_mb = static_cast<unsigned>(std::strtoul(m.c_str(), nullptr, 10));
   return c;
@@ -338,7 +339,7 @@ std::vector<uint32_t> Engine::meta(const UnitSpec& spec) {
   return m;
 }
 
-std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence) {
+std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool specialize) {
   std::string s;
   const auto put = [&](const char* fmt, auto... a) {
     char buf[1024];
@@ -508,10 +509,14 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence) {
     // The entries: the switch at the top, one label per stretch start.
     const std::vector<uint32_t> starts = stretch_starts(r);
     std::set<uint32_t> is_start(starts.begin(), starts.end());
-    s += "  switch (entry) {\n";
-    for (uint32_t st : starts) put("    case %uu: goto L%u;\n", st, st);
-    s += "    default: ";
-    s += "c->exit_idx = static_cast<int32_t>(entry); c->exit_ps = ps; return;\n  }\n";
+    if (starts.size() == 1) {   // (a region that is entered at its first op only: no jump table)
+      s += "  if (entry != 0u) {\n    c->exit_idx = static_cast<int32_t>(entry); c->exit_ps = ps; return;\n  }\n";
+    } else {
+      s += "  switch (entry) {\n";
+      for (uint32_t st : starts) put("    case %uu: goto L%u;\n", st, st);
+      s += "    default: ";
+      s += "c->exit_idx = static_cast<int32_t>(entry); c->exit_ps = ps; return;\n  }\n";
+    }
     bool fell = false;   // the previous op does not end its stretch: code falls into the next op (a start in the middle of a stretch is then reached by a jump or by falling)
     for (uint32_t i = 0; i < k; ++i) {
       const OpFacts& o = r.ops[i];
@@ -652,8 +657,12 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence) {
     s += rc.decls();
     s += region;
     s += "}\n\n";
-    put("extern \"C\" VJ_EXPORT void vgpu_jit_r%zu(Ctx* c, uint32_t group, uint32_t glanes, uint32_t entry, uint32_t n0) {\n"
-        "  if (group == 0xffffffffu) body_%zu(c, 0xffffffffu, 32u, entry, n0);\n  else body_%zu(c, group, glanes, entry, n0);\n}\n\n", ri, ri, ri);
+    if (specialize)   // (the body twice: for a whole warp, where the compiler knows the group and its lanes, and for any group)
+      put("extern \"C\" VJ_EXPORT void vgpu_jit_r%zu(Ctx* c, uint32_t group, uint32_t glanes, uint32_t entry, uint32_t n0) {\n"
+          "  if (group == 0xffffffffu) body_%zu(c, 0xffffffffu, 32u, entry, n0);\n  else body_%zu(c, group, glanes, entry, n0);\n}\n\n", ri, ri, ri);
+    else
+      put("extern \"C\" VJ_EXPORT void vgpu_jit_r%zu(Ctx* c, uint32_t group, uint32_t glanes, uint32_t entry, uint32_t n0) {\n"
+          "  body_%zu(c, group, glanes, entry, n0);\n}\n\n", ri, ri);
   }
   return s;
 }
@@ -793,7 +802,7 @@ std::string Engine::key(const UnitSpec& spec, std::string* why) {
   const std::string cid = compiler_id(why);
   if (cid.empty()) return {};
   const std::string isa = cfg_.isa.empty() ? detect_isa() : cfg_.isa;
-  return hash_text(source(spec, isa == "avx2", cfg_.residence) + key_suffix(cfg_, cid, isa));
+  return hash_text(source(spec, isa == "avx2", cfg_.residence, cfg_.specialize) + key_suffix(cfg_, cid, isa));
 }
 
 // The key of a whole section (what the file naming its selection of regions is named by): the facts of every region, not their text.
@@ -1023,12 +1032,18 @@ Result Engine::obtain(const UnitSpec& spec) {
     return out;
   }
   const std::string isa = cfg_.isa.empty() ? detect_isa() : cfg_.isa;
-  if (!write_file(tmp_cpp, source(spec, isa == "avx2", cfg_.residence))) {
+  if (!write_file(tmp_cpp, source(spec, isa == "avx2", cfg_.residence, cfg_.specialize))) {
     out.status = Status::CacheUnusable;
     out.message = "cannot write to " + dir + ": " + std::strerror(errno);
     return out;
   }
-  std::vector<std::string> cmd{p_->cxx_path, "-std=c++20", "-O2", "-funroll-loops", "-I" + p_->rt_dir, "-fPIC", "-shared", "-fexceptions", "-ffp-contract=off", "-fvisibility=hidden", "-w"};
+  // The flags that are not the distribution's defaults (Ubuntu's compilers add a stack protector, stack-clash probes and control-flow instrumentation, which a region call of 10 to 30
+  // ops pays for on every call: the canary and the probes of a frame of rows, an `endbr64` and `notrack` on the entry switch).
+  std::vector<std::string> cmd{p_->cxx_path, "-std=c++20", "-O2", "-funroll-loops", "-I" + p_->rt_dir, "-fPIC", "-shared", "-fexceptions", "-ffp-contract=off", "-fvisibility=hidden", "-w",
+                               "-fno-stack-protector", "-fno-stack-clash-protection"};
+#if defined(__x86_64__)
+  cmd.push_back("-fcf-protection=none");
+#endif
   for (const std::string& f : split_words(isa_flags(isa))) cmd.push_back(f);
   for (const std::string& f : split_words(cfg_.extra_flags)) cmd.push_back(f);
   cmd.push_back("-o");

@@ -2219,14 +2219,13 @@ inline void tier_release_bar(Block& blk, unsigned id) {
 // (An escape itself needs none of it: it calls the op's handler by Ctx::ops and Ctx::tctx; Ctx::last names the op a fault came from, tier_run's `cur`.)
 struct JitHost {
   TCtx* c;
-  const tier::MOp* ops;      // the region's first op
   bool stats;
 };
 
 // The tier's statistics of an op the generated code has run, an escape's or its own (reported even when no lane executed it, as the loop reports them).
 void jit_note(jit::Ctx* j, uint32_t i) {
   JitHost& h = *static_cast<JitHost*>(j->host);
-  if (h.stats) [[unlikely]] tier_stats().native[static_cast<size_t>(h.ops[i].ins->op)].fetch_add(1, std::memory_order_relaxed);
+  if (h.stats) [[unlikely]] tier_stats().native[static_cast<size_t>(reinterpret_cast<const tier::MOp*>(j->ops)[i].ins->op)].fetch_add(1, std::memory_order_relaxed);
 }
 
 // S2R for generated code: the special register `sr` of the executing lanes into the row d (h_s2r's work, which the generated code cannot do without the
@@ -2254,6 +2253,7 @@ struct JitFrame {
   JitHost jh;
   bool init = false;
   uint32_t mut = 0;   // the mutation checks (tests only)
+  uint32_t flags = 0; // Ctx::flags but the chain's bit: what does not change from one region call to the next
   uint64_t gen = 0;   // the generated ops run (the statistics)
 };
 
@@ -2272,7 +2272,8 @@ struct JitFrame {
   if (!f.init) [[unlikely]] {
     f.init = true;
     f.mut = jit::host_mutants();
-    f.jh = JitHost{&c, ops, stats};
+    f.jh = JitHost{&c, stats};
+    f.flags = (stats ? jit::kFlagTierStats : 0u) | (jit::stats_on() ? jit::kFlagJitStats : 0u) | ((f.mut & jit::kMutHostChain) ? jit::kFlagChain : 0u);
     jit::Ctx& jc = f.jc;
     jc = jit::Ctx{};
     jc.abi = jit::kAbiVersion;
@@ -2298,9 +2299,8 @@ struct JitFrame {
     jc.max_steps = max_steps;
   }
   f.jc.R = c.R;   // (the register file may have moved since the last pass)
-  f.jc.flags = (stats ? jit::kFlagTierStats : 0u) | ((chain || (f.mut & jit::kMutHostChain)) ? jit::kFlagChain : 0u) | (jit::stats_on() ? jit::kFlagJitStats : 0u);
+  f.jc.flags = f.flags | (chain ? jit::kFlagChain : 0u);
   if (f.mut & jit::kMutHostN0) n0 = 0;
-  f.jh.ops = &ops[rg.first];
   f.jc.ops = reinterpret_cast<const uint8_t*>(&ops[rg.first]);
   f.jc.last = ~0u;
   const uint32_t entry = static_cast<uint32_t>(idx - rg.first);

@@ -34,7 +34,7 @@ namespace vgpu::sass::jit {
 inline constexpr uint32_t kAbiVersion = 3;
 // Bumped when the text the generator writes for the same regions changes. (The key also hashes the text itself, so a forgotten bump
 // cannot make a stale object load; the number is for people reading a cache directory.)
-inline constexpr uint32_t kGeneratorVersion = 3;
+inline constexpr uint32_t kGeneratorVersion = 4;
 inline constexpr uint32_t kMinRegion = 2;
 // The size of tier::MOp (static_assert'ed in jit.cpp): the generated code finds the MOp of op i at Ctx::ops + kMopSize * i, its handler in the first word.
 inline constexpr uint32_t kMopSize = 96;
@@ -180,6 +180,7 @@ struct Config {
   std::string path;                 // PATH to search; "": the process's
   std::string extra_flags;          // appended to the compile command (and part of the key)
   bool residence = true;            // keep register-file rows in locals within a region (VGPU_JIT_RESIDENCE=0: not)
+  bool specialize = true;           // also generate the body for a whole warp (all 32 lanes) apart from the one for any group (VGPU_JIT_SPECIALIZE=0: only the general one: half the code, a faster compile)
   unsigned timeout_s = 120;         // wall limit of one compile
   unsigned mem_mb = 4096;           // RLIMIT_AS of the compiler
   // For tests: replaces dlopen (returns null and fills the error on a failure), and the ISA level the key and flags use.
@@ -223,7 +224,7 @@ class Engine {
   explicit Engine(Config cfg);
   ~Engine();
   // The C++ the generator writes for the unit (deterministic: a function of the spec only).
-  static std::string source(const UnitSpec& spec, bool avx2 = true, bool residence = true);
+  static std::string source(const UnitSpec& spec, bool avx2 = true, bool residence = true, bool specialize = true);
   // The words the object's metadata array must hold for the spec.
   static std::vector<uint32_t> meta(const UnitSpec& spec);
   // The 32-hex-digit key: the source, the compiler's identity, flags, ISA level, ABI and generator versions. Empty (and `why` set) with no compiler.
