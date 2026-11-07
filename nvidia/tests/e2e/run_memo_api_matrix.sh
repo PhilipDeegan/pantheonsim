@@ -54,7 +54,7 @@ sed -E 's/.*reasons=//' "$out.d/cold.stats" | sed 's/^/    not cached (cold): /'
 (( ${hits_warm:-0} > 0 )) || { echo "FAIL: the warm run did not hit"; ok=0; }
 (( ${checked:-0} > 0 )) || { echo "FAIL: nothing was verified"; ok=0; }
 [[ "${mism:-1}" == 0 ]] || { echo "FAIL: verify found $mism differences"; ok=0; }
-for why in device-runtime-call cooperative textures; do
+for why in device-runtime-call cooperative textures touched-host-memory; do
   grep -q "$why" "$out.d/cold.stats" || { echo "FAIL: '$why' was not counted as uncacheable"; ok=0; }
 done
 (( ok )) || exit 1

@@ -152,6 +152,17 @@ Hash128 fresh_root() {
 
 }  // namespace
 
+// What a kernel calls that has an effect outside device memory: the heap, printf, and the device runtime (cudaLaunchDevice,
+// cudaGraphLaunch, cudaGetDevice, the cooperative-groups handle, ...). Not ptxas's own helpers for division, remainder and the like,
+// which are named __cuda_sm20_div_rn_f64_full and so on and are ordinary code.
+bool is_device_runtime_name(const std::string& f) {
+  if (f == "malloc" || f == "free" || f == "vprintf" || f == "printf") return true;
+  if (f.rfind("cuda", 0) == 0) return true;
+  for (const char* p : {"__cudaCDP", "__cudart", "__cuda_syscall"})
+    if (f.rfind(p, 0) == 0) return true;
+  return false;
+}
+
 Config Config::from_env() {
   Config c;
   const char* e = std::getenv("VGPU_MEMO");
@@ -721,10 +732,7 @@ bool DeviceMemo::kernel_has_device_calls(const ptx::EntryFn& fn) {
   }
   // A kernel that mallocs or prints, or calls the device runtime (cuda*: launches, graph launches, conditionals,
   // attribute queries), has effects outside memory that a replay would skip.
-  const auto bad = [](const std::string& f) {
-    return f == "malloc" || f == "free" || f == "vprintf" || f == "printf" || f.rfind("cuda", 0) == 0 || f.rfind("__cuda", 0) == 0 ||
-           f.rfind("__nv_cuda", 0) == 0;
-  };
+  const auto bad = [](const std::string& f) { return is_device_runtime_name(f); };
   bool found = false;
   if (fn.sass)
     for (const std::string& f : sass::reachable(*fn.sass, fn.name))
@@ -823,13 +831,11 @@ Hash128 DeviceMemo::launch_key(const KernelRef& k, const Hash128& state, const T
 // ---- what a launch could write -----------------------------------------------------------------------------------------
 
 // The allocations a kernel can reach: every allocation an argument word points into, and the module's globals; when
-// device pointers may be stored in memory (a pointer table, a linked structure), every live allocation. False when a
-// host mapping is reachable (a kernel can write host memory, which no diff here sees).
+// device pointers may be stored in memory (a pointer table, a linked structure), every live allocation. (Pinned and managed
+// memory is not in the list: a kernel that touches any is found out afterwards, by the memory manager, and poisons.)
 bool DeviceMemo::collect_bases(const KernelRef& k, Ticket& t) {
   std::set<uint64_t> bases;
   bool all;
-  bool host_maps = mem_.memo_host_maps();
-  bool reach_host = false;
   {
     std::lock_guard<std::mutex> g(mu_);
     all = ptrs_ && !mut("ptrs_never");
@@ -838,8 +844,6 @@ bool DeviceMemo::collect_bases(const KernelRef& k, Ticket& t) {
     if (is_device_ptr(v)) {
       uint64_t base = 0, size = 0;
       if (mem_.find_allocation(v, &base, &size)) bases.insert(base);
-    } else if (host_maps && mem_.memo_is_host_addr(v)) {
-      reach_host = true;
     }
   };
   for (const auto& a : *k.args) {
@@ -850,13 +854,22 @@ bool DeviceMemo::collect_bases(const KernelRef& k, Ticket& t) {
       note(w);
     }
   }
+  if (k.args->size() > 1) {
+    // A pointer a kernel assembles from two 32-bit parameters sits across two arguments: the arguments end to end, a word at a time.
+    static thread_local std::vector<uint8_t> all;
+    all.clear();
+    for (const auto& a : *k.args) all.insert(all.end(), a.begin(), a.end());
+    for (size_t i = 0; i + 8 <= all.size() && i < 4096; i += 4) {
+      uint64_t w;
+      std::memcpy(&w, all.data() + i, 8);
+      note(w);
+    }
+  }
   if (k.module_globals && !mut("skip_module_globals"))
     for (uint64_t v : *k.module_globals) note(v);
   if (all) {
     for (const auto& [base, size] : mem_.live_ranges()) bases.insert(base), (void)size;
-    if (host_maps) reach_host = true;   // device pointers may be stored anywhere, host mappings are live: a kernel might write one
   }
-  if (reach_host && !mut("no_poison_host_maps")) return false;
   t.bases.assign(bases.begin(), bases.end());
   return true;
 }
@@ -1028,19 +1041,12 @@ bool DeviceMemo::begin_impl(const KernelRef& k, Ticket& t, exec::LaunchStats* ou
     all = ptrs_ && !mut("ptrs_never");
   }
   bool have_bases = false;
-  const auto refuse = [&] {
-    t.eligible = false;
-    t.why = "host-map-reachable";
-    active_launches_.fetch_add(1);
-    tainted_.store(false, std::memory_order_relaxed);
-    return false;
-  };
   if (!cfg_.force_record && !t.verify_against) {
     uint64_t est;
     if (all) {
       est = estimate_all_ns();   // (without listing every allocation: a launch not recorded does not need the list)
     } else {
-      if (!collect_bases(k, t)) return refuse();
+      collect_bases(k, t);
       have_bases = true;
       est = estimate_ns(t);
     }
@@ -1048,7 +1054,7 @@ bool DeviceMemo::begin_impl(const KernelRef& k, Ticket& t, exec::LaunchStats* ou
     const double allowed = cfg_.budget * static_cast<double>(stats_.exec_ns) + static_cast<double>(cfg_.credit_ns);
     record = static_cast<double>(stats_.fixed_ns + stats_.record_ns + est) <= allowed;
   }
-  if (record && !have_bases && !collect_bases(k, t)) return refuse();
+  if (record && !have_bases) collect_bases(k, t);
   t.record = record;
   if (record) {
     uint64_t hashed = 0;
@@ -1067,6 +1073,7 @@ bool DeviceMemo::begin_impl(const KernelRef& k, Ticket& t, exec::LaunchStats* ou
   active_launches_.fetch_add(1);
   tainted_.store(false, std::memory_order_relaxed);
   g_smid_by_worker.store(false, std::memory_order_relaxed);
+  mem_.memo_host_touched(true);   // (cleared: end() asks whether this launch reached pinned or managed memory)
   return false;
 }
 
@@ -1116,6 +1123,7 @@ void DeviceMemo::end(Ticket& t, const exec::LaunchStats& stats, uint64_t exec_ns
   const char* poison_why = nullptr;
   if (concurrent && !mut("no_poison_concurrent")) poison_why = "concurrent-host-event";
   else if (taint) poison_why = "device-side-alloc-or-free";
+  else if (mem_.memo_host_touched(false) && !mut("no_poison_host_maps")) poison_why = "touched-host-memory";
   else if (stats.atomics > 0 && !t.sequential && !mut("no_poison_atomics")) poison_why = "atomics-on-several-threads";
   else if (g_smid_by_worker.load(std::memory_order_relaxed) && !t.sequential && t.blocks > 1 && !mut("no_poison_smid"))
     poison_why = "smid-by-host-thread";

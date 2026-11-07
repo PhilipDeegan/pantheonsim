@@ -609,6 +609,9 @@ class MemoryManager {
   bool memo_host_maps() const;
   // Whether `addr` is host memory a kernel can address (a mapping, not a device window).
   bool memo_is_host_addr(uint64_t addr) const { return is_host_mapped(addr); }
+  // Whether any access has resolved into a pinned, managed or registered mapping since this was last called with `clear`: a kernel that
+  // touched host memory did something the history cannot describe, whatever its arguments were.
+  bool memo_host_touched(bool clear);
   // Whether a fault is armed that could change what a kernel loads, stores, computes or what a copy delivers.
   bool memo_faults_armed() const;
   // The 64-bit hash of each 4 KiB page (the last may be shorter) of the allocation at `base`, in order; the bytes a
@@ -931,6 +934,8 @@ class MemoryManager {
     // below the mmap base first; if one is ever mapped there, this is set and
     // device addresses go through the range check again.
     std::atomic<bool> in_device_window{false};
+    // Set whenever an access resolves into a mapping (see memo_host_touched).
+    std::atomic<bool> touched{false};
     // Whether any address from `first` to `last` (inclusive, first <= last) may_contain would not rule out: a range wholly in
     // the device windows (one interval) is ruled out as one address is.
     VGPU_MEMORY_UNIT_INLINE bool may_overlap(uint64_t first, uint64_t last) const {
@@ -957,6 +962,7 @@ class MemoryManager {
     bool read_only;
   };
   bool lookup_host(uint64_t addr, uint64_t len, HostHit* out) const;
+  bool lookup_host_core(uint64_t addr, uint64_t len, HostHit* out) const;
   bool host_batch_hit(const uint64_t* addrs, size_t count, uint32_t size, bool store, HostHit* h) const;
   static uint64_t fresh_generation();
  public:

@@ -400,6 +400,18 @@ VTEST(the_hash_sees_every_byte_and_the_length) {
   VCHECK(memo::page_hash(zeros.data(), 4096) != memo::page_hash(zeros.data(), 4095));
 }
 
+// ---- which called functions make a launch uncacheable ----------------------------------------------------------------------------
+
+VTEST(the_device_runtime_is_told_from_ptxas_helpers_by_name) {
+  for (const char* n : {"malloc", "free", "vprintf", "printf", "cudaMalloc", "cudaGraphLaunch", "cudaLaunchDevice", "cudaGetDevice",
+                        "cudaCGGetIntrinsicHandle", "__cudaCDP2GetParameterBufferV2", "__cudaCDP2LaunchDeviceV2", "__cudart_internal", "__cuda_syscall_malloc"})
+    VCHECK(memo::is_device_runtime_name(n));
+  // Code ptxas links into kernels that divide, take remainders and so on: ordinary computation.
+  for (const char* n : {"__cuda_sm20_div_rn_f64_full", "__cuda_sm20_rem_u64", "__cuda_sm3x_div_rn_noftz_f32_slowpath", "$__cuda_sm20_dsqrt_rn_f64_mediumpath_v1",
+                        "$__internal_0_$__cuda_sm20_rcp_f64", "__nv_sinf", "_Z6kernelPf", "__assertfail", "memcpy", "memset"})
+    VCHECK(!memo::is_device_runtime_name(n));
+}
+
 // ---- off is off --------------------------------------------------------------------------------------------------------------
 
 VTEST(without_the_cache_nothing_is_attached) {
@@ -667,11 +679,20 @@ VTEST(row_vmm_handle_map_poisons_and_a_live_mapping_refuses_launches) {
   }), "vmm-or-shared-memory");
 }
 
-VTEST(row_host_mapping_poisons_and_a_reachable_one_refuses) {
+VTEST(row_a_host_mapping_no_kernel_touches_costs_nothing) {
+  // Pinned memory a program only copies through (the usual case) is no reason to stop caching: what matters is whether a kernel reaches it.
   static std::vector<uint8_t> host(8192);
-  expect_poisoned("host-map", run_row("hostmap", [](Rig& r) {
+  expect_survives("host-map-idle", run_row("hostmapidle", [](Rig& r) {
     r.mem().map_host(reinterpret_cast<uint64_t>(host.data()), host.data(), host.size());
-  }), "host-map-reachable");
+  }));
+}
+
+VTEST(row_a_kernel_that_touches_a_host_mapping_poisons) {
+  static std::vector<uint8_t> host(8192);
+  expect_poisoned("host-map-touch", run_row("hostmaptouch", [](Rig& r) {
+    r.mem().map_host(reinterpret_cast<uint64_t>(host.data()), host.data(), host.size());
+    r.launch("fixed", 1, 8, {arg_u64(reinterpret_cast<uint64_t>(host.data()))});   // writes host memory, which no diff sees
+  }), "touched-host-memory");
 }
 
 VTEST(row_device_reset_poisons) {

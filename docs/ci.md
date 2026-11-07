@@ -127,6 +127,17 @@ runner; and the toolchains differ (CUDA 12.0 and 13.0). A cache keyed on content
 To see what the cache does in a run, read the "ccache statistics" step of each job (hit rate, and misses by cause), and the step times
 of "Build" against the previous run. Not measured: this was written without a CI run.
 
+## Launch-level result caching (`VGPU_MEMO`) in CI
+
+Two ctest tests, both in the ordinary unit and ASan/UBSan/TSan runs (no special job, nothing excluded):
+
+| test | what it needs | what it does |
+|---|---|---|
+| `test_memo` | the core library only (hand-written PTX through the Device API; it makes its own temporary directories under `/tmp`) | the history chain, one test per row of the poisoning table, exact replay, the disk store (corruption, size cap), verify mode, and the 28 mutants of the cache's own rules, each of which must make a check fail while the same scenarios pass with no mutant (about a second in a Release build) |
+| `e2e_memo_api_matrix` | nvcc and `libvgpucudart` (skips without them) | `nvidia/tests/e2e/memo_api_matrix.cu` run with the cache off, cold, warm and with every hit also run for real (`VGPU_MEMO_VERIFY=2`): stdout, kernel digests and counters records must be identical, the warm run must hit, and device printf, device malloc, cooperative launches and textures must be counted as not cached |
+
+What CI does not run is the corpus differential (`tools/bench/memo/memo_diff.py`: every PolyBench/GPU, Rodinia, HeCBench and CUDA Samples program of Phase 0, off against cold against warm against verified) and the pantheon workloads (`tools/bench/memo/memo_pantheon.py`): they need the prebuilt corpora of `tools/bench/real/pack_corpora.sh` and take about two hours; docs/performance.md, Round sp35, has the last results and the commands. Both scripts write their tables with `tools/bench/memo/tables.py`.
+
 ## How CI has failed, and what it looked like
 
 **The pool went away or never answered.** A job whose label no online runner

@@ -1,5 +1,7 @@
 # Study 3: memoising deterministic kernels
 
+> **Status (round sp35).** Built as the opt-in `VGPU_MEMO=1`, with the design the sp32 study recommended (state named by history, a launch the cache cannot represent poisons it, write sets captured by a budgeted before/after diff, a persistent store). What it does, what it refuses, and the measurements: [performance.md, Round sp35](../performance.md#round-sp35-launch-level-result-caching-built-tested-measured-branch-sp35-memo-base-originmain-9f80d40e). The study below is the original analysis, kept as it was written (it keys on the content of live memory; the build does not).
+
 **Idea.** Key a launch on (module, kernel, grid, arguments, input memory); if seen before, replay the recorded writes
 instead of executing.
 

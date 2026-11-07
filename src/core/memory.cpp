@@ -1050,6 +1050,7 @@ bool MemoryManager::host_pieces(uint64_t addr, uint64_t len, std::vector<HostPie
     at += n;
     left -= n;
   }
+  host_maps_->touched.store(true, std::memory_order_relaxed);
   return true;
 }
 
@@ -1070,6 +1071,12 @@ std::atomic<bool> g_host_lookup_cache{[] {
 void MemoryManager::set_host_lookup_cache(bool on) { g_host_lookup_cache.store(on, std::memory_order_relaxed); }
 
 bool MemoryManager::lookup_host(uint64_t addr, uint64_t len, HostHit* out) const {
+  if (!lookup_host_core(addr, len, out)) return false;
+  if (!host_maps_->touched.load(std::memory_order_relaxed)) host_maps_->touched.store(true, std::memory_order_relaxed);
+  return true;
+}
+
+bool MemoryManager::lookup_host_core(uint64_t addr, uint64_t len, HostHit* out) const {
   if (!g_host_lookup_cache.load(std::memory_order_relaxed)) {   // VGPU_HOSTMAP_CACHE=0: the table, under its mutex, every time
     std::lock_guard<std::mutex> lock(host_maps_->mu);
     const HostMap* m = find_host_map_locked(addr, len);
@@ -1107,7 +1114,6 @@ const MemoryManager::HostMap* MemoryManager::find_host_map_locked(uint64_t addr,
 }
 
 void MemoryManager::map_host(uint64_t addr, void* host, uint64_t len, bool read_only) {
-  if (memo_sink_) memo_sink_->on_poison("map_host");
   std::lock_guard<std::mutex> lock(host_maps_->mu);
   host_maps_->maps.push_back(HostMap{addr, len, static_cast<uint8_t*>(host), read_only});
   // The allocator hands freed host addresses out again, so an old record of a
@@ -1125,7 +1131,6 @@ void MemoryManager::map_host(uint64_t addr, void* host, uint64_t len, bool read_
 }
 
 void MemoryManager::unmap_host(uint64_t addr) {
-  if (memo_sink_) memo_sink_->on_poison("unmap_host");
   if (!host_maps_) return;
   std::lock_guard<std::mutex> lock(host_maps_->mu);
   auto& v = host_maps_->maps;
@@ -2343,6 +2348,11 @@ size_t MemoryManager::memo_host_map_count() const {
 }
 
 bool MemoryManager::memo_host_maps() const { return host_maps_ && memo_host_map_count() != 0; }
+
+bool MemoryManager::memo_host_touched(bool clear) {
+  if (!host_maps_) return false;
+  return clear ? host_maps_->touched.exchange(false, std::memory_order_relaxed) : host_maps_->touched.load(std::memory_order_relaxed);
+}
 
 bool MemoryManager::memo_faults_armed() const {
   if (!access_fault_) return false;

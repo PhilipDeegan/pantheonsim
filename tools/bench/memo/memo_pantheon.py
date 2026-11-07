@@ -5,7 +5,7 @@ is compared is what the counters say (launches and warp instructions simulated p
 
   memo_pantheon.py --build B --bin DIR --out OUT [--workloads a,b] [--duration 3]
 """
-import argparse, json, os, re, shutil, signal, subprocess, tempfile, time
+import argparse, fcntl, json, os, re, shutil, signal, subprocess, tempfile, time
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--build", required=True)
@@ -48,19 +48,25 @@ def run(w, memo, work):
         env.update(VGPU_MEMO="1", VGPU_MEMO_STATS_FILE=sf)
         env.update(memo)
     cmd = [os.path.join(a.bin, w), "0", str(a.duration), "2", "--kernel_loops", "2", "--warmup_iters", "1", "--grid_size", "4"]
-    cmd = ["flock", a.lock, "nice", "-n", "19", "taskset", "-c", a.cpu] + cmd
+    cmd = ["nice", "-n", "19", "taskset", "-c", a.cpu] + cmd
     while os.getloadavg()[0] > a.max_load:
         time.sleep(10)
-    t0 = time.monotonic()
-    p = subprocess.Popen(cmd, cwd=work, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
-    to = False
+    lf = open(a.lock, "a+")
+    fcntl.flock(lf, fcntl.LOCK_EX)   # (taken here so that the run's time is the program's, not the wait for its turn)
     try:
-        out, _ = p.communicate(timeout=a.timeout)
-    except subprocess.TimeoutExpired:
-        os.killpg(p.pid, signal.SIGKILL)
-        out, _ = p.communicate()
-        to = True
-    wall = time.monotonic() - t0
+        t0 = time.monotonic()
+        p = subprocess.Popen(cmd, cwd=work, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+        to = False
+        try:
+            out, _ = p.communicate(timeout=a.timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(p.pid, signal.SIGKILL)
+            out, _ = p.communicate()
+            to = True
+        wall = time.monotonic() - t0
+    finally:
+        fcntl.flock(lf, fcntl.LOCK_UN)
+        lf.close()
     n, instr = counters(cf)
     st = {}
     if os.path.exists(sf):

@@ -23,6 +23,10 @@
 
 namespace vgpu::memo {
 
+// Whether a function a kernel calls is the heap, printf or the device runtime (what makes a launch uncacheable), as against code of
+// ptxas's own (`__cuda_sm20_div_rn_f64_full`) that only computes.
+bool is_device_runtime_name(const std::string& name);
+
 struct Config {
   bool enabled = false;
   std::string dir;                    // VGPU_MEMO_DIR: entries persist here (empty: in memory only)

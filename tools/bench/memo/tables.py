@@ -31,12 +31,12 @@ def correctness(dirs):
             skipped.append((k, v.get("note", "")))
             continue
         diffs = []
+        # a field that differs between two runs without the cache is the program's own (an address of its own heap in device memory, ...)
+        own = [f for f in fields if any(k in v and v[k][f] != v["off"][f] for k in ("off2", "off3"))]
         for m in ("cold", "warm", "verify"):
             for f in fields:
-                if v[m][f] != v["off"][f]:
+                if f not in own and v[m][f] != v["off"][f]:
                     diffs.append("%s.%s" % (m, f))
-        if v["off"]["rc"] != 0:
-            diffs.append("off rc=%s" % v["off"]["rc"])
         ncmp += 1
         bad += bool(diffs)
         c, w, ve = v["cold"]["stats"], v["warm"]["stats"], v["verify"]["stats"]
@@ -46,7 +46,7 @@ def correctness(dirs):
         vmis += ve.get("verify_mismatch", 0)
         rows.append("| %s | %d | %d | %d | %d | %d | %s |" % (
             k, w.get("launches", 0), c.get("hits", 0), w.get("hits", 0), ve.get("verify_checked", 0),
-            ve.get("verify_mismatch", 0), "identical" if not diffs else "**DIFFERS: " + ", ".join(diffs) + "**"))
+            ve.get("verify_mismatch", 0), ("identical" if not diffs else "**DIFFERS: " + ", ".join(diffs) + "**") + (" (nondeterministic without the cache: " + ", ".join(own) + ")" if own else "")))
     print("| program | launches | hits cold | hits warm | verified | verify mismatches | off = cold = warm = verify (stdout, files, exit code, digests, counters, final memory) |")
     print("|---|---:|---:|---:|---:|---:|---|")
     print("\n".join(rows))

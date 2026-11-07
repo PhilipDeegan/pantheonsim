@@ -12,7 +12,7 @@ VGPU_COUNTERS_FILE records (launch number and pid dropped) and the hash of all d
 
 Simulator side only; no GPU card is touched. Waits while the load average is above --max-load.
 """
-import argparse, hashlib, importlib.util, json, os, re, shutil, signal, statistics, subprocess, sys, tempfile, time
+import argparse, fcntl, hashlib, importlib.util, json, os, re, shutil, signal, statistics, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("real", os.path.join(HERE, "..", "real", "real.py"))
@@ -64,20 +64,28 @@ def run(build, cwd, argv, copy_cwd, cpu, threads, timeout, memo, work, lock, nic
     cmd = ["taskset", "-c", str(cpu)] + argv
     if nice:
         cmd = ["nice", "-n", "19"] + cmd
-    if lock:
-        cmd = ["flock", lock] + cmd
-    c0 = os.times()
-    t0 = time.monotonic()
-    p = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
-    to = False
+    # The machine-wide lock is taken here, not by flock(1) in front of the program, so the time of a run is the program's and not the
+    # wait for its turn.
+    lf = open(lock, "a+") if lock else None
+    if lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
     try:
-        out, _ = p.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        os.killpg(p.pid, signal.SIGKILL)
-        out, _ = p.communicate()
-        to = True
-    wall = time.monotonic() - t0
-    c1 = os.times()
+        c0 = os.times()
+        t0 = time.monotonic()
+        p = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+        to = False
+        try:
+            out, _ = p.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(p.pid, signal.SIGKILL)
+            out, _ = p.communicate()
+            to = True
+        wall = time.monotonic() - t0
+        c1 = os.times()
+    finally:
+        if lf:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+            lf.close()
     extra = b""
     if scratch:
         for f in sorted(x for x in os.listdir(scratch) if x != "filelist"):
@@ -110,7 +118,7 @@ def main():
     global ARGS
     ap = argparse.ArgumentParser()
     ap.add_argument("--build", required=True)
-    ap.add_argument("--corp", required=True)
+    ap.add_argument("--corp", default="")
     ap.add_argument("--out", required=True)
     ap.add_argument("--mode", choices=["correctness", "overhead"], default="correctness")
     ap.add_argument("--programs", default="")
@@ -121,13 +129,21 @@ def main():
     ap.add_argument("--runs", type=int, default=1)
     ap.add_argument("--timeout", type=float, default=300)
     ap.add_argument("--max-load", type=float, default=8.0)
+    ap.add_argument("--exe-dir", default="", help="a directory of programs built from nvidia/tests/e2e (run with no arguments; shown as e2e/<name>)")
+    ap.add_argument("--memo-budget", default="", help="VGPU_MEMO_BUDGET for the overhead mode's cold and warm runs ('inf': record every miss)")
     ap.add_argument("--lock", default="/tmp/pantheonsim-builder.lock", help="flock file wrapped around every run ('' for none)")
     ap.add_argument("--nice", action="store_true", default=True)
     ARGS = ap.parse_args()
     ARGS.build = os.path.abspath(ARGS.build)
     ARGS.out = os.path.abspath(ARGS.out)
     os.makedirs(ARGS.out, exist_ok=True)
-    progs = real.manifest(os.path.abspath(ARGS.corp), ARGS.corpora.split(","))
+    progs = real.manifest(os.path.abspath(ARGS.corp), [c for c in ARGS.corpora.split(",") if c != "e2e"]) if ARGS.corp else []
+    if ARGS.exe_dir:
+        d = os.path.abspath(ARGS.exe_dir)
+        for n in sorted(os.listdir(d)):
+            p = os.path.join(d, n)
+            if os.path.isfile(p) and os.access(p, os.X_OK) and not n.endswith((".log", ".txt", ".sh")):
+                progs.append(("e2e", n, d, [p], False))
     if ARGS.programs:
         want = set(ARGS.programs.split(","))
         progs = [p for p in progs if p[0] + "/" + p[1] in want or p[1] in want]
@@ -154,7 +170,11 @@ def main():
                 r["off"] = go(None)
                 if r["off"]["timeout"]:
                     r["note"] = "off timed out"
+                elif r["off"]["rc"] != 0:
+                    r["note"] = "fails without the cache (rc=%s)" % r["off"]["rc"]
                 else:
+                    r["off2"] = go(None)   # more runs without the cache: what differs between them is the program's own nondeterminism
+                    r["off3"] = go(None)
                     r["cold"] = go(inf)
                     r["warm"] = go(inf)
                     r["verify"] = go(dict(inf, VGPU_MEMO_VERIFY="2"))
@@ -167,11 +187,13 @@ def main():
                     for s in order:
                         if s in ("off", "aa"):
                             x = go(None)
-                        elif s == "cold":
-                            shutil.rmtree(d, ignore_errors=True)
-                            x = go({"VGPU_MEMO_DIR": d})
                         else:
-                            x = go({"VGPU_MEMO_DIR": d})
+                            if s == "cold":
+                                shutil.rmtree(d, ignore_errors=True)
+                            m = {"VGPU_MEMO_DIR": d}
+                            if ARGS.memo_budget:
+                                m["VGPU_MEMO_BUDGET"] = ARGS.memo_budget
+                            x = go(m)
                         reps[s].append(x)
                         if x["timeout"]:
                             break
