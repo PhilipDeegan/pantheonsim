@@ -243,6 +243,9 @@ the exploration run), so what they gave is not a measured number.
 | `e2e_sass_jit_shard_loops` (new shard, `nvidia/tests/e2e/jit_loops.cu`) | nine kernels with loops and branches (see the file), five block shapes (32, 64, 96 and 33 threads, one thread), results and every counter equal to the tier at one and four threads, with a warm cache, in the background, without the chain, with the share rule on; and the generated code must have gone on past at least 1000 branches or cont ops (`VGPU_JIT_MIN_CONTINUED`) |
 | the other `e2e_sass_jit` shards (`tier`, `steps`, `steps_gather`, `steps_shared`, `random`, `modes`) | unchanged tests, now running the new code: sass_tier's 30 units, sass_tier_steps' faults (at least 2 thrown inside a generated region), the two step-limit bisections, the random kernels |
 
+**Results on the measured build** (server3, no nvcc there: the programs were compiled with nvcc 13.0 on another machine and run through `run_sass_jit.sh` with `VGPU_TIER_WORK`): all seven `e2e_sass_jit` shards pass (`data/round15/verify/gate5.log`: loops, tier, steps with 2 faults thrown inside generated regions, random, modes, steps_gather, steps_shared); `test_jit` 24/24, `test_jit_share` 6/6, `test_jit_resid` 3/3;
+`test_sass_chain_cont_jit`, `test_sass_store_gate_jit`, `test_sass_alu_runs_jit`, `test_tier` and the three plain ones pass (an earlier build, `data/round15/verify/ctest_jit.log`; the tests do not depend on what changed after). Not run: the sanitizer builds (the JIT is off in them), CI itself (nothing was pushed).
+
 `nvidia/tests/e2e/run_sass_jit.sh` can now run on a rig without nvcc with programs built beforehand (`VGPU_TIER_WORK`, `jit_random.<seed>.<arch>`).
 
 ## Mutation checks (`-DVGPU_JIT_MUTANTS=ON`, `VGPU_JIT_MUTANT=<name>`; logs in `data/round15/`)
