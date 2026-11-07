@@ -891,7 +891,11 @@ uint64_t DeviceMemo::estimate_ns(const Ticket& t) {
     }
   }
   for (uint64_t base : unknown) {   // (a walk of the chunk table, once per allocation)
-    const uint64_t m = mem_.memo_materialized(base);
+    // Memory nobody has written yet reads as zero and costs nothing to hash, but a launch is about to write it: the hashed bytes
+    // after it are what it writes, so an allocation not yet seen is taken to be at least half full.
+    uint64_t bb = 0, sz = 0;
+    mem_.find_allocation(base, &bb, &sz);
+    const uint64_t m = std::max(mem_.memo_materialized(base), sz / 2);
     std::lock_guard<std::mutex> g(mu_);
     mat_hint_[base] = m;
     bytes += 2 * m;
@@ -912,8 +916,7 @@ uint64_t DeviceMemo::estimate_all_ns() {
   uint64_t bytes = 0;
   size_t n = 0;
   for (const auto& [base, size] : mem_.live_ranges()) {
-    (void)size;
-    const uint64_t m = mem_.memo_materialized(base);
+    const uint64_t m = std::max(mem_.memo_materialized(base), size / 2);
     bytes += m;
     ++n;
     std::lock_guard<std::mutex> g(mu_);

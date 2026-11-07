@@ -35,6 +35,9 @@ def sha(b):
     return hashlib.sha256(b).hexdigest()[:12]
 
 
+HELD = [False]   # the lock is held for a whole program's runs (overhead mode), not taken per run
+
+
 def run(build, cwd, argv, copy_cwd, cpu, threads, timeout, memo, work, lock, nice, instrument=True):
     env = {k: v for k, v in os.environ.items() if not k.startswith("VGPU_")}
     env.update(VGPU_QUIET="1", VGPU_GPU="nvidia/rtx3060", LD_LIBRARY_PATH=os.path.join(build, "shim"))
@@ -66,7 +69,7 @@ def run(build, cwd, argv, copy_cwd, cpu, threads, timeout, memo, work, lock, nic
         cmd = ["nice", "-n", "19"] + cmd
     # The machine-wide lock is taken here, not by flock(1) in front of the program, so the time of a run is the program's and not the
     # wait for its turn.
-    lf = open(lock, "a+") if lock else None
+    lf = open(lock, "a+") if lock and not HELD[0] else None
     if lf:
         fcntl.flock(lf, fcntl.LOCK_EX)
     try:
@@ -164,6 +167,11 @@ def main():
         r = {}
         def go(memo):
             return run(ARGS.build, cwd, argv, cp, ARGS.cpu, threads, ARGS.timeout, memo, work, ARGS.lock or None, ARGS.nice, ARGS.mode == "correctness")
+        plock = None
+        if ARGS.lock:   # one wait for the lock per program, not one per run: the runs alternate, and a program's whole set is short
+            plock = open(ARGS.lock, "a+")
+            fcntl.flock(plock, fcntl.LOCK_EX)
+            HELD[0] = True
         try:
             if ARGS.mode == "correctness":
                 inf = {"VGPU_MEMO_DIR": cache, "VGPU_MEMO_BUDGET": "inf"}
@@ -203,6 +211,10 @@ def main():
                         break
                 r["reps"] = reps
         finally:
+            if plock:
+                HELD[0] = False
+                fcntl.flock(plock, fcntl.LOCK_UN)
+                plock.close()
             shutil.rmtree(work, ignore_errors=True)
         results[key] = r
         print(key, {k: (v["wall"] if isinstance(v, dict) and "wall" in v else None) for k, v in r.items() if k != "reps"}, flush=True)
