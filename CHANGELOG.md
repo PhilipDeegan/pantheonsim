@@ -7,7 +7,6 @@ release says what runs and what it produces, never how fast a real GPU would run
 
 ## Unreleased
 
-<<<<<<< HEAD
 - `VGPU_MEMO=1` (opt-in, off by default and then unchanged): launch-level result caching. A launch whose kernel, grid, arguments,
   environment and device-memory history have been seen before is not run; its stored write set, counters and kernel digest are applied
   (`VGPU_MEMO_DIR` keeps entries between runs, so a second run of a deterministic program hits from its first launch;
@@ -17,11 +16,9 @@ release says what runs and what it produces, never how fast a real GPU would run
   profiler, the race detector, an armed fault, ...) restarts the chain, so the cost on a miss is a budgeted before-and-after hash of
   the allocations the launch can write and the answer is never a stale one. Knobs: [docs/cli.md](docs/cli.md); rules, tests, mutants
   and measurements: [docs/performance.md](docs/performance.md#round-sp35-launch-level-result-caching-built-tested-measured-branch-sp35-memo-base-originmain-9f80d40e).
-=======
 - The container image builds again. `scripts/package-build.sh` left `shim/libcudss.so.1` pointing into `cudss1/`, a directory the image does not
   have, so the build stopped at "links that lead nowhere" from the cuDSS 1.0 change onward. A lint test (`lint_package_build`) now builds a small
   tree with the same layout.
->>>>>>> origin/main
 - SASS: `ULDC` with a uniform base register (`ULDC.64 UR6, c[0x3][UR8+-0x72e0]`) takes its offset as a signed 16-bit number and wraps in the
   64 KiB bank, as `LDC` does. ptxas uses it to reach constant data past byte 32768, and the simulator read zero there on the Ampere and Ada
   profiles (an inverse NTT in FIDESlib came out all zeros) (pantheonsim #499).
