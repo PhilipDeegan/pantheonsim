@@ -1,0 +1,9 @@
+=== shard loops 07:50:28
+FAIL sm_86 jit_loops: the tier's four threads print differently from its one (jit_loops must not); only 0 branches went on inside generated code
+FAIL: the tier and the JIT differ
+=== shard loops rc=1 07:51:46
+=== shard tier 07:51:46
+ok   sm_86 sass_tier  (30 units (253 regions), 30 ready, 0 cache hits, 30 compiles (100999.4 ms), 0 failures, 0 damaged objects replaced; 245350 region calls ran 1543985 warp instructions (1160327 computed by generated code), 0 exceptions unwound through them; share rule: 0 declined, 0 accepted; 0 branches and register-only ops continued inside generated code)
+PASS
+=== shard tier rc=0 07:55:37
+=== all done

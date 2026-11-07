@@ -501,8 +501,7 @@ std::string gen_op_body(const OpFacts& o, RowCtx& rc) {
     case Form::S2r:   // h_s2r: the host fills the executing lanes (it needs the block and the warp)
       if (o.dst == kNoReg) break;
       w.f("    u32 r[32] = {};\n    c->sreg(c, %uu, r, ex);\n", o.a);
-      if (mut(g_form_name)) w.f("    r[3] ^= 1u;\n");
-      store(w, o.dst, "r");
+      store(w, o.dst, "r");   // (the form's mutant is in store())
       break;
     case Form::Cs2r:   // h_cs2r, SRZ: zero (and the register after it for a pair)
       if (o.dst == kNoReg) break;
@@ -559,7 +558,8 @@ std::string gen_op_body(const OpFacts& o, RowCtx& rc) {
     case Form::Usel:   // h_usel
       w.f("    const unsigned l = static_cast<unsigned>(__builtin_ctz(ex));\n");
       if (o.dst != kNoDst)
-        w.f("    c->ur[%u] = ((%s >> l) & 1u) ? %s : %s;\n", unsigned{o.dst}, pm(w, o.p, pa, sizeof pa), usrc(o.s[0]).c_str(), usrc(o.s[1]).c_str());
+        w.f("    c->ur[%u] = (((%s >> l) & 1u) ? %s : %s)%s;\n", unsigned{o.dst}, pm(w, o.p, pa, sizeof pa), usrc(o.s[0]).c_str(), usrc(o.s[1]).c_str(),
+            mut(g_form_name) ? " ^ 1u" : "");
       break;
     case Form::Uisetp: {   // h_uisetp: two uniform predicates
       w.f("    const unsigned l = static_cast<unsigned>(__builtin_ctz(ex));\n    const u32 ua = %s, ub = %s;\n    const bool acc = (%s >> l) & 1u;\n", usrc(o.s[0]).c_str(),

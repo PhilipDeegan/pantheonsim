@@ -1,0 +1,6 @@
+jit_segtree.sh usel: caught (2 lines differ)
+jit_segtree.sh none: SURVIVED (output identical to the tier)
+=== done 12:53:52
+jit_gauss.sh umov: SURVIVED (output identical to the tier)
+jit_gauss.sh none: SURVIVED (output identical to the tier)
+=== done 12:59:13

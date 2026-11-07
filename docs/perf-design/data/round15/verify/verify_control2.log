@@ -1,0 +1,3 @@
+samples/radixSortThrust            thr=1 base:tier                  tier  DIFFERENT out:fd40fe9ee61a/fd40fe9ee61a cnt:False dig:False rc:0/0
+samples/radixSortThrust            thr=4 base:tier                  tier  DIFFERENT out:fd40fe9ee61a/fd40fe9ee61a cnt:False dig:False rc:0/0
+DIFFERENCES: 2

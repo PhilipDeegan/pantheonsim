@@ -1,0 +1,1197 @@
+{
+ "polybench/SYRK": {
+  "warm": {
+   "first": [
+    {
+     "wall": 5.391556575894356,
+     "rc": 0,
+     "timeout": false,
+     "hash": "975bb9f20d39",
+     "load": 1.49755859375
+    },
+    {
+     "wall": 5.327721731970087,
+     "rc": 0,
+     "timeout": false,
+     "hash": "975bb9f20d39",
+     "load": 1.30029296875
+    },
+    {
+     "wall": 5.1821969950105995,
+     "rc": 0,
+     "timeout": false,
+     "hash": "975bb9f20d39",
+     "load": 1.56396484375,
+     "jit": {
+      "compiles": 0,
+      "compile_ms": 0.0,
+      "hits": 1,
+      "failures": 0,
+      "region_calls": 98239,
+      "region_insts": 194178695,
+      "generated": 91276043,
+      "units": 1,
+      "regions": 4,
+      "declined": 0,
+      "accepted": 1
+     }
+    }
+   ],
+   "samples": [
+    [
+     {
+      "wall": 5.443607822991908,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 2.39990234375
+     },
+     {
+      "wall": 5.398181012016721,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.830078125
+     },
+     {
+      "wall": 5.367535735946149,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.54541015625
+     },
+     {
+      "wall": 5.419501545024104,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 2.125
+     },
+     {
+      "wall": 5.381384487031028,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 2.06884765625
+     }
+    ],
+    [
+     {
+      "wall": 5.267289318959229,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 2.130859375
+     },
+     {
+      "wall": 5.343642740044743,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.8759765625
+     },
+     {
+      "wall": 5.405593616887927,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.4609375
+     },
+     {
+      "wall": 5.299720303970389,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 2.068359375
+     },
+     {
+      "wall": 5.425650364020839,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.76416015625
+     }
+    ],
+    [
+     {
+      "wall": 4.913183735916391,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 2.39697265625,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 1,
+       "failures": 0,
+       "region_calls": 98239,
+       "region_insts": 194178695,
+       "generated": 91276043,
+       "units": 1,
+       "regions": 4,
+       "declined": 0,
+       "accepted": 1
+      }
+     },
+     {
+      "wall": 4.827645577955991,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.95166015625,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 1,
+       "failures": 0,
+       "region_calls": 98239,
+       "region_insts": 194178695,
+       "generated": 91276043,
+       "units": 1,
+       "regions": 4,
+       "declined": 0,
+       "accepted": 1
+      }
+     },
+     {
+      "wall": 4.7967510900925845,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.611328125,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 1,
+       "failures": 0,
+       "region_calls": 98239,
+       "region_insts": 194178695,
+       "generated": 91276043,
+       "units": 1,
+       "regions": 4,
+       "declined": 0,
+       "accepted": 1
+      }
+     },
+     {
+      "wall": 4.775443286984228,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.6298828125,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 1,
+       "failures": 0,
+       "region_calls": 98239,
+       "region_insts": 194178695,
+       "generated": 91276043,
+       "units": 1,
+       "regions": 4,
+       "declined": 0,
+       "accepted": 1
+      }
+     },
+     {
+      "wall": 4.765810527955182,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.68310546875,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 1,
+       "failures": 0,
+       "region_calls": 98239,
+       "region_insts": 194178695,
+       "generated": 91276043,
+       "units": 1,
+       "regions": 4,
+       "declined": 0,
+       "accepted": 1
+      }
+     }
+    ]
+   ],
+   "med": [
+    5.398181012016721,
+    5.343642740044743,
+    4.7967510900925845
+   ],
+   "spread": [
+    0.014092170469352043,
+    0.02963541029321969,
+    0.030723547082857825
+   ],
+   "hashes": [
+    [
+     "975bb9f20d39"
+    ],
+    [
+     "975bb9f20d39"
+    ],
+    [
+     "975bb9f20d39"
+    ]
+   ]
+  }
+ },
+ "polybench/SYR2K": {
+  "warm": {
+   "first": [
+    {
+     "wall": 10.290059505961835,
+     "rc": 0,
+     "timeout": false,
+     "hash": "975bb9f20d39",
+     "load": 1.30908203125
+    },
+    {
+     "wall": 10.270499662030488,
+     "rc": 0,
+     "timeout": false,
+     "hash": "975bb9f20d39",
+     "load": 1.341796875
+    },
+    {
+     "wall": 9.180697033065371,
+     "rc": 0,
+     "timeout": false,
+     "hash": "975bb9f20d39",
+     "load": 1.28857421875,
+     "jit": {
+      "compiles": 0,
+      "compile_ms": 0.0,
+      "hits": 1,
+      "failures": 0,
+      "region_calls": 98264,
+      "region_insts": 399144323,
+      "generated": 227188526,
+      "units": 1,
+      "regions": 2,
+      "declined": 0,
+      "accepted": 1
+     }
+    }
+   ],
+   "samples": [
+    [
+     {
+      "wall": 10.134483446949162,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.31787109375
+     },
+     {
+      "wall": 10.196953759994358,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.27001953125
+     },
+     {
+      "wall": 10.157950068009086,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.22802734375
+     },
+     {
+      "wall": 10.455989119946025,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.17626953125
+     },
+     {
+      "wall": 10.68394030095078,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.3837890625
+     }
+    ],
+    [
+     {
+      "wall": 10.137572775944136,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.2685546875
+     },
+     {
+      "wall": 10.400993476971053,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.22412109375
+     },
+     {
+      "wall": 10.266506077954546,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.34716796875
+     },
+     {
+      "wall": 10.322558459010907,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.208984375
+     },
+     {
+      "wall": 10.324712797999382,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.32470703125
+     }
+    ],
+    [
+     {
+      "wall": 8.841100557008758,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.2265625,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 1,
+       "failures": 0,
+       "region_calls": 98264,
+       "region_insts": 399144323,
+       "generated": 227188526,
+       "units": 1,
+       "regions": 2,
+       "declined": 0,
+       "accepted": 1
+      }
+     },
+     {
+      "wall": 8.973925021011382,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.26513671875,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 1,
+       "failures": 0,
+       "region_calls": 98264,
+       "region_insts": 399144323,
+       "generated": 227188526,
+       "units": 1,
+       "regions": 2,
+       "declined": 0,
+       "accepted": 1
+      }
+     },
+     {
+      "wall": 8.815971155068837,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.29345703125,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 1,
+       "failures": 0,
+       "region_calls": 98264,
+       "region_insts": 399144323,
+       "generated": 227188526,
+       "units": 1,
+       "regions": 2,
+       "declined": 0,
+       "accepted": 1
+      }
+     },
+     {
+      "wall": 9.155106741003692,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.24755859375,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 1,
+       "failures": 0,
+       "region_calls": 98264,
+       "region_insts": 399144323,
+       "generated": 227188526,
+       "units": 1,
+       "regions": 2,
+       "declined": 0,
+       "accepted": 1
+      }
+     },
+     {
+      "wall": 9.0998367019929,
+      "rc": 0,
+      "timeout": false,
+      "hash": "975bb9f20d39",
+      "load": 1.2744140625,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 1,
+       "failures": 0,
+       "region_calls": 98264,
+       "region_insts": 399144323,
+       "generated": 227188526,
+       "units": 1,
+       "regions": 2,
+       "declined": 0,
+       "accepted": 1
+      }
+     }
+    ]
+   ],
+   "med": [
+    10.196953759994358,
+    10.322558459010907,
+    8.973925021011382
+   ],
+   "spread": [
+    0.05388441165216414,
+    0.025518935259404393,
+    0.03779122124831768
+   ],
+   "hashes": [
+    [
+     "975bb9f20d39"
+    ],
+    [
+     "975bb9f20d39"
+    ],
+    [
+     "975bb9f20d39"
+    ]
+   ]
+  }
+ },
+ "samples/convolutionSeparable": {
+  "warm": {
+   "first": [
+    {
+     "wall": 11.411553655052558,
+     "rc": 0,
+     "timeout": false,
+     "hash": "e789a64bba7b",
+     "load": 1.97900390625
+    },
+    {
+     "wall": 11.305968734901398,
+     "rc": 0,
+     "timeout": false,
+     "hash": "e789a64bba7b",
+     "load": 1.76171875
+    },
+    {
+     "wall": 11.424191372934729,
+     "rc": 0,
+     "timeout": false,
+     "hash": "e789a64bba7b",
+     "load": 1.72509765625,
+     "jit": {
+      "compiles": 0,
+      "compile_ms": 0.0,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 0,
+      "region_insts": 0,
+      "generated": 0,
+      "units": 1,
+      "regions": 3,
+      "declined": 1,
+      "accepted": 0
+     }
+    }
+   ],
+   "samples": [
+    [
+     {
+      "wall": 11.417104308027774,
+      "rc": 0,
+      "timeout": false,
+      "hash": "e789a64bba7b",
+      "load": 1.61328125
+     },
+     {
+      "wall": 11.389855747926049,
+      "rc": 0,
+      "timeout": false,
+      "hash": "e789a64bba7b",
+      "load": 1.72216796875
+     },
+     {
+      "wall": 11.391045368975028,
+      "rc": 0,
+      "timeout": false,
+      "hash": "e789a64bba7b",
+      "load": 1.61083984375
+     },
+     {
+      "wall": 11.565943583031185,
+      "rc": 0,
+      "timeout": false,
+      "hash": "e789a64bba7b",
+      "load": 1.4873046875
+     },
+     {
+      "wall": 11.362796525005251,
+      "rc": 0,
+      "timeout": false,
+      "hash": "e789a64bba7b",
+      "load": 1.412109375
+     }
+    ],
+    [
+     {
+      "wall": 11.987530528916977,
+      "rc": 0,
+      "timeout": false,
+      "hash": "e789a64bba7b",
+      "load": 1.55712890625
+     },
+     {
+      "wall": 11.383387248031795,
+      "rc": 0,
+      "timeout": false,
+      "hash": "e789a64bba7b",
+      "load": 1.474609375
+     },
+     {
+      "wall": 11.501983202062547,
+      "rc": 0,
+      "timeout": false,
+      "hash": "e789a64bba7b",
+      "load": 1.69580078125
+     },
+     {
+      "wall": 11.549136313027702,
+      "rc": 0,
+      "timeout": false,
+      "hash": "e789a64bba7b",
+      "load": 1.38671875
+     },
+     {
+      "wall": 11.546628652024083,
+      "rc": 0,
+      "timeout": false,
+      "hash": "e789a64bba7b",
+      "load": 1.42236328125
+     }
+    ],
+    [
+     {
+      "wall": 11.405700931907631,
+      "rc": 0,
+      "timeout": false,
+      "hash": "e789a64bba7b",
+      "load": 1.61865234375,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 0,
+       "failures": 0,
+       "region_calls": 0,
+       "region_insts": 0,
+       "generated": 0,
+       "units": 1,
+       "regions": 3,
+       "declined": 1,
+       "accepted": 0
+      }
+     },
+     {
+      "wall": 13.723751561017707,
+      "rc": 0,
+      "timeout": false,
+      "hash": "e789a64bba7b",
+      "load": 1.5615234375,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 0,
+       "failures": 0,
+       "region_calls": 0,
+       "region_insts": 0,
+       "generated": 0,
+       "units": 1,
+       "regions": 3,
+       "declined": 1,
+       "accepted": 0
+      }
+     },
+     {
+      "wall": 11.461767886998132,
+      "rc": 0,
+      "timeout": false,
+      "hash": "e789a64bba7b",
+      "load": 1.58837890625,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 0,
+       "failures": 0,
+       "region_calls": 0,
+       "region_insts": 0,
+       "generated": 0,
+       "units": 1,
+       "regions": 3,
+       "declined": 1,
+       "accepted": 0
+      }
+     },
+     {
+      "wall": 11.323772754054517,
+      "rc": 0,
+      "timeout": false,
+      "hash": "e789a64bba7b",
+      "load": 1.49755859375,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 0,
+       "failures": 0,
+       "region_calls": 0,
+       "region_insts": 0,
+       "generated": 0,
+       "units": 1,
+       "regions": 3,
+       "declined": 1,
+       "accepted": 0
+      }
+     },
+     {
+      "wall": 11.410598514950834,
+      "rc": 0,
+      "timeout": false,
+      "hash": "e789a64bba7b",
+      "load": 1.328125,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 0,
+       "failures": 0,
+       "region_calls": 0,
+       "region_insts": 0,
+       "generated": 0,
+       "units": 1,
+       "regions": 3,
+       "declined": 1,
+       "accepted": 0
+      }
+     }
+    ]
+   ],
+   "med": [
+    11.391045368975028,
+    11.546628652024083,
+    11.410598514950834
+   ],
+   "spread": [
+    0.017833925811517777,
+    0.052322049932668285,
+    0.21032891515888477
+   ],
+   "hashes": [
+    [
+     "e789a64bba7b"
+    ],
+    [
+     "e789a64bba7b"
+    ],
+    [
+     "e789a64bba7b"
+    ]
+   ]
+  }
+ },
+ "samples/mergeSort": {
+  "warm": {
+   "first": [
+    {
+     "wall": 8.4857976839412,
+     "rc": 0,
+     "timeout": false,
+     "hash": "1c148cfe019c",
+     "load": 1.9638671875
+    },
+    {
+     "wall": 8.516396145918407,
+     "rc": 0,
+     "timeout": false,
+     "hash": "1c148cfe019c",
+     "load": 1.81494140625
+    },
+    {
+     "wall": 16.11808634805493,
+     "rc": 0,
+     "timeout": false,
+     "hash": "1c148cfe019c",
+     "load": 2.03466796875,
+     "jit": {
+      "compiles": 4,
+      "compile_ms": 8358.0,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 20391974,
+      "region_insts": 260176880,
+      "generated": 186905066,
+      "units": 4,
+      "regions": 26,
+      "declined": 0,
+      "accepted": 4
+     }
+    }
+   ],
+   "samples": [
+    [
+     {
+      "wall": 8.620775099028833,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1c148cfe019c",
+      "load": 1.875
+     },
+     {
+      "wall": 8.526466452982277,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1c148cfe019c",
+      "load": 1.44775390625
+     },
+     {
+      "wall": 8.488226742949337,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1c148cfe019c",
+      "load": 1.37841796875
+     },
+     {
+      "wall": 8.501320000039414,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1c148cfe019c",
+      "load": 1.39794921875
+     },
+     {
+      "wall": 8.479538043029606,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1c148cfe019c",
+      "load": 1.41015625
+     }
+    ],
+    [
+     {
+      "wall": 8.580900337081403,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1c148cfe019c",
+      "load": 1.740234375
+     },
+     {
+      "wall": 8.464947734028101,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1c148cfe019c",
+      "load": 1.48681640625
+     },
+     {
+      "wall": 8.497303243959323,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1c148cfe019c",
+      "load": 1.3193359375
+     },
+     {
+      "wall": 8.610378802986816,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1c148cfe019c",
+      "load": 1.4326171875
+     },
+     {
+      "wall": 8.484487860929221,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1c148cfe019c",
+      "load": 1.3466796875
+     }
+    ],
+    [
+     {
+      "wall": 7.840284585952759,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1c148cfe019c",
+      "load": 1.6806640625,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 4,
+       "failures": 0,
+       "region_calls": 20391974,
+       "region_insts": 260176880,
+       "generated": 186905066,
+       "units": 4,
+       "regions": 26,
+       "declined": 0,
+       "accepted": 4
+      }
+     },
+     {
+      "wall": 7.837918617995456,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1c148cfe019c",
+      "load": 1.57568359375,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 4,
+       "failures": 0,
+       "region_calls": 20391974,
+       "region_insts": 260176880,
+       "generated": 186905066,
+       "units": 4,
+       "regions": 26,
+       "declined": 0,
+       "accepted": 4
+      }
+     },
+     {
+      "wall": 7.802498735953122,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1c148cfe019c",
+      "load": 1.29345703125,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 4,
+       "failures": 0,
+       "region_calls": 20391974,
+       "region_insts": 260176880,
+       "generated": 186905066,
+       "units": 4,
+       "regions": 26,
+       "declined": 0,
+       "accepted": 4
+      }
+     },
+     {
+      "wall": 7.712650922010653,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1c148cfe019c",
+      "load": 1.32177734375,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 4,
+       "failures": 0,
+       "region_calls": 20391974,
+       "region_insts": 260176880,
+       "generated": 186905066,
+       "units": 4,
+       "regions": 26,
+       "declined": 0,
+       "accepted": 4
+      }
+     },
+     {
+      "wall": 7.789488106966019,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1c148cfe019c",
+      "load": 1.31884765625,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 4,
+       "failures": 0,
+       "region_calls": 20391974,
+       "region_insts": 260176880,
+       "generated": 186905066,
+       "units": 4,
+       "regions": 26,
+       "declined": 0,
+       "accepted": 4
+      }
+     }
+    ]
+   ],
+   "med": [
+    8.501320000039414,
+    8.497303243959323,
+    7.802498735953122
+   ],
+   "spread": [
+    0.01661354424943092,
+    0.017114967511851552,
+    0.01635804993520641
+   ],
+   "hashes": [
+    [
+     "1c148cfe019c"
+    ],
+    [
+     "1c148cfe019c"
+    ],
+    [
+     "1c148cfe019c"
+    ]
+   ]
+  }
+ },
+ "samples/sortingNetworks": {
+  "warm": {
+   "first": [
+    {
+     "wall": 13.64996876695659,
+     "rc": 0,
+     "timeout": false,
+     "hash": "09f64e9ba1b4",
+     "load": 2.19580078125
+    },
+    {
+     "wall": 13.60664438502863,
+     "rc": 0,
+     "timeout": false,
+     "hash": "09f64e9ba1b4",
+     "load": 1.93017578125
+    },
+    {
+     "wall": 16.16926783695817,
+     "rc": 0,
+     "timeout": false,
+     "hash": "09f64e9ba1b4",
+     "load": 1.72314453125,
+     "jit": {
+      "compiles": 3,
+      "compile_ms": 3362.3,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 8264562,
+      "region_insts": 216226225,
+      "generated": 161403535,
+      "units": 4,
+      "regions": 76,
+      "declined": 1,
+      "accepted": 3
+     }
+    }
+   ],
+   "samples": [
+    [
+     {
+      "wall": 13.667623159009963,
+      "rc": 0,
+      "timeout": false,
+      "hash": "09f64e9ba1b4",
+      "load": 1.6982421875
+     },
+     {
+      "wall": 13.672086845035665,
+      "rc": 0,
+      "timeout": false,
+      "hash": "09f64e9ba1b4",
+      "load": 1.41796875
+     },
+     {
+      "wall": 13.677174598909914,
+      "rc": 0,
+      "timeout": false,
+      "hash": "09f64e9ba1b4",
+      "load": 1.4052734375
+     },
+     {
+      "wall": 13.690636393032037,
+      "rc": 0,
+      "timeout": false,
+      "hash": "09f64e9ba1b4",
+      "load": 1.310546875
+     },
+     {
+      "wall": 13.669336186023429,
+      "rc": 0,
+      "timeout": false,
+      "hash": "09f64e9ba1b4",
+      "load": 1.42333984375
+     }
+    ],
+    [
+     {
+      "wall": 13.630537812947296,
+      "rc": 0,
+      "timeout": false,
+      "hash": "09f64e9ba1b4",
+      "load": 1.611328125
+     },
+     {
+      "wall": 13.684077551937662,
+      "rc": 0,
+      "timeout": false,
+      "hash": "09f64e9ba1b4",
+      "load": 1.49462890625
+     },
+     {
+      "wall": 13.660683067981154,
+      "rc": 0,
+      "timeout": false,
+      "hash": "09f64e9ba1b4",
+      "load": 1.39501953125
+     },
+     {
+      "wall": 13.803622737992555,
+      "rc": 0,
+      "timeout": false,
+      "hash": "09f64e9ba1b4",
+      "load": 1.201171875
+     },
+     {
+      "wall": 13.634891581023112,
+      "rc": 0,
+      "timeout": false,
+      "hash": "09f64e9ba1b4",
+      "load": 1.3291015625
+     }
+    ],
+    [
+     {
+      "wall": 12.954295170027763,
+      "rc": 0,
+      "timeout": false,
+      "hash": "09f64e9ba1b4",
+      "load": 1.81884765625,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 3,
+       "failures": 0,
+       "region_calls": 8264562,
+       "region_insts": 216226225,
+       "generated": 161403535,
+       "units": 4,
+       "regions": 76,
+       "declined": 1,
+       "accepted": 3
+      }
+     },
+     {
+      "wall": 12.848051673034206,
+      "rc": 0,
+      "timeout": false,
+      "hash": "09f64e9ba1b4",
+      "load": 1.63671875,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 3,
+       "failures": 0,
+       "region_calls": 8264562,
+       "region_insts": 216226225,
+       "generated": 161403535,
+       "units": 4,
+       "regions": 76,
+       "declined": 1,
+       "accepted": 3
+      }
+     },
+     {
+      "wall": 12.90801288804505,
+      "rc": 0,
+      "timeout": false,
+      "hash": "09f64e9ba1b4",
+      "load": 1.30712890625,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 3,
+       "failures": 0,
+       "region_calls": 8264562,
+       "region_insts": 216226225,
+       "generated": 161403535,
+       "units": 4,
+       "regions": 76,
+       "declined": 1,
+       "accepted": 3
+      }
+     },
+     {
+      "wall": 12.902102043968625,
+      "rc": 0,
+      "timeout": false,
+      "hash": "09f64e9ba1b4",
+      "load": 1.25927734375,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 3,
+       "failures": 0,
+       "region_calls": 8264562,
+       "region_insts": 216226225,
+       "generated": 161403535,
+       "units": 4,
+       "regions": 76,
+       "declined": 1,
+       "accepted": 3
+      }
+     },
+     {
+      "wall": 12.88832468003966,
+      "rc": 0,
+      "timeout": false,
+      "hash": "09f64e9ba1b4",
+      "load": 1.255859375,
+      "jit": {
+       "compiles": 0,
+       "compile_ms": 0.0,
+       "hits": 3,
+       "failures": 0,
+       "region_calls": 8264562,
+       "region_insts": 216226225,
+       "generated": 161403535,
+       "units": 4,
+       "regions": 76,
+       "declined": 1,
+       "accepted": 3
+      }
+     }
+    ]
+   ],
+   "med": [
+    13.672086845035665,
+    13.660683067981154,
+    12.902102043968625
+   ],
+   "spread": [
+    0.0016832276069420635,
+    0.012670297977335234,
+    0.008234588180398286
+   ],
+   "hashes": [
+    [
+     "09f64e9ba1b4"
+    ],
+    [
+     "09f64e9ba1b4"
+    ],
+    [
+     "09f64e9ba1b4"
+    ]
+   ]
+  }
+ }
+}

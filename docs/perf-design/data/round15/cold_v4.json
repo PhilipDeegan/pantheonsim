@@ -1,0 +1,574 @@
+{
+ "polybench/SYRK": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 9.428003016044386,
+     "rc": 0,
+     "timeout": false,
+     "hash": "975bb9f20d39",
+     "load": 3.05908203125,
+     "jit": {
+      "compiles": 1,
+      "compile_ms": 4577.3,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 98239,
+      "region_insts": 194178695,
+      "generated": 91276043,
+      "units": 1,
+      "regions": 4,
+      "declined": 0,
+      "accepted": 1
+     }
+    }
+   ]
+  }
+ },
+ "polybench/SYR2K": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 11.906523581943475,
+     "rc": 0,
+     "timeout": false,
+     "hash": "975bb9f20d39",
+     "load": 4.8505859375,
+     "jit": {
+      "compiles": 1,
+      "compile_ms": 2414.4,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 98264,
+      "region_insts": 399144323,
+      "generated": 227188526,
+      "units": 1,
+      "regions": 2,
+      "declined": 0,
+      "accepted": 1
+     }
+    }
+   ]
+  }
+ },
+ "samples/convolutionSeparable": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 11.298996591940522,
+     "rc": 0,
+     "timeout": false,
+     "hash": "e789a64bba7b",
+     "load": 5.65673828125,
+     "jit": {
+      "compiles": 0,
+      "compile_ms": 0.0,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 0,
+      "region_insts": 0,
+      "generated": 0,
+      "units": 1,
+      "regions": 3,
+      "declined": 1,
+      "accepted": 0
+     }
+    }
+   ]
+  }
+ },
+ "samples/mergeSort": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 16.979328172048554,
+     "rc": 0,
+     "timeout": false,
+     "hash": "1c148cfe019c",
+     "load": 4.810546875,
+     "jit": {
+      "compiles": 4,
+      "compile_ms": 8057.6,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 20391974,
+      "region_insts": 260176880,
+      "generated": 186905066,
+      "units": 4,
+      "regions": 26,
+      "declined": 0,
+      "accepted": 4
+     }
+    }
+   ]
+  }
+ },
+ "samples/sortingNetworks": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 15.862428040010855,
+     "rc": 0,
+     "timeout": false,
+     "hash": "09f64e9ba1b4",
+     "load": 5.18603515625,
+     "jit": {
+      "compiles": 3,
+      "compile_ms": 3112.8,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 8264562,
+      "region_insts": 216226225,
+      "generated": 161403535,
+      "units": 4,
+      "regions": 76,
+      "declined": 1,
+      "accepted": 3
+     }
+    }
+   ]
+  }
+ },
+ "hecbench/fpdc-cuda": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 175.92489706503693,
+     "rc": 0,
+     "timeout": false,
+     "hash": "d483d0054ad0",
+     "load": 5.533203125,
+     "jit": {
+      "compiles": 1,
+      "compile_ms": 3124.9,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 18747523,
+      "region_insts": 172320867,
+      "generated": 134295879,
+      "units": 1,
+      "regions": 14,
+      "declined": 0,
+      "accepted": 1
+     }
+    }
+   ]
+  }
+ },
+ "samples/interval": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 21.980263362056576,
+     "rc": 0,
+     "timeout": false,
+     "hash": "3ef38141a25b",
+     "load": 1.77783203125,
+     "jit": {
+      "compiles": 3,
+      "compile_ms": 7077.8,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 36130335,
+      "region_insts": 640647624,
+      "generated": 392148067,
+      "units": 3,
+      "regions": 98,
+      "declined": 0,
+      "accepted": 3
+     }
+    }
+   ]
+  }
+ },
+ "samples/histogram": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 18.913138294941746,
+     "rc": 0,
+     "timeout": false,
+     "hash": "086d44759ca7",
+     "load": 1.47216796875,
+     "jit": {
+      "compiles": 3,
+      "compile_ms": 6484.1,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 9285422,
+      "region_insts": 357547262,
+      "generated": 271790886,
+      "units": 4,
+      "regions": 34,
+      "declined": 1,
+      "accepted": 3
+     }
+    }
+   ]
+  }
+ },
+ "hecbench/black-scholes-cuda": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 27.54459830292035,
+     "rc": 0,
+     "timeout": false,
+     "hash": "beec8b8114ac",
+     "load": 1.81884765625,
+     "jit": {
+      "compiles": 1,
+      "compile_ms": 7106.3,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 115612635,
+      "region_insts": 910840043,
+      "generated": 798352088,
+      "units": 1,
+      "regions": 40,
+      "declined": 0,
+      "accepted": 1
+     }
+    }
+   ]
+  }
+ },
+ "samples/jacobiCudaGraphs": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 18.889150952920318,
+     "rc": 0,
+     "timeout": false,
+     "hash": "1d5f88eb23a9",
+     "load": 1.60693359375,
+     "jit": {
+      "compiles": 0,
+      "compile_ms": 0.0,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 0,
+      "region_insts": 0,
+      "generated": 0,
+      "units": 2,
+      "regions": 55,
+      "declined": 1,
+      "accepted": 0
+     }
+    }
+   ]
+  }
+ },
+ "polybench/LU": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 28.405810761032626,
+     "rc": 0,
+     "timeout": false,
+     "hash": "975bb9f20d39",
+     "load": 1.19873046875,
+     "jit": {
+      "compiles": 2,
+      "compile_ms": 3182.3,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 136622223,
+      "region_insts": 1594076261,
+      "generated": 1456381153,
+      "units": 2,
+      "regions": 8,
+      "declined": 0,
+      "accepted": 2
+     }
+    }
+   ]
+  }
+ },
+ "samples/simpleHyperQ": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 7.707894503953867,
+     "rc": 0,
+     "timeout": false,
+     "hash": "9a25aab570e1",
+     "load": 1.21728515625,
+     "jit": {
+      "compiles": 1,
+      "compile_ms": 619.7,
+      "hits": 1,
+      "failures": 0,
+      "region_calls": 114796,
+      "region_insts": 1175361176,
+      "generated": 470190654,
+      "units": 3,
+      "regions": 6,
+      "declined": 0,
+      "accepted": 2
+     }
+    }
+   ]
+  }
+ },
+ "hecbench/shmembench-cuda": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 4.756745413062163,
+     "rc": 0,
+     "timeout": false,
+     "hash": "2fa78b9ee9b1",
+     "load": 1.18408203125,
+     "jit": {
+      "compiles": 0,
+      "compile_ms": 0.0,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 0,
+      "region_insts": 0,
+      "generated": 0,
+      "units": 1,
+      "regions": 66,
+      "declined": 1,
+      "accepted": 0
+     }
+    }
+   ]
+  }
+ },
+ "samples/reduction": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 9.573888986022212,
+     "rc": 0,
+     "timeout": false,
+     "hash": "c02d7cf33582",
+     "load": 1.78466796875,
+     "jit": {
+      "compiles": 2,
+      "compile_ms": 1736.9,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 149183,
+      "region_insts": 346525889,
+      "generated": 266592460,
+      "units": 3,
+      "regions": 9,
+      "declined": 0,
+      "accepted": 2
+     }
+    }
+   ]
+  }
+ },
+ "samples/transpose": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 14.868643832975067,
+     "rc": 0,
+     "timeout": false,
+     "hash": "f38ba51305e7",
+     "load": 1.912109375,
+     "jit": {
+      "compiles": 8,
+      "compile_ms": 7561.1,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 13208967,
+      "region_insts": 341844975,
+      "generated": 292295813,
+      "units": 8,
+      "regions": 14,
+      "declined": 0,
+      "accepted": 8
+     }
+    }
+   ]
+  }
+ },
+ "samples/segmentationTreeThrust": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 106.73316901200451,
+     "rc": 0,
+     "timeout": false,
+     "hash": "ea32fc4cbbc8",
+     "load": 2.0302734375,
+     "jit": {
+      "compiles": 22,
+      "compile_ms": 76046.1,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 61410325,
+      "region_insts": 393714431,
+      "generated": 341663693,
+      "units": 29,
+      "regions": 1497,
+      "declined": 1,
+      "accepted": 22
+     }
+    }
+   ]
+  }
+ },
+ "samples/cudaTensorCoreGemm": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 13.659489569021389,
+     "rc": 0,
+     "timeout": false,
+     "hash": "d8476edd791f",
+     "load": 1.49560546875,
+     "jit": {
+      "compiles": 0,
+      "compile_ms": 0.0,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 0,
+      "region_insts": 0,
+      "generated": 0,
+      "units": 2,
+      "regions": 78,
+      "declined": 1,
+      "accepted": 0
+     }
+    }
+   ]
+  }
+ },
+ "hecbench/atomicAggregate-cuda": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 5.26133884198498,
+     "rc": 0,
+     "timeout": false,
+     "hash": "b8d757fe82db",
+     "load": 1.35498046875,
+     "jit": {
+      "compiles": 1,
+      "compile_ms": 986.2,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 14672782,
+      "region_insts": 126775758,
+      "generated": 97964189,
+      "units": 1,
+      "regions": 3,
+      "declined": 0,
+      "accepted": 1
+     }
+    }
+   ]
+  }
+ },
+ "rodinia/gaussian": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 6.521350066061132,
+     "rc": 0,
+     "timeout": false,
+     "hash": "48bd2c5aca76",
+     "load": 1.63134765625,
+     "jit": {
+      "compiles": 2,
+      "compile_ms": 2939.8,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 15445319,
+      "region_insts": 146246043,
+      "generated": 137624280,
+      "units": 2,
+      "regions": 10,
+      "declined": 0,
+      "accepted": 2
+     }
+    }
+   ]
+  }
+ },
+ "samples/alignedTypes": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 59.28112457902171,
+     "rc": 0,
+     "timeout": false,
+     "hash": "fd4503c7f5ac",
+     "load": 1.44287109375,
+     "jit": {
+      "compiles": 8,
+      "compile_ms": 11480.4,
+      "hits": 1,
+      "failures": 0,
+      "region_calls": 497148,
+      "region_insts": 695769647,
+      "generated": 442260257,
+      "units": 12,
+      "regions": 36,
+      "declined": 3,
+      "accepted": 9
+     }
+    }
+   ]
+  }
+ },
+ "samples/radixSortThrust": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 45.923651479999535,
+     "rc": 0,
+     "timeout": false,
+     "hash": "fd40fe9ee61a",
+     "load": 1.18505859375,
+     "jit": {
+      "compiles": 1,
+      "compile_ms": 6067.1,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 32321310,
+      "region_insts": 242815336,
+      "generated": 201212436,
+      "units": 3,
+      "regions": 336,
+      "declined": 2,
+      "accepted": 1
+     }
+    }
+   ]
+  }
+ },
+ "polybench/FDTD-2D": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 88.6355514129391,
+     "rc": 0,
+     "timeout": false,
+     "hash": "e33710eb6db6",
+     "load": 1.41357421875,
+     "jit": {
+      "compiles": 3,
+      "compile_ms": 2632.8,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 393191342,
+      "region_insts": 4783160631,
+      "generated": 3997000742,
+      "units": 3,
+      "regions": 7,
+      "declined": 0,
+      "accepted": 3
+     }
+    }
+   ]
+  }
+ }
+}

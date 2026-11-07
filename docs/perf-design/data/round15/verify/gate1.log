@@ -1,0 +1,9 @@
+=== shard tier 07:17:03
+ok   sm_86 sass_tier  (30 units (253 regions), 30 ready, 0 cache hits, 30 compiles (94225.7 ms), 0 failures, 0 damaged objects replaced; 226243 region calls ran 1228455 warp instructions (905910 computed by generated code), 0 exceptions unwound through them; share rule: 0 declined, 0 accepted)
+PASS
+=== shard tier rc=0 07:20:08
+=== shard steps 07:20:08
+FAIL sm_86 sass_tier_steps: only 0 of the faults were thrown inside a generated region
+FAIL: the tier and the JIT differ
+=== shard steps rc=1 07:34:21
+=== shard steps_gather 07:34:21
