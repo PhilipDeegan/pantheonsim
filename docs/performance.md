@@ -7470,3 +7470,81 @@ The microbenchmark of `simd::kernels().hmma` (f16, K 16, 64 distinct operand set
 * Not covered by the new IMMA path: s4/u4 (`four`), `.SAT`, M 8 (IMMA.8816/8832), mixed K; HMMA tf32 (kind 2, chunk 4) and the f16 accumulator. They take the old routes.
 * Left in the profile after these changes: cudaTensorCoreGemm is 72 % in the fragment kernel (units 54 %, decode and conversions 18 %; about 3,350 instructions a call, mostly 512-bit ALU on Zen 4), `load_batch` 7.6 %; immaTensorCoreGemm is 40 % `imma_frag_m16n8`, 14 % `load_batch`, 12 % `step_warp`, 9 % `h_imma`, 4.5 % `random` (the sample's own host initialisation). `load_batch` is two calls (one a half) per 16-byte load; a batch call for 16-byte pieces would make one lookup and one pass of it.
 * Measured at one thread on a shared host: cpu 12, the other hardware thread of cpu 13's core, is another session's timing cpu, and the A/A controls above (0.1 to 0.3 % in cycles) are the noise of those runs. A canary run made while another session compiled on every CPU (load 19 to 30) moved every row by 10 to 40 % in both builds and was discarded.
+
+## Round sp32 (memoisation): measured, not built (branch `sp32-memo`, base `origin/main` 7d8d98a4)
+
+Question: can an opt-in, launch-level result cache (`VGPU_MEMO=1`: key = kernel, grid, block, shared bytes, argument bytes, content of every device range the launch can read; a hit replays the written bytes and the counters) skip enough work, soundly, to matter? `docs/perf-design/03-result-memoisation.md` measured fixed points on the argument-reachable allocations only. This round measured the real key, over every live allocation, on the pantheon workloads and on the Phase 0 corpus. Nothing was built: the gate below failed on two of its three conditions. The instrument was throw-away (a per-launch hook in `Device::launch`, kept as a patch outside the tree), and nothing in this tree changes behaviour.
+
+### What was measured
+Release build of origin/main plus the hook, server2 (Zen 5), one thread, `taskset`, one heavy job at a time. For each launch the hook reads every live allocation (so the key covers the whole read set, a superset of what any kernel can read through device pointers), hashes it by 4 KiB page, and computes: the key; the hash of all memory after the launch and a digest of every counter (to check that equal keys give equal results); the launch's warp instructions and wall time; the pages that changed during the launch (what a hit replays) and the pages that changed between one launch's end and the next one's start (host writes). Pantheon: 40 workloads built from pantheon `ae46a79` with nvcc 13.0 (`-cudart shared`), `nvidia/a10`, 1 GiB, 3 s, `--kernel_loops 2 --warmup_iters 1 --grid_size 4`, every workload run twice (the second run asks "would a cache filled by the first have hit?"). `pcie_bandwidth` and `p2p_thrasher` were skipped by the hook (live memory over its 256 MiB cap); `rt_virus`, `media_enc_virus`, `idle`, `ras_validator` were not run. Corpus: the first 41 of the 124 NVIDIA programs of Phase 0 (all of PolyBench/GPU and Rodinia, then HeCBench in order; the run was stopped there because each launch reads all live memory and the box is shared).
+
+Hash throughput of the hook: 15 to 26 GB/s per page loop (the same 4 KiB-page 4-lane multiply hash a real implementation would use; the hook's extra copy out of the chunks is not counted).
+
+### Pantheon workloads (A10; hit = key seen earlier in the same run)
+Columns: launches in the 3 s run; share of launches and of warp instructions in launches that hit; share of launches that hit in run 2 with run 1's keys as the cache; what hashing every live allocation before every launch costs as a share of the kernels' run time (brute force); the same if only pages written since the last launch (by the host or by the previous kernel) were hashed (incremental, at the measured throughput; it assumes a sound dirty source exists).
+
+| workload | launches | hit % launches | hit % warp inst | run 2 hit % | brute hash / run | incremental / run |
+|---|---:|---:|---:|---:|---:|---:|
+| all_reduce | 65 | 92.3 | 92.9 | 100.0 | 0 | 61.9 | 75.1 |
+| allocation_fragmentation | 528 | 0.0 | 0.0 | 84.9 | 0 | 158.2 | 164.1 |
+| atomic_virus | 59 | 1.7 | 1.7 | 98.3 | 0 | 2.1 | 2.2 |
+| cache_latency | 851 | 0.1 | 0.0 | 89.4 | 0 | 826.9 | 2.3 |
+| compute_virus | 210738 | 100.0 | 100.0 | 100.0 | 0 | 2.1 | 0.0 |
+| fp64_virus | 80659 | 100.0 | 100.0 | 100.0 | 0 | 1.2 | 0.0 |
+| fused_attention | 755 | 99.6 | 93.8 | 100.0 | 0 | 189.2 | 0.5 |
+| galpat | 4 | 50.0 | 66.5 | 100.0 | 0 | 0.1 | 0.1 |
+| graph_replay | 737 | 99.6 | 91.9 | 100.0 | 0 | 370.3 | 1.0 |
+| int_virus | 126593 | 0.0 | 0.0 | 100.0 | 0 | 1.3 | 1.3 |
+| kv_cache_churn | 719 | 0.0 | 0.0 | 99.6 | 0 | 515.2 | 2.4 |
+| llm_decode | 305 | 99.0 | 65.9 | 100.0 | 0 | 434.3 | 2.8 |
+| llm_prefill | 638 | 99.5 | 94.0 | 100.0 | 0 | 190.3 | 0.6 |
+| march_test | 34 | 97.1 | 97.1 | 97.1 | 0 | 1.1 | 0.0 |
+| memory_bank_thrash | 931 | 99.9 | 99.9 | 100.0 | 0 | 2182.3 | 2.3 |
+| memory_cache_fracture | 877 | 99.9 | 99.9 | 100.0 | 0 | 2030.3 | 2.3 |
+| memory_hammer | 687 | 99.7 | 80.7 | 100.0 | 0 | 365.0 | 1.1 |
+| memory_pc_pingpong | 490 | 0.2 | 0.2 | 100.0 | 0 | 48.1 | 0.1 |
+| memory_read | 376 | 99.5 | 99.0 | 100.0 | 0 | 24.1 | 0.1 |
+| memory_retention | 1 | 0.0 | 0.0 | 100.0 | 0 | 7.9 | 15.9 |
+| memory_retention_bake | 748 | 99.7 | 90.6 | 100.0 | 0 | 1689.5 | 4.5 |
+| memory_thermal_asym | 940 | 99.9 | 99.9 | 100.0 | 0 | 1226.6 | 1.3 |
+| memory_tsv_thrasher | 465 | 99.6 | 99.6 | 100.0 | 0 | 45.0 | 0.1 |
+| memory_write | 216 | 99.1 | 99.1 | 100.0 | 0 | 9.5 | 0.1 |
+| mma_virus | 28924 | 100.0 | 100.0 | 100.0 | 0 | 0.3 | 0.0 |
+| moe_router | 724 | 99.6 | 89.2 | 100.0 | 0 | 367.5 | 1.0 |
+| omni_virus | 984 | 99.1 | 99.2 | 100.0 | 0 | 720.6 | 0.7 |
+| pulse_virus | 61 | 1.6 | 1.6 | 100.0 | 0 | 1.3 | 1.3 |
+| quantized_gemm | 692 | 99.6 | 95.9 | 100.0 | 0 | 382.6 | 1.1 |
+| rag_embedding | 426 | 99.3 | 98.6 | 100.0 | 0 | 37.2 | 0.2 |
+| rope_stress | 587 | 99.5 | 92.6 | 100.0 | 0 | 84.8 | 0.3 |
+| scheduler_virus | 282300 | 0.0 | 0.0 | 100.0 | 0 | 1.9 | 6.6 |
+| serving_mix | 615 | 99.5 | 97.2 | 100.0 | 0 | 105.8 | 0.3 |
+| sfu_stress | 109990 | 0.0 | 0.0 | 100.0 | 0 | 1.3 | 1.3 |
+| speculative_decode | 677 | 99.6 | 89.3 | 100.0 | 0 | 458.1 | 1.4 |
+| tensor_virus | 139747 | 99.8 | 99.8 | 100.0 | 0 | 1.5 | 1.5 |
+| tlb_avalanche | 721 | 0.1 | 0.1 | 97.0 | 0 | 1686.1 | 5.0 |
+| transformer_train_step | 672 | 99.6 | 95.3 | 100.0 | 0 | 475.3 | 1.4 |
+| transformer_virus | 21377 | 0.0 | 0.0 | 100.0 | 0 | 0.2 | 0.2 |
+| vision_encoder | 630 | 99.5 | 97.2 | 100.0 | 0 | 119.1 | 0.4 |
+
+Equal keys with a different result (post-state hash or counters digest): **0** over 473,537 same-run hits and every run-2 hit. Workloads with 0 % in run 1 and 100 % in run 2 (`int_virus`, `pulse_virus`, `scheduler_virus`, `sfu_stress`, `transformer_virus`) accumulate into a buffer (`sink[tid] += ...`): no launch repeats a state inside a run, but a second run walks the same states (the cache would be exhausted when run 2 outruns run 1: these runs are time-bound).
+
+Because these workloads loop until a wall-clock duration ends, "share of warp instructions in launches that hit" here is the share of an unmodified run; with a cache the loop would simply turn faster. The ratio of a hit's cost (a lookup plus a replay of 0 to a few pages) to a launch's (2 us to 50 ms) is the potential: for the 20-odd workloads at 99 to 100 % hits the speed-up is bounded by the loop's own host work.
+
+### Phase 0 corpus (41 programs, run 1 then run 2)
+No program hits inside a run: 0 hits in the 3,300-odd launches of run 1 outside the pantheon table (each launch starts from a state the previous launch changed, and the programs do not repeat a kernel on an unchanged state). With a cache filled by an earlier run of the same program the hit rate is 100 % for 36 of the 41 programs (instruction-weighted mean 89.6 %); the others are `axpby-cuda` (0), `backprop` (50), `lavaMD` (0), `particlefilter_float` (0), `sc_gpu` (0): host-side `rand()`/time seeds change the input. Equal keys with different results: 0. The value on the corpus is therefore the persistent cache (a re-run of a deterministic program), not the in-run cache.
+
+Cost of the key on the corpus, share of kernel run time (whole-program wall time is larger, so this overstates the share of the run): hashing every live allocation before every launch costs 5.0 % over the 41 programs together and more than 5 % on 10 of them (`3DCONV` 339 %, `ADI` 691 %, `needle` 144 %, `aop` 49 %, `GRAMSCHM` 39 %); the incremental figure is 0.7 % together, over 5 % on four (`needle` 18.9 %, `asyncAllocation` 8.3 %, `sc_gpu` 8.1 %, `attention` 7.2 %). On the pantheon table the brute figure is over 5 % on 28 of 40 workloads.
+
+### Gate
+1. At least three pantheon workloads with at least 50 % of warp instructions in launches that hit: **passed** (27 of 40 at 90 % or more; compute_virus, fp64_virus, mma_virus and tensor_virus at 100 %).
+2. Miss-path overhead under 5 % on the corpus: **failed** for the only mechanism that needs no engine change (hash all live memory: over 5 % on 10 of 41 corpus rows and 28 of 40 pantheon rows, up to 8x the kernel time). The incremental figure is under 5 % on 37 of 41 rows but is a lower bound: it needs a sound record of which pages were written, and the simulator has none. Stores reach memory through about fifteen entry points (`store_scalar`, `store_batch`, `store_run`, `store_strided`, `batch_store`, `store_quad`, the `rmw_*` and `atomic_*` families, `atomic_word_ptrs`, which hands out raw word pointers, `fill`, `write`, `copy_to`) plus the JIT tier; a dirty bit in each is an engine change on the hottest path of the project with its layout-lottery history, and was not measured. Marking at allocation granularity is sound and cheap but rehashes a whole 20 MB allocation for a 12 us kernel.
+3. A hit replays exactly (post-state, counters, digest, error state), shown by a differential test: **not shown**. The study shows the precondition (equal keys give equal results, 0 mismatches over about 470,000 launches), not a replay, and replay was not built.
+Verdict: stop here, as the brief says.
+
+### What a build would need (so the next round does not repeat the measurement)
+* The read-set key is not the problem; the cost of getting it is. A different formulation avoids hashing memory at all: identify the memory state by its history, `S(n+1) = H(S(n), launch descriptor)` for a cacheable launch and `H(S(n), hash of the bytes)` for each host write, fill and copy (all cold, all in `MemoryManager` and the runtime copy paths), starting from the empty device. Equal history means equal state when execution is deterministic, which is what the 0 mismatches above test. A launch the cache cannot represent (atomics across blocks, printf, device malloc, cooperative or cluster launches, textures, host-mapped or managed memory, another device writing, any fault armed) sets the state to a fresh unique id, and nothing hits until the next whole-memory canonicalisation. Cost of a hit: one lookup and the replay; cost of a miss: nothing on the key.
+* What remains is capturing the write set of a miss. Without store tracking it is a before/after diff of live memory, the brute-force figure again, so it needs a budget (record only while recording costs under 5 % of the simulated time so far; an unrecorded launch poisons the state). That is the shape that could meet condition 2 by construction, at the price of a lower hit rate on the corpus's first run.
+* Soundness items found while reading the launch path: the key must also cover the kernel's code and its constant banks (the study keyed on the kernel name), `__constant__` and module globals (module globals are live allocations, so covered by the content hash, but not by a history key unless module load is a hashed event), textures and surfaces, the launch environment (`VGPU_THREADS`, lockstep mode, step limit), and the profile. Replay must call `report_counters` with the stored `LaunchStats` (so `VGPU_COUNTERS_FILE` records match, apart from the launch sequence number) and `telemetry_->note_kernel`.
+* The pantheon logic that sits around the launch (verification passes, `--inject_error`, `vgpu fault`) must keep running the kernel: any armed fault, `VGPU_MAX_STEPS`, race detector, tracing, `--profile` and the debugger turn the cache off.
+
+Raw tables and scripts: `~/.cache/pantheonsim-briefs/sp32/` (`pan_table.md`, `corp_table.md`, `memo-study.patch`, `study_corpus.py`, `analyse.py`, `agg.py`). Server2 was cleaned (`/tmp/sp32` removed, `df -h /` 993 G used, 2.5 T free).
