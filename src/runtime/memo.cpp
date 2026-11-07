@@ -1,0 +1,1149 @@
+// Launch-level result caching (vgpu/memo.hpp, vgpu/runtime/memo.hpp). See docs/performance.md, "Round sp35".
+#include "vgpu/runtime/memo.hpp"
+
+#include <dirent.h>
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cinttypes>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <random>
+#include <set>
+#include <variant>
+
+#include "vgpu/profiling.hpp"
+#include "vgpu/ptx/ast.hpp"
+#include "vgpu/sass/exec.hpp"
+
+extern char** environ;
+
+namespace vgpu::memo {
+
+namespace {
+
+inline uint64_t now_ns() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+inline bool is_device_ptr(uint64_t v) { return v >= kDeviceVaBase && v < kDeviceVaEnd; }
+
+// Whether any aligned word of the `n` bytes at device address `addr` could be a device address.
+bool has_pointer_like(uint64_t addr, const uint8_t* p, uint64_t n) {
+  uint64_t i = (8 - addr % 8) % 8;
+  for (; i + 8 <= n; i += 8) {
+    uint64_t w;
+    std::memcpy(&w, p + i, 8);
+    if (is_device_ptr(w)) return true;
+  }
+  return false;
+}
+
+std::string hex128(const Hash128& h) {
+  char b[40];
+  std::snprintf(b, sizeof b, "%016" PRIx64 "%016" PRIx64, h.a, h.b);
+  return b;
+}
+
+uint64_t env_u64(const char* name, uint64_t dflt) {
+  const char* e = std::getenv(name);
+  if (!e || !*e) return dflt;
+  return std::strtoull(e, nullptr, 10);
+}
+
+// The identity of the code this runs: a hash of the shared object (or executable) that holds this function, once per
+// process. A rebuild is a different simulator and must not replay what the old one wrote.
+Hash128 build_identity() {
+  static const Hash128 id = [] {
+    Hasher h(0x6275696c);
+#ifdef VGPU_VERSION
+    h.str(VGPU_VERSION);
+#endif
+    Dl_info info{};
+    std::string path = "/proc/self/exe";
+    if (dladdr(reinterpret_cast<void*>(&build_identity), &info) && info.dli_fname && *info.dli_fname) path = info.dli_fname;
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f && path != "/proc/self/exe") f = std::fopen("/proc/self/exe", "rb");
+    if (f) {
+      std::vector<uint8_t> buf(1 << 20);
+      Hasher body(0x66696c65);
+      uint64_t total = 0;
+      size_t n;
+      while ((n = std::fread(buf.data(), 1, buf.size(), f)) > 0) {
+        body.hash(hash_bytes(buf.data(), n));
+        total += n;
+      }
+      std::fclose(f);
+      body.u64(total);
+      h.hash(body.done());
+    }
+    return h.done();
+  }();
+  return id;
+}
+
+Hash128 fresh_root() {
+  static std::atomic<uint64_t> counter{0};   // process-wide: two devices, or two caches in one process, never share a root
+  const uint64_t seq = counter.fetch_add(1);
+  static const uint64_t seed = [] {
+    std::random_device rd;
+    return (uint64_t{rd()} << 32) ^ rd() ^ (static_cast<uint64_t>(::getpid()) << 17) ^ now_ns();
+  }();
+  Hasher h(0x706f6973);
+  h.u64(seed), h.u64(seq);
+  return h.done();
+}
+
+}  // namespace
+
+Config Config::from_env() {
+  Config c;
+  const char* e = std::getenv("VGPU_MEMO");
+  c.enabled = e && e[0] && e[0] != '0';
+  if (const char* d = std::getenv("VGPU_MEMO_DIR"); d && *d) c.dir = d;
+  c.disk_cap = env_u64("VGPU_MEMO_MAX_MB", 4096) << 20;
+  c.mem_cap = env_u64("VGPU_MEMO_MEM_MB", 512) << 20;
+  c.entry_cap = env_u64("VGPU_MEMO_ENTRY_MB", 256) << 20;
+  if (const char* b = std::getenv("VGPU_MEMO_BUDGET"); b && *b) {
+    if (std::strcmp(b, "inf") == 0) c.force_record = true;
+    else c.budget = std::atof(b);
+  }
+  c.verify = static_cast<int>(env_u64("VGPU_MEMO_VERIFY", 0));
+  if (const char* m = std::getenv("VGPU_MEMO_TEST_MUTANT"); m && *m) c.mutant = m;
+  return c;
+}
+
+// ---- the store: memory, then disk -------------------------------------------------------------------------------
+
+struct DeviceMemo::Store {
+  explicit Store(const Config& c) : cfg(c) {
+    if (!cfg.dir.empty()) {
+      ::mkdir(cfg.dir.c_str(), 0777);
+      scan_disk();
+    }
+  }
+
+  using Ptr = std::shared_ptr<const Entry>;
+
+  struct Item {
+    Hash128 key;
+    Ptr e;
+    uint64_t bytes;
+  };
+  struct KeyHash {
+    size_t operator()(const Hash128& k) const { return static_cast<size_t>(k.a ^ (k.b * 0x9e3779b97f4a7c15ull)); }
+  };
+
+  Config cfg;
+  std::list<Item> lru;   // front: most recently used
+  std::unordered_map<Hash128, std::list<Item>::iterator, KeyHash> index;
+  uint64_t held = 0;
+  uint64_t disk_bytes = 0;
+  uint64_t tmp_seq = 0;
+  std::mutex io_mu;
+
+  std::string path_for(const Hash128& k) const {
+    const std::string h = hex128(k);
+    return cfg.dir + "/" + h.substr(0, 2) + "/" + h + ".vgm";
+  }
+
+  void scan_disk() {
+    uint64_t total = 0;
+    if (DIR* d = ::opendir(cfg.dir.c_str())) {
+      while (const dirent* ent = ::readdir(d)) {
+        if (ent->d_name[0] == '.') continue;
+        const std::string sub = cfg.dir + "/" + ent->d_name;
+        if (DIR* s = ::opendir(sub.c_str())) {
+          while (const dirent* f = ::readdir(s)) {
+            if (f->d_name[0] == '.') continue;
+            struct stat st;
+            if (::stat((sub + "/" + f->d_name).c_str(), &st) == 0) total += static_cast<uint64_t>(st.st_size);
+          }
+          ::closedir(s);
+        }
+      }
+      ::closedir(d);
+    }
+    disk_bytes = total;
+  }
+
+  Ptr find_memory(const Hash128& k) {
+    const auto it = index.find(k);
+    if (it == index.end()) return nullptr;
+    lru.splice(lru.begin(), lru, it->second);
+    return it->second->e;
+  }
+
+  void put_memory(const Hash128& k, Ptr e) {
+    const uint64_t b = e->bytes();
+    if (b > cfg.mem_cap) return;
+    if (const auto it = index.find(k); it != index.end()) {
+      held -= it->second->bytes;
+      lru.erase(it->second);
+      index.erase(it);
+    }
+    lru.push_front(Item{k, std::move(e), b});
+    index[k] = lru.begin();
+    held += b;
+    while (held > cfg.mem_cap && lru.size() > 1) {
+      const Item& last = lru.back();
+      held -= last.bytes;
+      index.erase(last.key);
+      lru.pop_back();
+    }
+  }
+
+  // ---- disk format: header, counters, runs, a hash of all of it ----
+  static constexpr char kMagic[8] = {'V', 'G', 'M', 'E', 'M', '0', '3', 0};
+
+  static void put_u64(std::vector<uint8_t>& v, uint64_t x) {
+    uint8_t b[8];
+    std::memcpy(b, &x, 8);
+    v.insert(v.end(), b, b + 8);
+  }
+
+  bool write_disk(const Hash128& k, const Entry& e) {
+    std::lock_guard<std::mutex> io(io_mu);
+    std::vector<uint8_t> v;
+    v.insert(v.end(), kMagic, kMagic + 8);
+    put_u64(v, k.a), put_u64(v, k.b);
+    put_u64(v, exec::kCounterWords), put_u64(v, e.stats.inst_by_opcode.size());
+    put_u64(v, e.exec_ns), put_u64(v, e.runs.size());
+    const uint8_t* cw = reinterpret_cast<const uint8_t*>(&e.stats);
+    v.insert(v.end(), cw, cw + exec::kCounterWords * 8);
+    for (uint64_t x : e.stats.inst_by_opcode) put_u64(v, x);
+    for (const Run& r : e.runs) {
+      put_u64(v, r.addr), put_u64(v, r.len), put_u64(v, (r.uniform ? 1u : 0u) | (uint64_t{r.byte} << 8));
+      if (!r.uniform) v.insert(v.end(), r.data.begin(), r.data.end());
+    }
+    const Hash128 sum = hash_bytes(v.data(), v.size());
+    put_u64(v, sum.a), put_u64(v, sum.b);
+    const std::string final_path = path_for(k);
+    ::mkdir((cfg.dir + "/" + hex128(k).substr(0, 2)).c_str(), 0777);
+    char tmp[512];
+    std::snprintf(tmp, sizeof tmp, "%s.tmp.%d.%" PRIu64, final_path.c_str(), static_cast<int>(::getpid()), tmp_seq++);
+    std::FILE* f = std::fopen(tmp, "wb");
+    if (!f) return false;
+    const bool ok = std::fwrite(v.data(), 1, v.size(), f) == v.size();
+    if (std::fclose(f) != 0 || !ok) {
+      ::unlink(tmp);
+      return false;
+    }
+    if (::rename(tmp, final_path.c_str()) != 0) {
+      ::unlink(tmp);
+      return false;
+    }
+    disk_bytes += v.size();
+    return true;
+  }
+
+  Ptr read_disk(const Hash128& k) {
+    std::lock_guard<std::mutex> io(io_mu);
+    const std::string p = path_for(k);
+    std::FILE* f = std::fopen(p.c_str(), "rb");
+    if (!f) return nullptr;
+    std::vector<uint8_t> v;
+    {
+      std::fseek(f, 0, SEEK_END);
+      const long n = std::ftell(f);
+      std::fseek(f, 0, SEEK_SET);
+      if (n < 0) {
+        std::fclose(f);
+        return nullptr;
+      }
+      v.resize(static_cast<size_t>(n));
+      if (std::fread(v.data(), 1, v.size(), f) != v.size()) {
+        std::fclose(f);
+        return nullptr;
+      }
+    }
+    std::fclose(f);
+    const auto bad = [&]() -> Ptr {
+      ::unlink(p.c_str());   // a file that does not parse is not an entry
+      return nullptr;
+    };
+    if (v.size() < 8 + 6 * 8 + 16 || std::memcmp(v.data(), kMagic, 8) != 0) return bad();
+    const Hash128 sum = hash_bytes(v.data(), v.size() - 16);
+    uint64_t sa, sb;
+    std::memcpy(&sa, v.data() + v.size() - 16, 8);
+    std::memcpy(&sb, v.data() + v.size() - 8, 8);
+    if (sum.a != sa || sum.b != sb) return bad();
+    size_t at = 8;
+    const auto u64 = [&]() {
+      uint64_t x;
+      std::memcpy(&x, v.data() + at, 8);
+      at += 8;
+      return x;
+    };
+    const size_t end = v.size() - 16;
+    const uint64_t ka = u64(), kb = u64();
+    if (ka != k.a || kb != k.b) return bad();
+    const uint64_t words = u64(), nops = u64(), exec_ns = u64(), nruns = u64();
+    if (words != exec::kCounterWords) return bad();
+    auto e = std::make_shared<Entry>();
+    if (at + words * 8 + nops * 8 > end) return bad();
+    std::memcpy(static_cast<void*>(&e->stats), v.data() + at, words * 8);
+    at += words * 8;
+    e->stats.inst_by_opcode.resize(static_cast<size_t>(nops));
+    for (uint64_t i = 0; i < nops; ++i) e->stats.inst_by_opcode[i] = u64();
+    e->exec_ns = exec_ns;
+    for (uint64_t i = 0; i < nruns; ++i) {
+      if (at + 24 > end) return bad();
+      Run r;
+      r.addr = u64(), r.len = u64();
+      const uint64_t fl = u64();
+      r.uniform = (fl & 1) != 0;
+      r.byte = static_cast<uint8_t>(fl >> 8);
+      if (!r.uniform) {
+        if (r.len > end - at) return bad();
+        r.data.assign(v.begin() + static_cast<long>(at), v.begin() + static_cast<long>(at + r.len));
+        at += r.len;
+      }
+      e->runs.push_back(std::move(r));
+    }
+    if (at != end) return bad();
+    // Use is recency: the least recently used entry goes first.
+    struct timespec ts[2] = {{0, UTIME_NOW}, {0, UTIME_NOW}};
+    ::utimensat(AT_FDCWD, p.c_str(), ts, 0);
+    return e;
+  }
+
+  void evict_disk(uint64_t* evicted) {
+    std::lock_guard<std::mutex> io(io_mu);
+    if (cfg.dir.empty() || disk_bytes <= cfg.disk_cap) return;
+    struct F {
+      std::string path;
+      time_t mtime;
+      uint64_t size;
+    };
+    std::vector<F> files;
+    uint64_t total = 0;
+    if (DIR* d = ::opendir(cfg.dir.c_str())) {
+      while (const dirent* ent = ::readdir(d)) {
+        if (ent->d_name[0] == '.') continue;
+        const std::string sub = cfg.dir + "/" + ent->d_name;
+        if (DIR* s = ::opendir(sub.c_str())) {
+          while (const dirent* f = ::readdir(s)) {
+            if (f->d_name[0] == '.') continue;
+            const std::string fp = sub + "/" + f->d_name;
+            struct stat st;
+            if (::stat(fp.c_str(), &st) == 0) {
+              files.push_back({fp, st.st_mtime, static_cast<uint64_t>(st.st_size)});
+              total += static_cast<uint64_t>(st.st_size);
+            }
+          }
+          ::closedir(s);
+        }
+      }
+      ::closedir(d);
+    }
+    std::sort(files.begin(), files.end(), [](const F& a, const F& b) { return a.mtime < b.mtime; });
+    const uint64_t goal = cfg.disk_cap / 10 * 9;
+    for (const F& f : files) {
+      if (total <= goal) break;
+      if (::unlink(f.path.c_str()) == 0) {
+        total -= f.size;
+        ++*evicted;
+      }
+    }
+    disk_bytes = total;
+  }
+};
+
+// ---- the device's cache -------------------------------------------------------------------------------------------
+
+namespace {
+
+std::mutex g_reg_mu;
+std::vector<DeviceMemo*>& registry() {
+  static auto* r = new std::vector<DeviceMemo*>;
+  return *r;
+}
+void report_all_at_exit();
+void register_memo(DeviceMemo* d) {
+  static const bool once = [] {
+    std::atexit(report_all_at_exit);
+    return true;
+  }();
+  (void)once;
+  std::lock_guard<std::mutex> g(g_reg_mu);
+  registry().push_back(d);
+}
+void unregister_memo(DeviceMemo* d) {
+  std::lock_guard<std::mutex> g(g_reg_mu);
+  auto& r = registry();
+  r.erase(std::remove(r.begin(), r.end(), d), r.end());
+}
+
+std::FILE* stats_file(bool* close) {
+  *close = false;
+  const char* path = std::getenv("VGPU_MEMO_STATS_FILE");
+  if (path && *path) {
+    if (std::FILE* f = std::fopen(path, "a")) {
+      *close = true;
+      return f;
+    }
+  }
+  const char* e = std::getenv("VGPU_MEMO_STATS");
+  if (e && e[0] && e[0] != '0') return stderr;
+  return nullptr;
+}
+
+void report_all_at_exit() {
+  std::vector<DeviceMemo*> all;
+  {
+    std::lock_guard<std::mutex> g(g_reg_mu);
+    all = registry();
+  }
+  bool close = false;
+  std::FILE* f = stats_file(&close);
+  if (!f) return;
+  for (DeviceMemo* d : all) d->report(f);
+  if (close) std::fclose(f);
+}
+
+}  // namespace
+
+DeviceMemo::DeviceMemo(MemoryManager& mem, const Config& cfg, const DeviceProfile& profile)
+    : mem_(mem), cfg_(cfg), profile_(profile_hash(profile)), build_(build_identity()), mutant_(cfg.mutant) {
+  store_ = std::make_unique<Store>(cfg_);
+  ptrs_ = false;   // an empty device holds no pointers
+  // The empty device is the one root every run of a program starts from: its history is its identity.
+  Hasher h(0x726f6f74);
+  if (!mut("key_no_profile")) h.hash(profile_);
+  h.hash(build_);
+  state_ = h.done();
+  register_memo(this);
+}
+
+DeviceMemo::~DeviceMemo() {
+  unregister_memo(this);
+  bool close = false;
+  if (std::FILE* f = stats_file(&close)) {
+    report(f);
+    if (close) std::fclose(f);
+  }
+}
+
+Hash128 DeviceMemo::profile_hash(const DeviceProfile& p) const {
+  Hasher h(0x70726f66);
+  h.str(p.id.c_str()), h.str(p.model.c_str()), h.str(p.vendor.c_str()), h.str(p.architecture.c_str());
+  h.u64(static_cast<uint64_t>(p.cc_major)), h.u64(static_cast<uint64_t>(p.cc_minor)), h.u64(p.warp_size), h.u64(p.vram_bytes);
+  const Limits& l = p.limits;
+  h.u64(l.max_threads_per_block);
+  for (uint32_t v : l.max_block_dim) h.u64(v);
+  for (uint32_t v : l.max_grid_dim) h.u64(v);
+  h.u64(l.shared_mem_per_block), h.u64(l.shared_mem_per_block_optin), h.u64(l.registers_per_block), h.u64(l.multiprocessors);
+  h.u64(l.registers_per_sm), h.u64(l.max_threads_per_sm), h.u64(l.max_blocks_per_sm), h.u64(l.max_registers_per_thread);
+  h.u64(l.shared_mem_per_sm), h.u64(l.l2_cache_bytes);
+  for (const auto& [k, v] : p.features) h.str(k.c_str()), h.u64(v ? 1 : 0);
+  return h.done();
+}
+
+Stats DeviceMemo::stats() const {
+  std::lock_guard<std::mutex> g(mu_);
+  return stats_;
+}
+
+Hash128 DeviceMemo::state() const {
+  std::lock_guard<std::mutex> g(mu_);
+  return state_;
+}
+
+void DeviceMemo::drop_memory_store() {
+  std::lock_guard<std::mutex> g(mu_);
+  store_->lru.clear();
+  store_->index.clear();
+  store_->held = 0;
+}
+
+void DeviceMemo::note_reason(const char* why) { ++stats_.reasons[why]; }
+
+// ---- events -------------------------------------------------------------------------------------------------------
+
+void DeviceMemo::poison_locked(const char* why) {
+  state_ = fresh_root();
+  ptrs_ = true;
+  cache_.clear();
+  ++stats_.poisoned;
+  note_reason(why);
+}
+
+// The state after a launch that changed memory: the key (S and the launch), or in the wrong rules the tests must catch,
+// a state that forgets the order or does not move.
+void DeviceMemo::advance_locked(const Ticket& t) {
+  if (mut("state_never_advances")) return;
+  if (mut("commutative_chain")) {
+    state_.a += t.desc.a, state_.b += t.desc.b;
+    return;
+  }
+  state_ = t.key;
+}
+
+void DeviceMemo::poison(const char* why) {
+  std::lock_guard<std::mutex> g(mu_);
+  poison_locked(why);
+}
+
+void DeviceMemo::invalidate_range_locked(uint64_t addr, uint64_t len) {
+  if (mut("no_cache_invalidation")) return;
+  auto it = cache_.upper_bound(addr);
+  if (it != cache_.begin()) --it;
+  while (it != cache_.end() && it->first < addr + len) {
+    if (it->first + it->second.size > addr) it->second.valid = false;
+    ++it;
+  }
+}
+
+void DeviceMemo::scan_pointers(uint64_t addr, const uint8_t* p, uint64_t len) {
+  if (!ptrs_ && has_pointer_like(addr, p, len)) ptrs_ = true;   // (caller holds mu_)
+}
+
+void DeviceMemo::on_write(uint64_t dst, const void* src, uint64_t len) {
+  if (t_scope == kReplay) return;
+  if (t_scope == kEngine) return;   // a kernel's store: the launch's diff has it
+  if (mut("no_write_event")) return;
+  const Hash128 bytes = src ? hash_bytes(src, static_cast<size_t>(len)) : Hash128{1, 2};
+  std::lock_guard<std::mutex> g(mu_);
+  Hasher h(0x77726974);
+  h.hash(state_), h.u64(dst), h.u64(len), h.hash(bytes);
+  state_ = h.done();
+  ++event_seq_;
+  invalidate_range_locked(dst, len);
+  if (src) scan_pointers(dst, static_cast<const uint8_t*>(src), len);
+}
+
+void DeviceMemo::on_fill(uint64_t dst, const uint8_t* pattern, uint32_t pattern_len, uint64_t len) {
+  if (t_scope != kHost) return;
+  if (mut("no_fill_event")) return;
+  std::lock_guard<std::mutex> g(mu_);
+  Hasher h(0x66696c6c);
+  h.hash(state_), h.u64(dst), h.u64(len), h.bytes(pattern, pattern_len);
+  state_ = h.done();
+  ++event_seq_;
+  invalidate_range_locked(dst, len);
+  if (!ptrs_ && pattern_len && pattern_len <= 8 && 8 % pattern_len == 0) {
+    uint8_t w[8];
+    for (int i = 0; i < 8; ++i) w[i] = pattern[static_cast<uint32_t>(i) % pattern_len];
+    uint64_t v;
+    std::memcpy(&v, w, 8);
+    if (is_device_ptr(v)) ptrs_ = true;
+  }
+}
+
+void DeviceMemo::on_copy(uint64_t dst, uint64_t src, uint64_t len) {
+  if (t_scope != kHost) return;
+  if (mut("no_copy_event")) return;
+  std::lock_guard<std::mutex> g(mu_);
+  Hasher h(0x636f7079);
+  h.hash(state_), h.u64(dst), h.u64(src), h.u64(len);
+  state_ = h.done();
+  ++event_seq_;
+  invalidate_range_locked(dst, len);
+}
+
+void DeviceMemo::on_alloc(uint64_t base, uint64_t size) {
+  if (t_scope == kReplay) return;
+  if (t_scope == kEngine) {
+    if (!mut("no_poison_taint")) tainted_.store(true, std::memory_order_relaxed);
+    return;
+  }
+  if (mut("no_alloc_event")) return;
+  std::lock_guard<std::mutex> g(mu_);
+  Hasher h(0x616c6c6f);
+  h.hash(state_), h.u64(base), h.u64(size);
+  state_ = h.done();
+  ++event_seq_;
+}
+
+void DeviceMemo::on_free(uint64_t ptr) {
+  if (t_scope == kReplay) return;
+  if (t_scope == kEngine) {
+    if (!mut("no_poison_taint")) tainted_.store(true, std::memory_order_relaxed);
+    return;
+  }
+  if (mut("no_free_event")) return;
+  std::lock_guard<std::mutex> g(mu_);
+  Hasher h(0x66726565);
+  h.hash(state_), h.u64(ptr);
+  state_ = h.done();
+  ++event_seq_;
+  cache_.erase(ptr);
+}
+
+void DeviceMemo::on_poison(const char* why) {
+  if (t_scope == kEngine) {
+    if (!mut("no_poison_taint")) tainted_.store(true, std::memory_order_relaxed);
+    return;
+  }
+  if (t_scope == kReplay) return;
+  if (mut("no_poison_vmm")) return;
+  std::lock_guard<std::mutex> g(mu_);
+  ++event_seq_;
+  poison_locked(why);
+}
+
+void DeviceMemo::forget_kernels() {
+  std::lock_guard<std::mutex> g(mu_);
+  device_calls_.clear();
+}
+
+// ---- which launches can be cached ----------------------------------------------------------------------------------
+
+bool DeviceMemo::kernel_has_device_calls(const ptx::EntryFn& fn) {
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    const auto it = device_calls_.find(&fn);
+    if (it != device_calls_.end()) return it->second;
+  }
+  // A kernel that mallocs or prints, or calls the device runtime (cuda*: launches, graph launches, conditionals,
+  // attribute queries), has effects outside memory that a replay would skip.
+  const auto bad = [](const std::string& f) {
+    return f == "malloc" || f == "free" || f == "vprintf" || f == "printf" || f.rfind("cuda", 0) == 0 || f.rfind("__cuda", 0) == 0 ||
+           f.rfind("__nv_cuda", 0) == 0;
+  };
+  bool found = false;
+  if (fn.sass)
+    for (const std::string& f : sass::reachable(*fn.sass, fn.name))
+      if (bad(f)) found = true;
+  std::set<const ptx::EntryFn*> seen;
+  std::vector<const ptx::EntryFn*> todo{&fn};
+  while (!todo.empty() && !found) {
+    const ptx::EntryFn* f = todo.back();
+    todo.pop_back();
+    if (!seen.insert(f).second) continue;
+    for (const auto& ins : f->body)
+      if (const auto* c = std::get_if<ptx::OpCall>(&ins.op)) {
+        if (bad(c->callee)) found = true;
+        if (c->target) todo.push_back(c->target);
+      }
+  }
+  std::lock_guard<std::mutex> g(mu_);
+  device_calls_[&fn] = found;
+  return found;
+}
+
+const char* DeviceMemo::ineligible(const KernelRef& k, Ticket& t) {
+  const exec::LaunchConfig& c = *k.cfg;
+  if (k.device_count > 1) return "multi-device";
+  if (!k.symbols_known) return "unknown-symbols";
+  if (!k.code_ok) return "unhashable-module";
+  if (c.cooperative || c.coop_workspace) return "cooperative";
+  if (c.cluster != std::array<uint32_t, 3>{0, 0, 0} || (k.fn && k.fn->req_cluster != std::array<uint32_t, 3>{0, 0, 0})) return "cluster";
+  if (c.warp_size) return "warp-size";
+  if (c.textures && !c.textures->empty() && !mut("no_poison_textures")) return "textures";
+  if (c.graph_launcher || c.current_graph_exec) return "device-graph";
+  const exec::LaunchEnv& e = *k.env;
+  if (e.race) return "env-race";
+  if (e.trace || e.sass_trace) return "env-trace";
+  if (e.max_steps) return "env-max-steps";
+  if (e.fail_alloc || e.fail_launch || e.fail_memcpy) return "env-fail-injection";
+  if (e.tier_stats) return "env-tier-stats";
+  if (profiling::enabled() || profiling::hooked()) return "profiling";
+  if (MemoryManager::memo_trace_active()) return "mem-trace";
+  if (mem_.memo_faults_armed() && !mut("no_poison_faults")) return "faults-armed";
+  if (mem_.memo_untrackable() && !mut("no_poison_vmm")) return "vmm-or-shared-memory";
+  if (k.fn && kernel_has_device_calls(*k.fn) && !mut("no_poison_device_calls")) return "device-runtime-call";
+  if (active_launches_.load(std::memory_order_relaxed) != 0 && !mut("no_poison_concurrent")) return "concurrent-launch";
+  const char* thr = k.env->threads;
+  t.sequential = thr && std::strcmp(thr, "1") == 0;
+  return nullptr;
+}
+
+// ---- the key ---------------------------------------------------------------------------------------------------------
+
+Hash128 DeviceMemo::launch_key(const KernelRef& k, const Hash128& state, const Ticket& t) const {
+  const exec::LaunchConfig& c = *k.cfg;
+  Hasher h(0x6c61756e);
+  if (!mut("key_no_state")) h.hash(state);
+  if (!mut("key_no_code")) h.hash(k.code);
+  h.str(k.name->c_str());
+  h.u64(k.sass ? 1 : 0);
+  if (!mut("key_no_profile")) h.hash(profile_);
+  h.hash(build_);
+  if (!mut("key_no_grid")) {
+    for (uint32_t v : c.grid) h.u64(v);
+    for (uint32_t v : c.block) h.u64(v);
+  }
+  if (!mut("key_no_shared")) h.u64(c.shared_bytes);
+  h.u64(c.work_dim), h.u64(static_cast<uint64_t>(c.scheduler)), h.u64(c.scheduler_seed), h.u64(c.max_steps);
+  for (uint32_t v : c.global_offset) h.u64(v);
+  h.u64(c.device_heap_bytes), h.u64(c.stack_bytes), h.u64(c.nonportable_cluster ? 1 : 0);
+  if (!mut("key_no_args")) {
+    h.u64(k.args->size());
+    for (const auto& a : *k.args) h.bytes(a.data(), a.size());
+  }
+  if (!mut("key_no_env")) {
+    // Every variable an engine reads per launch, and whether blocks run in order (the one thread count that matters).
+    const exec::LaunchEnv& e = *k.env;
+    const char* vars[] = {e.fastpath, e.tc_exact, e.strict, e.lockstep, e.scheduler, e.scheduler_seed, e.tier_chain};
+    for (const char* v : vars) {
+      h.u64(v ? 1 : 0);
+      if (v) h.str(v);
+    }
+    h.u64(t.sequential ? 1 : 0);
+  }
+  return h.done();
+}
+
+// ---- what a launch could write -----------------------------------------------------------------------------------------
+
+// The allocations a kernel can reach: every allocation an argument word points into, and the module's globals; when
+// device pointers may be stored in memory (a pointer table, a linked structure), every live allocation. False when a
+// host mapping is reachable (a kernel can write host memory, which no diff here sees).
+bool DeviceMemo::collect_bases(const KernelRef& k, Ticket& t) {
+  std::set<uint64_t> bases;
+  bool all;
+  bool host_maps = mem_.memo_host_maps();
+  bool reach_host = false;
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    all = ptrs_ && !mut("ptrs_never");
+  }
+  const auto note = [&](uint64_t v) {
+    if (is_device_ptr(v)) {
+      uint64_t base = 0, size = 0;
+      if (mem_.find_allocation(v, &base, &size)) bases.insert(base);
+    } else if (host_maps && mem_.memo_is_host_addr(v)) {
+      reach_host = true;
+    }
+  };
+  for (const auto& a : *k.args) {
+    const size_t step = a.size() <= 512 ? 1 : 4;
+    for (size_t i = 0; i + 8 <= a.size(); i += step) {
+      uint64_t w;
+      std::memcpy(&w, a.data() + i, 8);
+      note(w);
+    }
+  }
+  if (k.module_globals && !mut("skip_module_globals"))
+    for (uint64_t v : *k.module_globals) note(v);
+  if (all) {
+    for (const auto& [base, size] : mem_.live_ranges()) bases.insert(base), (void)size;
+    if (host_maps) reach_host = true;   // device pointers may be stored anywhere, host mappings are live: a kernel might write one
+  }
+  if (reach_host && !mut("no_poison_host_maps")) return false;
+  t.bases.assign(bases.begin(), bases.end());
+  return true;
+}
+
+uint64_t DeviceMemo::estimate_ns(const Ticket& t) {
+  uint64_t bytes = 0;
+  std::lock_guard<std::mutex> g(mu_);
+  for (uint64_t base : t.bases) {
+    const uint64_t m = mem_.memo_materialized(base);
+    bytes += m;                                                       // after
+    const auto it = cache_.find(base);
+    if (it == cache_.end() || !it->second.valid) bytes += m;           // and before
+  }
+  return static_cast<uint64_t>(static_cast<double>(bytes) / bw_ * 1e9) + 3000 + 400 * t.bases.size();
+}
+
+// The before-state of every allocation in t.bases, kept from the last launch's after-state when nothing touched it since.
+bool DeviceMemo::capture_before(Ticket& t, uint64_t* hashed) {
+  for (uint64_t base : t.bases) {
+    {
+      std::lock_guard<std::mutex> g(mu_);
+      const auto it = cache_.find(base);
+      if (it != cache_.end() && it->second.valid) continue;
+    }
+    std::vector<uint64_t> pages;
+    uint64_t mat = 0;
+    if (!mem_.memo_page_hashes(base, &pages, &mat)) return false;
+    *hashed += mat;
+    std::lock_guard<std::mutex> g(mu_);
+    PageCache& pc = cache_[base];
+    pc.pages = std::move(pages);
+    uint64_t sz = 0, bb = 0;
+    mem_.find_allocation(base, &bb, &sz);
+    pc.size = sz;
+    pc.valid = true;
+  }
+  return true;
+}
+
+// ---- the launch ----------------------------------------------------------------------------------------------------------
+
+bool DeviceMemo::begin(const KernelRef& k, Ticket& t, exec::LaunchStats* out_stats) {
+  const uint64_t t0 = now_ns();
+  const bool hit = begin_impl(k, t, out_stats);
+  if (t.active) t.begin_ns = now_ns() - t0;
+  return hit;
+}
+
+bool DeviceMemo::begin_impl(const KernelRef& k, Ticket& t, exec::LaunchStats* out_stats) {
+  t = Ticket{};
+  if (dormant_) {
+    std::lock_guard<std::mutex> g(mu_);
+    ++stats_.dormant_launches;
+    return false;
+  }
+  const uint64_t t0 = now_ns();
+  t.t_begin = t0;
+  t.active = true;
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    ++stats_.launches;
+  }
+  const char* why = ineligible(k, t);
+  if (!why) {
+    const exec::LaunchConfig& c = *k.cfg;
+    t.blocks = uint64_t{c.grid[0]} * c.grid[1] * c.grid[2];
+  }
+  if (why) {
+    t.why = why;
+    active_launches_.fetch_add(1);
+    tainted_.store(false, std::memory_order_relaxed);
+    return false;
+  }
+  Hash128 state;
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    state = state_;
+    t.seq0 = event_seq_;
+  }
+  t.key = launch_key(k, state, t);
+  t.desc = mut("commutative_chain") ? launch_key(k, Hash128{}, t) : t.key;
+  t.eligible = true;
+  t.why = *k.name;
+
+  // A stored result?
+  std::shared_ptr<const Entry> e;
+  bool from_disk = false;
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    e = store_->find_memory(t.key);
+  }
+  if (!e && !cfg_.dir.empty()) {
+    std::shared_ptr<const Entry> d = store_->read_disk(t.key);   // (file i/o outside the lock; the store is touched by one launching thread)
+    if (d) {
+      e = d;
+      from_disk = true;
+      std::lock_guard<std::mutex> g(mu_);
+      store_->put_memory(t.key, d);
+    }
+  }
+  if (e && cfg_.verify == 0) {
+    if (replay(*e)) {
+      const uint64_t dt = now_ns() - t0;
+      std::lock_guard<std::mutex> g(mu_);
+      ++stats_.hits;
+      if (from_disk) ++stats_.disk_hits;
+      stats_.hit_ns += dt;
+      stats_.saved_ns += e->exec_ns > dt ? e->exec_ns - dt : 0;
+      stats_.replay_bytes += e->bytes();
+      if (!e->runs.empty()) advance_locked(t);
+      *out_stats = e->stats;
+      if (mut("hit_zero_counters")) *out_stats = exec::LaunchStats{};
+      stats_.replayed_instructions += out_stats->instructions;
+      t.active = false;
+      return true;
+    }
+    std::lock_guard<std::mutex> g(mu_);
+    ++stats_.replay_refused;
+    e.reset();
+  }
+  if (e) t.verify_against = e;   // verify: run it for real and compare
+
+  // A miss. Is capturing its write set worth what it costs?
+  bool record = true;
+  if (!collect_bases(k, t)) {
+    t.eligible = false;
+    t.why = "host-map-reachable";
+    active_launches_.fetch_add(1);
+    tainted_.store(false, std::memory_order_relaxed);
+    return false;
+  }
+  if (!cfg_.force_record && !t.verify_against) {
+    const uint64_t est = estimate_ns(t);
+    std::lock_guard<std::mutex> g(mu_);
+    const double allowed = cfg_.budget * static_cast<double>(stats_.exec_ns) + static_cast<double>(cfg_.credit_ns);
+    record = static_cast<double>(stats_.fixed_ns + stats_.record_ns + est) <= allowed;
+  }
+  t.record = record;
+  if (record) {
+    uint64_t hashed = 0;
+    const uint64_t p0 = now_ns();
+    if (!capture_before(t, &hashed)) {
+      t.record = false;
+    } else {
+      const uint64_t dp = now_ns() - p0;
+      t.t_pre = dp;
+      if (hashed > (1u << 20) && dp) {
+        std::lock_guard<std::mutex> g(mu_);
+        bw_ = 0.7 * bw_ + 0.3 * (static_cast<double>(hashed) / static_cast<double>(dp) * 1e9);
+      }
+    }
+  }
+  active_launches_.fetch_add(1);
+  tainted_.store(false, std::memory_order_relaxed);
+  g_smid_by_worker.store(false, std::memory_order_relaxed);
+  return false;
+}
+
+bool DeviceMemo::replay(const Entry& e) {
+  // Every write is checked before the first is made: a refused replay leaves memory as it was.
+  for (const Run& r : e.runs) {
+    uint64_t base = 0, size = 0;
+    if (!mem_.find_allocation(r.addr, &base, &size) || r.addr + r.len > base + size || r.addr + r.len < r.addr) return false;
+    if (mem_.memo_host_maps() && (mem_.memo_is_host_addr(r.addr) || mem_.memo_is_host_addr(r.addr + r.len - 1))) return false;
+  }
+  ScopeGuard scope(kReplay);
+  for (const Run& r : e.runs) {
+    if (r.uniform) mem_.fill(r.addr, &r.byte, 1, r.len);
+    else mem_.write(r.addr, r.data.data(), r.len);
+  }
+  std::lock_guard<std::mutex> g(mu_);
+  for (const Run& r : e.runs) invalidate_range_locked(r.addr, r.len);
+  return true;
+}
+
+void DeviceMemo::abort(Ticket& t, const char* why) {
+  if (!t.active) return;
+  t.active = false;
+  active_launches_.fetch_sub(1);
+  poison(why);
+}
+
+void DeviceMemo::end(Ticket& t, const exec::LaunchStats& stats, uint64_t exec_ns) {
+  if (!t.active) return;
+  t.active = false;
+  active_launches_.fetch_sub(1);
+  const uint64_t t_end0 = now_ns();
+  // An ineligible launch ran; what it did to memory is not described by anything.
+  if (!t.eligible) {
+    std::lock_guard<std::mutex> g(mu_);
+    stats_.exec_ns += exec_ns;
+    stats_.fixed_ns += t.begin_ns + (now_ns() - t_end0);
+    ++executed_;
+    poison_locked(t.why.c_str());
+    return;
+  }
+  bool concurrent = false, taint = tainted_.load(std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    concurrent = event_seq_ != t.seq0;
+  }
+  const char* poison_why = nullptr;
+  if (concurrent && !mut("no_poison_concurrent")) poison_why = "concurrent-host-event";
+  else if (taint) poison_why = "device-side-alloc-or-free";
+  else if (stats.atomics > 0 && !t.sequential && !mut("no_poison_atomics")) poison_why = "atomics-on-several-threads";
+  else if (g_smid_by_worker.load(std::memory_order_relaxed) && !t.sequential && t.blocks > 1 && !mut("no_poison_smid"))
+    poison_why = "smid-by-host-thread";
+  if (poison_why) {
+    std::lock_guard<std::mutex> g(mu_);
+    stats_.exec_ns += exec_ns;
+    stats_.fixed_ns += t.begin_ns;
+    ++executed_;
+    poison_locked(poison_why);
+    return;
+  }
+
+  if (!t.record) {
+    // Ran, not captured: the kernel is deterministic as far as the cache knows, so the state advances by the launch and
+    // the before-states kept so far are stale.
+    std::lock_guard<std::mutex> g(mu_);
+    stats_.exec_ns += exec_ns;
+    stats_.fixed_ns += t.begin_ns + (now_ns() - t_end0);
+    ++stats_.unrecorded;
+    ++executed_;
+    advance_locked(t);
+    cache_.clear();
+    ptrs_ = true;
+    return;
+  }
+
+  // The after-state, and what changed.
+  Entry entry;
+  entry.stats = stats;
+  entry.exec_ns = exec_ns;
+  uint64_t hashed = 0;
+  bool ok = true;
+  struct Page {
+    uint64_t base;
+    uint64_t addr;
+    uint64_t len;
+  };
+  std::vector<Page> changed;
+  std::map<uint64_t, std::vector<uint64_t>> after;
+  for (uint64_t base : t.bases) {
+    std::vector<uint64_t> pages;
+    uint64_t mat = 0;
+    if (!mem_.memo_page_hashes(base, &pages, &mat)) {
+      ok = false;
+      break;
+    }
+    hashed += mat;
+    std::lock_guard<std::mutex> g(mu_);
+    const auto it = cache_.find(base);
+    if (it == cache_.end() || !it->second.valid || it->second.pages.size() != pages.size()) {
+      ok = false;
+      break;
+    }
+    uint64_t sz = it->second.size;
+    for (size_t i = 0; i < pages.size(); ++i)
+      if (pages[i] != it->second.pages[i]) {
+        const uint64_t off = static_cast<uint64_t>(i) * MemoryManager::kMemoPage;
+        changed.push_back({base, base + off, std::min<uint64_t>(MemoryManager::kMemoPage, sz - off)});
+      }
+    after[base] = std::move(pages);
+  }
+  if (!ok) {
+    // The allocation set moved under the launch (a free the launch could not have made): no entry, no claim.
+    std::lock_guard<std::mutex> g(mu_);
+    stats_.exec_ns += exec_ns;
+    ++executed_;
+    poison_locked("allocation-set-changed-in-launch");
+    return;
+  }
+  // Runs: consecutive changed pages read as one.
+  uint64_t total = 0;
+  std::vector<uint8_t> buf;
+  for (size_t i = 0; i < changed.size();) {
+    size_t j = i + 1;
+    uint64_t len = changed[i].len;
+    while (j < changed.size() && changed[j].base == changed[i].base && changed[j].addr == changed[j - 1].addr + changed[j - 1].len &&
+           changed[j - 1].len == MemoryManager::kMemoPage) {
+      len += changed[j].len;
+      ++j;
+    }
+    Run r;
+    r.addr = changed[i].addr;
+    r.len = len;
+    buf.resize(static_cast<size_t>(len));
+    mem_.read(r.addr, buf.data(), len);
+    bool uni = true;
+    for (uint64_t x = 1; x < len && uni; ++x) uni = buf[x] == buf[0];
+    if (uni) {
+      r.uniform = true;
+      r.byte = buf[0];
+    } else {
+      r.data = buf;
+    }
+    total += uni ? 32 : len + 32;
+    if (total > cfg_.entry_cap) break;
+    entry.runs.push_back(std::move(r));
+    i = j;
+  }
+  const bool oversize = total > cfg_.entry_cap;
+  if (mut("drop_byte") && !entry.runs.empty()) {
+    Run& r = entry.runs.back();
+    if (!r.uniform && !r.data.empty()) r.data.back() ^= 0x5a;
+    else if (r.uniform) r.byte ^= 0x5a;
+  }
+
+  // What the pointer scan of the new bytes says about device pointers living in memory.
+  bool new_ptrs = false;
+  for (const Run& r : entry.runs)
+    if (!r.uniform && has_pointer_like(r.addr, r.data.data(), r.len)) new_ptrs = true;
+
+  const bool unchanged = changed.empty();
+  uint64_t stored = 0;
+  bool verify_bad = false;
+  if (t.verify_against) {
+    const Entry& s = *t.verify_against;
+    bool same = s.runs.size() == entry.runs.size() && std::memcmp(&s.stats, &entry.stats, exec::kCounterWords * 8) == 0 &&
+                s.stats.inst_by_opcode == entry.stats.inst_by_opcode;
+    for (size_t i = 0; same && i < s.runs.size(); ++i) {
+      const Run &a = s.runs[i], &b = entry.runs[i];
+      same = a.addr == b.addr && a.len == b.len && a.uniform == b.uniform && (a.uniform ? a.byte == b.byte : a.data == b.data);
+    }
+    verify_bad = !same;
+  }
+  if (!oversize && !t.verify_against) {
+    auto sp = std::make_shared<Entry>(std::move(entry));
+    {
+      std::lock_guard<std::mutex> g(mu_);
+      store_->put_memory(t.key, sp);
+    }
+    if (!cfg_.dir.empty()) {
+      if (store_->write_disk(t.key, *sp)) stored = sp->bytes();
+      uint64_t ev = 0;
+      store_->evict_disk(&ev);
+      std::lock_guard<std::mutex> g(mu_);
+      stats_.disk_evicted += ev;
+    }
+  }
+  const uint64_t t_done = now_ns();
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    stats_.exec_ns += exec_ns;
+    ++executed_;
+    const uint64_t rec = t.t_pre + (t_done - t_end0);
+    stats_.record_ns += rec;
+    stats_.fixed_ns += t.begin_ns > t.t_pre ? t.begin_ns - t.t_pre : 0;
+    ++stats_.recorded;
+    if (oversize) ++stats_.entries_oversize;
+    else if (!t.verify_against) ++stats_.entries_put, stats_.entry_bytes += stored;
+    if (t.verify_against) {
+      ++stats_.verify_checked;
+      if (verify_bad) ++stats_.verify_mismatch;
+    }
+    if (hashed > (1u << 20) && t_done > t_end0) bw_ = 0.7 * bw_ + 0.3 * (static_cast<double>(hashed) / static_cast<double>(t_done - t_end0) * 1e9);
+    if (new_ptrs) ptrs_ = true;
+    // A launch that changed no byte leaves the state as it was; one that did moves it by the launch.
+    if (!unchanged) advance_locked(t);
+    stats_.recorded_instructions += stats.instructions;
+    for (auto& [base, pages] : after) {
+      PageCache& pc = cache_[base];
+      pc.pages = std::move(pages);
+      pc.valid = true;
+    }
+    // Adaptive tiers: a device whose launches are too small for the fixed cost to pay goes quiet (the state is poisoned so
+    // nothing later can match across the gap).
+    if (executed_ >= 256 && stats_.hits == 0 && static_cast<double>(stats_.fixed_ns) > 0.05 * static_cast<double>(stats_.exec_ns) &&
+        !cfg_.force_record && !cfg_.verify) {
+      dormant_ = true;
+      poison_locked("dormant-fixed-cost");
+    }
+  }
+  if (verify_bad) {
+    std::fprintf(stderr, "[vgpu][memo] VERIFY MISMATCH: kernel %s, key %s: the stored result differs from a real run\n", t.why.c_str(),
+                 hex128(t.key).c_str());
+    if (cfg_.verify == 1) std::abort();
+  }
+}
+
+// ---- reporting -----------------------------------------------------------------------------------------------------------
+
+Hash128 DeviceMemo::memory_hash() const {
+  Hasher h(0x6d656d68);
+  for (const auto& [base, size] : mem_.live_ranges()) {
+    std::vector<uint64_t> pages;
+    uint64_t mat = 0;
+    h.u64(base), h.u64(size);
+    if (mem_.memo_page_hashes(base, &pages, &mat))
+      for (uint64_t p : pages) h.u64(p);
+  }
+  return h.done();
+}
+
+void DeviceMemo::report(std::FILE* f) const {
+  const Stats s = stats();
+  std::string reasons;
+  for (const auto& [k, v] : s.reasons) reasons += (reasons.empty() ? "" : ",") + k + ":" + std::to_string(v);
+  std::fprintf(f,
+               "[vgpu][memo] launches=%" PRIu64 " hits=%" PRIu64 " disk_hits=%" PRIu64 " recorded=%" PRIu64 " unrecorded=%" PRIu64 " poisoned=%" PRIu64
+               " dormant_launches=%" PRIu64 " replay_refused=%" PRIu64 " verify_checked=%" PRIu64 " verify_mismatch=%" PRIu64 " entries_put=%" PRIu64
+               " entry_bytes=%" PRIu64 " exec_ms=%.3f fixed_ms=%.3f record_ms=%.3f hit_ms=%.3f saved_ms=%.3f reasons=%s\n",
+               s.launches, s.hits, s.disk_hits, s.recorded, s.unrecorded, s.poisoned, s.dormant_launches, s.replay_refused, s.verify_checked,
+               s.verify_mismatch, s.entries_put, s.entry_bytes, static_cast<double>(s.exec_ns) / 1e6, static_cast<double>(s.fixed_ns) / 1e6,
+               static_cast<double>(s.record_ns) / 1e6, static_cast<double>(s.hit_ns) / 1e6, static_cast<double>(s.saved_ns) / 1e6,
+               reasons.empty() ? "-" : reasons.c_str());
+  if (const char* p = std::getenv("VGPU_MEMO_FINAL_HASH"); p && *p) {
+    if (std::FILE* o = std::fopen(p, "a")) {
+      const Hash128 h = memory_hash();
+      std::fprintf(o, "%s\n", hex128(h).c_str());
+      std::fclose(o);
+    }
+  }
+}
+
+}  // namespace vgpu::memo

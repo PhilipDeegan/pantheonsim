@@ -47,6 +47,7 @@
 #include <memory>
 #include <vector>
 
+#include "vgpu/memo.hpp"
 #include "vgpu/memory_backing.hpp"
 
 namespace vgpu {
@@ -597,8 +598,34 @@ class MemoryManager {
   // Every live allocation's (base, size), in address order: what a host-GPU launch has to make resident.
   std::vector<std::pair<uint64_t, uint64_t>> live_ranges() const;
 
+  // ---- support for launch-level result caching (vgpu/memo.hpp, src/runtime/memo.cpp) ----
+  // The sink hears of every host-side change (write, fill, copy, allocation, free) and of whatever its history cannot
+  // describe. Null (the default): nothing is reported and nothing here costs more than a null test.
+  void set_memo_sink(memo::EventSink* s) { memo_sink_ = s; }
+  // Whether the device holds state a launch's diff cannot see: virtual-memory reservations, mappings and handles,
+  // exported or imported (shared-file) memory, an allocation backed by a file. The cache refuses every launch then.
+  bool memo_untrackable() const;
+  // Whether any host memory (pinned, managed, registered) is mapped for the device.
+  bool memo_host_maps() const;
+  // Whether `addr` is host memory a kernel can address (a mapping, not a device window).
+  bool memo_is_host_addr(uint64_t addr) const { return is_host_mapped(addr); }
+  // Whether a fault is armed that could change what a kernel loads, stores, computes or what a copy delivers.
+  bool memo_faults_armed() const;
+  // The 64-bit hash of each 4 KiB page (the last may be shorter) of the allocation at `base`, in order; the bytes a
+  // chunk the program never wrote or wrote with one byte value would read are hashed without reading memory.
+  // `*materialized` is the bytes in real chunks (what hashing cost). False when there is no such allocation or its
+  // bytes live in a file.
+  bool memo_page_hashes(uint64_t base, std::vector<uint64_t>* out, uint64_t* materialized) const;
+  // The bytes in real chunks of the allocation at `base` (0 when none): what a hash of it would read.
+  uint64_t memo_materialized(uint64_t base) const;
+  // Whether a memory-trace hook (the race detector, a trace) is installed in this process.
+  static bool memo_trace_active();
+  static constexpr uint64_t kMemoPage = 4096;
+
  private:
   AccessFault* access_fault_ = nullptr;
+  memo::EventSink* memo_sink_ = nullptr;
+  size_t memo_host_map_count() const;
   MovableAtomic<CardGate*> card_gate_{nullptr};
   MovableAtomic<int32_t> card_resident_{0};
   bool any_stuck() const {

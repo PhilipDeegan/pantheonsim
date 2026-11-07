@@ -5354,6 +5354,7 @@ class Interpreter {
         const auto c = cluster_shape();
         const uint64_t size = uint64_t{c[0]} * c[1] * c[2];
         const uint64_t rank = ctx.explicit_cluster ? cluster_rank_of(ctx) : 0;
+        memo::g_smid_by_worker.store(true, std::memory_order_relaxed);
         return static_cast<uint32_t>((uint64_t{worker_} * size + rank) % sms);
       }
       case Sreg::NSmId: return profile_.limits.multiprocessors;
