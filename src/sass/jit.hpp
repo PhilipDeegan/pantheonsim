@@ -31,11 +31,19 @@ struct Program;
 namespace vgpu::sass::jit {
 
 // Bumped when the layout of Ctx, the symbols of an object or the meaning of its metadata change: an object of another ABI is not loaded.
-inline constexpr uint32_t kAbiVersion = 2;
+inline constexpr uint32_t kAbiVersion = 3;
 // Bumped when the text the generator writes for the same regions changes. (The key also hashes the text itself, so a forgotten bump
 // cannot make a stale object load; the number is for people reading a cache directory.)
-inline constexpr uint32_t kGeneratorVersion = 2;
+inline constexpr uint32_t kGeneratorVersion = 3;
 inline constexpr uint32_t kMinRegion = 2;
+// The size of tier::MOp (static_assert'ed in jit.cpp): the generated code finds the MOp of op i at Ctx::ops + kMopSize * i, its handler in the first word.
+inline constexpr uint32_t kMopSize = 96;
+// Ctx::flags
+inline constexpr uint32_t kFlagTierStats = 1;   // the tier's statistics are on (every op is reported, even one with no lane)
+inline constexpr uint32_t kFlagJitStats = 2;    // the JIT's statistics are on (generated ops are counted into Ctx::gen_run)
+inline constexpr uint32_t kFlagChain = 4;       // the run loop would go on past a branch or a register-only op that is not straight (see "Control flow" below)
+// Ctx::exit_ps when the generated code took no branch or register-only op that resets the loop's 256-instruction run
+inline constexpr int32_t kNoPassStart = INT32_MIN;
 // The run loop of the tier executes at most this many straight instructions in one pass (n < 256), then one more that ends the pass.
 inline constexpr unsigned kRunLimit = 256;
 
@@ -50,24 +58,42 @@ inline bool admissible(unsigned n, uint32_t k, uint64_t steps, uint64_t max_step
 // every offset against this one's, so a drift fails the compile instead of corrupting memory.
 struct Ctx {
   uint32_t abi;               // kAbiVersion
-  uint32_t flags;             // bit 0: the tier's statistics are on (every op is reported, even one with no lane)
-  const bool* up;             // Warp::up, the uniform predicates
+  uint32_t flags;             // kFlag*
+  bool* up;                   // Warp::up, the uniform predicates (generated code writes them)
   uint32_t* p;                // Warp::p, the predicates as lane masks (generated code writes them)
-  const uint32_t* ur;         // Warp::ur, the uniform registers
+  uint32_t* ur;               // Warp::ur, the uniform registers (generated code writes them)
   uint64_t* steps;            // Warp::steps
   uint64_t* instructions;     // LaunchStats::instructions
   uint64_t* thread_instructions;
   uint64_t* by_class;         // LaunchStats::inst_by_class
-  void (*escape)(Ctx*, uint32_t op, uint32_t ex);   // op: index inside the region; ex: the lanes that execute it
+  void* tctx;                 // the tier handlers' context (the executor's TCtx), what an escape passes to the handler
+  const uint8_t* ops;         // the region's first MOp (kMopSize bytes each, the handler first): an escape calls ops[op].fn(tctx, ops[op], ex)
   void (*note)(Ctx*, uint32_t op);                  // the tier's statistics for an op the generated code ran itself
   void* host;                 // the executor's, opaque to the generated code
   uint32_t* R;                // the warp's register file: register n is R + 32 * n
   const uint8_t* b0;          // constant bank 0 of the launch
   uint64_t b0n;
   const void* pool;
+  // Control flow (ABI 3): what the run loop's chain looks at and changes when it goes on past a branch.
+  uint64_t* divergent;        // LaunchStats::divergent_branches
+  bool* gate;                 // Warp::store_gate: up until the warp's first store (the loop ends that warp's turn at it, once)
+  uint32_t* budget;           // Warp::budget: the calls the warp's turn has left
+  uint32_t* extra;            // Warp::extra: the calls the loop has taken over
+  uint64_t* gen_run;          // statistics (kFlagJitStats): the ops the generated code computed
+  void (*sreg)(Ctx*, uint32_t sr, uint32_t* d, uint32_t ex);   // S2R: the special register `sr` of the executing lanes into d (the tier's h_s2r)
+  uint64_t max_steps;         // the warp's step budget
+  // Where the generated code stopped, written once on the way out: the region-relative index of the op the loop runs next (a region may
+  // leave through a branch to an op outside it, so it can be negative or past the end), and the region-relative index at which the loop's 256-op
+  // run last restarted (kNoPassStart: it did not).
+  int32_t exit_idx;
+  int32_t exit_ps;
+  uint32_t last;              // the index of the op whose handler the generated code called last (a fault names it); the host sets ~0u before a call
 };
 
-using RegionFn = void (*)(Ctx*, uint32_t group, uint32_t glanes);
+// A region is entered at any of its stretch starts (stretch_starts) with the number of ops the loop's current pass has taken since its start (n0);
+// it runs until it must leave, and says where in exit_idx and exit_ps.
+using RegionFn = void (*)(Ctx*, uint32_t group, uint32_t glanes, uint32_t entry, uint32_t n0);
+
 
 // A source operand of a generated op, as the tier's MOp holds it (tier.hpp), with a Pool source's row replaced by the constant it holds
 // (all 32 lanes are equal): `val`, and for a 64-bit constant pair `val2`, the high word's.
@@ -89,6 +115,10 @@ struct OpFacts {
   bool guard_not = false;
   bool guard_uniform = false;
   bool unguarded = true;       // MOp::unguarded: the op runs on the whole group
+  bool cont = false;           // MOp::cont: not straight, a handler that only writes registers: the run loop may go on past it (a stretch ends here)
+  bool store = false;          // MOp::store: a store to global memory (an escape): while the warp's store gate is up the generated code leaves before it
+  bool br = false;             // a plain relative BRA (tier::Form::Bra) that the generated code runs itself: imm is its target in the section, tgt in the region, p/p2/aux its conditions
+  int32_t tgt = 0;             // a branch: the region-relative index of its target (outside [0, k): the generated code leaves there)
   uint8_t form = 0;            // tier::Form of an op the generated code computes; 0: an escape to the tier's handler
   SrcFacts s[3], p, p2;
   int64_t imm = 0;
@@ -126,6 +156,19 @@ std::string gen_op_body(const OpFacts& o, RowCtx& rc);
 struct RegionSpec {
   std::vector<OpFacts> ops;
 };
+// Control flow inside a region (milestone 5). A region is a run of consecutive ops that may hold uniform branches (every lane of the group takes it, or none),
+// ops that are not straight but only write registers (`cont`), and stores. It is cut into *stretches*: a stretch starts at the region's first op, at the target
+// of a branch inside the region, and at the op after a branch or a cont op, and it ends at the next branch or cont op (which belongs to it) or at the region's
+// end. Each stretch is what one pass of the run loop does between two of its chain points: the 256-op run bound, the step budget and the step count are checked
+// for the whole stretch on its way in. The generated code runs stretch after stretch, as the loop does when it goes on past a branch (tier_ops.inc, the "cont"
+// path), and leaves -- with nothing of the next op done -- at the first op the loop would not go on past: a branch that splits the group, a branch or cont op
+// when the loop's chain conditions do not hold or the turn has no calls left (Ctx::budget), the start of a stretch that does not fit the run bound or the step
+// budget, or an op outside the region.
+// The stretch starts of a region, in increasing order (the host marks each as an entry; the generator labels each).
+std::vector<uint32_t> stretch_starts(const RegionSpec& r);
+// One past the last op of the stretch that starts at `start`, and how many of its ops are straight (the ones the loop's 256-op run bound counts).
+uint32_t stretch_end(const RegionSpec& r, uint32_t start);
+inline bool is_ctl(const OpFacts& o) { return o.cont || o.br; }
 struct UnitSpec {
   int sm = 0;
   std::vector<RegionSpec> regions;
@@ -216,6 +259,9 @@ class Engine {
 struct Region {
   uint32_t first = 0;     // index of its first op in the section
   uint32_t k = 0;         // its length
+  bool has_store = false; // it holds a store to global memory (the generated code leaves before it while the warp's store gate is up)
+  bool ctl = false;       // it holds a branch or a cont op
+  std::vector<uint32_t> starts;   // its stretch starts, region-relative (stretch_starts)
   uint32_t maxreg = 0;    // one past the highest register any of its ops touches: the warp's file must hold it
   uint32_t gen = 0;       // how many of its ops the generated code computes itself (the others are escapes to the tier's handlers)
 };
@@ -247,7 +293,14 @@ const ShareRule& share_rule();
 struct Unit : std::enable_shared_from_this<Unit> {
   UnitSpec spec;
   std::vector<Region> regions;
-  std::vector<uint32_t> region_at;     // op index -> region number + 1 (0: no region starts there)
+  std::vector<uint32_t> region_at;     // op index -> region number + 1 at each stretch start of a region (0: no entry there): what counting uses
+  std::vector<uint16_t> entry_ops;     // op index -> the ops of the stretch that starts there (the weight of an entry while counting)
+  std::vector<uint8_t> jrun;           // op index -> the length of the plain run (MOp::run) that stops short of the next entry: what the loop issues back to back
+  // What the run loop reads once a section is Ready: the entries of the regions that were compiled only (a region that was not selected costs no call), and
+  // the function of each region. Published before `state` says Ready; the pointer the loop reads is region_at's until then.
+  std::vector<uint32_t> active_at;
+  std::vector<RegionFn> fast;
+  std::atomic<const uint32_t*> active{nullptr};
   std::atomic<int> state{static_cast<int>(State::Idle)};
   std::atomic<uint64_t> executed{0};   // warp instructions the tier ran in the regions while counting
   std::atomic<bool> sampling{false};   // the share rule has not decided yet (set by make_unit when the rule is on)
@@ -266,12 +319,12 @@ struct Unit : std::enable_shared_from_this<Unit> {
   // The tier ran region `region` (k ops) uncompiled: count it, and ask for the compile once the threshold is passed.
   void note(uint32_t region, uint32_t k);
   // The compiled function of a region, null if it is not compiled (yet, or not selected).
-  RegionFn fn(uint32_t region) const {
-    if (!ready()) return nullptr;
-    const int32_t i = fn_index[region];
-    return i < 0 ? nullptr : lib->fns[static_cast<size_t>(i)];
-  }
+  RegionFn fn(uint32_t region) const { return ready() ? fast[region] : nullptr; }
 };
+
+// Mutation checks of the executor's side (tests only: compiled in with -DVGPU_JIT_MUTANTS=ON, VGPU_JIT_MUTANT=<host_ps|host_chain|host_maxreg|host_n0>); 0 otherwise.
+inline constexpr uint32_t kMutHostPs = 2, kMutHostChain = 4, kMutHostMaxreg = 8, kMutHostN0 = 16;
+uint32_t host_mutants();
 
 // Whether VGPU_JIT=1 is set, the tier is on, and this is not a sanitizer build. Read once.
 bool requested();
@@ -288,6 +341,7 @@ struct Stats {
   std::atomic<uint64_t> regions_run{0}, instructions_run{0}, generated_run{0}, region_throws{0};   // calls of generated regions, and the warp instructions in them
   std::atomic<uint64_t> compile_us{0}, lookup_us{0}, units_ready{0};
   std::atomic<uint64_t> declined{0}, accepted{0};   // the share rule's decisions
+  std::atomic<uint64_t> continued{0};   // branches and register-only ops the generated code went on past (the loop's chain steps it took over)
 };
 Stats& stats();
 // Whether the statistics are being kept (VGPU_JIT_STATS): the executor counts nothing otherwise, an atomic add per region call being a visible cost on small regions.

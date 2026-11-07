@@ -2215,60 +2215,67 @@ inline void tier_release_bar(Block& blk, unsigned id) {
 
 // ---- tier 2 (src/sass/jit.hpp) ----------------------------------------------------------------------------------
 
-// What the generated code's escape needs: the handler's context, where the region's first op is, and the op the escape last ran (the one a
-// fault names: tier_run's `cur`).
+// What the generated code's calls into the executor need (note, sreg): the handlers' context, where the region's first op is, and whether the tier's statistics are on.
+// (An escape itself needs none of it: it calls the op's handler by Ctx::ops and Ctx::tctx; Ctx::last names the op a fault came from, tier_run's `cur`.)
 struct JitHost {
   TCtx* c;
   const tier::MOp* ops;      // the region's first op
-  const tier::MOp* last;
   bool stats;
 };
 
-// One op of a region, as the run loop runs it after counting it: the handler for the lanes that execute it, then the tier's statistics
-// (reported even when no lane executes, as the loop reports them). `ex` is the generated code's own count of the guard, the loop's.
+// The tier's statistics of an op the generated code has run, an escape's or its own (reported even when no lane executed it, as the loop reports them).
 void jit_note(jit::Ctx* j, uint32_t i) {
   JitHost& h = *static_cast<JitHost*>(j->host);
   if (h.stats) [[unlikely]] tier_stats().native[static_cast<size_t>(h.ops[i].ins->op)].fetch_add(1, std::memory_order_relaxed);
 }
 
-void jit_escape(jit::Ctx* j, uint32_t i, uint32_t ex) {
+// S2R for generated code: the special register `sr` of the executing lanes into the row d (h_s2r's work, which the generated code cannot do without the
+// block and the warp).
+void jit_sreg(jit::Ctx* j, uint32_t sr, uint32_t* d, uint32_t ex) {
   JitHost& h = *static_cast<JitHost*>(j->host);
-  const tier::MOp& op = h.ops[i];
-  h.last = &op;
-  if (ex) op.fn(h.c, op, ex);
-  if (h.stats) [[unlikely]] tier_stats().native[static_cast<size_t>(op.ins->op)].fetch_add(1, std::memory_order_relaxed);
+  TCtx& c = *h.c;
+  if (c.r->tier_sreg_fill(*c.blk, *c.w, sr, d, ex)) return;
+  for (Mask m = ex; m; m &= m - 1) {
+    const unsigned l = static_cast<unsigned>(std::countr_zero(m));
+    d[l] = c.r->tier_sreg(*c.blk, *c.w, sr, l);
+  }
 }
 
-// Runs the region that starts at ops[idx] if it is compiled and the run loop could run all its ops here: what the loop checks for each
-// of them is checked once for all -- the 256-instruction run (n + k), the step budget (steps + k), the registers its handlers touch. A region
-// holds no store, so the store gate cannot trip inside one. When a check fails, or the region is not compiled yet (counting towards its
-// promotion), nothing is run and the ops go the old way, one at a time. The generated code counts every op as the loop does; when it throws,
-// `faulting` is the op the escape last ran, which the fault names (the loop's `cur`). Returns the number of ops run, 0 for none.
+// Runs the region that has a stretch starting at ops[idx], if it is compiled and its checks pass: the registers its handlers touch are in the warp's
+// file. The checks the loop makes op by op for a stretch -- the 256-op run bound (n0, the ops the pass has taken since it
+// last restarted), the step budget, and for a branch or an op that is not straight the chain's conditions (`chain`) and a call left in the turn -- are
+// made by the generated code, for each stretch it runs (jit.hpp, "Control flow"); where one fails it leaves with nothing of that op done. When the region
+// is not compiled yet (counting towards its promotion) nothing is run and the ops go the old way, one at a time. The generated code counts every op as the
+// loop does; when it throws, `faulting` is the op the escape last ran, which the fault names (the loop's `cur`). Returns whether anything ran; then
+// `next` is the op the loop runs next, and `pass_start` the op at which the loop's 256-op run last restarted (-1: it did not).
 // (What a tier_run call keeps for its regions: the context the generated code is given, set up once, on the first region it runs.)
 struct JitFrame {
   jit::Ctx jc;
   JitHost jh;
   bool init = false;
+  uint32_t mut = 0;   // the mutation checks (tests only)
+  uint64_t gen = 0;   // the generated ops run (the statistics)
 };
 
-[[gnu::noinline]] uint32_t jit_run_region(JitFrame& f, jit::Unit& ju, uint32_t ri, TCtx& c, Warp& w, exec::LaunchStats& st, const tier::MOp* ops, size_t idx,
-                                          unsigned n, Mask group, unsigned glanes, uint64_t max_steps, bool stats, const tier::MOp*& faulting) {
+[[gnu::noinline]] bool jit_run_region(JitFrame& f, jit::Unit& ju, uint32_t ri, TCtx& c, Warp& w, exec::LaunchStats& st, const tier::MOp* ops, size_t idx,
+                                      unsigned n0, Mask group, unsigned glanes, uint64_t max_steps, bool stats, bool chain, const tier::MOp*& faulting,
+                                      size_t& next, int64_t& pass_start) {
   const jit::Region& rg = ju.regions[ri - 1];
-  if (!jit::admissible(n, rg.k, w.steps, max_steps, rg.maxreg, w.nregs)) return 0;
+  if (rg.maxreg > w.nregs && !(f.mut & jit::kMutHostMaxreg)) return false;
   jit::RegionFn fn = ju.fn(ri - 1);
-  if (!fn) {   // not compiled (yet, or not worth it): while the section is being counted, this run counts for it
-    if (!ju.counting()) return 0;
-    ju.note(ri - 1, rg.k);
+  if (!fn) {   // not compiled (yet, or not worth it): while the section is being counted, this entry counts for it
+    if (!ju.counting()) return false;
+    ju.note(ri - 1, ju.entry_ops[idx]);
     fn = ju.fn(ri - 1);
-    if (!fn) return 0;
+    if (!fn) return false;
   }
   if (!f.init) [[unlikely]] {
     f.init = true;
-    f.jh = JitHost{&c, ops, nullptr, stats};
+    f.mut = jit::host_mutants();
+    f.jh = JitHost{&c, ops, stats};
     jit::Ctx& jc = f.jc;
     jc = jit::Ctx{};
     jc.abi = jit::kAbiVersion;
-    jc.flags = stats ? 1u : 0u;
     jc.up = w.up;
     jc.p = w.p;
     jc.ur = w.ur;
@@ -2277,28 +2284,51 @@ struct JitFrame {
     jc.instructions = &st.instructions;
     jc.thread_instructions = &st.thread_instructions;
     jc.by_class = st.inst_by_class;
-    jc.escape = &jit_escape;
+    jc.tctx = &c;
+    jc.sreg = &jit_sreg;
     jc.host = &f.jh;
     jc.b0 = c.b0;
     jc.b0n = c.b0n;
     jc.pool = c.pool;
+    jc.divergent = &st.divergent_branches;
+    jc.gate = &w.store_gate;
+    jc.budget = &w.budget;
+    jc.extra = &w.extra;
+    jc.gen_run = &f.gen;
+    jc.max_steps = max_steps;
   }
   f.jc.R = c.R;   // (the register file may have moved since the last pass)
-  f.jh.ops = &ops[idx];
-  f.jh.last = nullptr;
+  f.jc.flags = (stats ? jit::kFlagTierStats : 0u) | ((chain || (f.mut & jit::kMutHostChain)) ? jit::kFlagChain : 0u) | (jit::stats_on() ? jit::kFlagJitStats : 0u);
+  if (f.mut & jit::kMutHostN0) n0 = 0;
+  f.jh.ops = &ops[rg.first];
+  f.jc.ops = reinterpret_cast<const uint8_t*>(&ops[rg.first]);
+  f.jc.last = ~0u;
+  const uint32_t entry = static_cast<uint32_t>(idx - rg.first);
+  [[maybe_unused]] uint64_t insts0 = 0;
+  [[maybe_unused]] uint32_t extra0 = 0;
+  if (jit::stats_on()) [[unlikely]] {
+    insts0 = st.instructions;
+    extra0 = w.extra;
+  }
   try {
-    fn(&f.jc, group, glanes);
+    fn(&f.jc, group, glanes, entry, n0);
   } catch (...) {
-    faulting = f.jh.last;
+    faulting = f.jc.last == ~0u ? nullptr : &ops[rg.first + f.jc.last];
     if (jit::stats_on()) jit::stats().region_throws.fetch_add(1, std::memory_order_relaxed);
     throw;
   }
+  const int32_t ei = f.jc.exit_idx, eps = f.jc.exit_ps;
+  if (ei == static_cast<int32_t>(entry) && eps == jit::kNoPassStart) return false;   // it left at once: nothing was run
+  next = static_cast<size_t>(static_cast<int64_t>(rg.first) + ei);
+  pass_start = (eps == jit::kNoPassStart || (f.mut & jit::kMutHostPs)) ? -1 : static_cast<int64_t>(rg.first) + eps;
   if (jit::stats_on()) [[unlikely]] {
     jit::stats().regions_run.fetch_add(1, std::memory_order_relaxed);
-    jit::stats().instructions_run.fetch_add(rg.k, std::memory_order_relaxed);
-    jit::stats().generated_run.fetch_add(rg.gen, std::memory_order_relaxed);
+    jit::stats().instructions_run.fetch_add(st.instructions - insts0, std::memory_order_relaxed);
+    jit::stats().generated_run.fetch_add(f.gen, std::memory_order_relaxed);
+    jit::stats().continued.fetch_add(w.extra - extra0, std::memory_order_relaxed);
+    f.gen = 0;
   }
-  return rg.k;
+  return true;
 }
 
 // The ops of a stretch (Program::run) one after the other for `group`, with their class counts. A function of its own so that the loop keeps its few
@@ -2418,7 +2448,8 @@ bool Runner::tier_run_t(Block& blk, Warp& w, Mask group, uint64_t pick, const Co
   [[maybe_unused]] jit::Unit* const ju = Jit ? tp.jit.get() : nullptr;
   [[maybe_unused]] JitFrame jf;
   [[maybe_unused]] const JitSampler sampler{Jit && ju->sampling.load(std::memory_order_relaxed) ? ju : nullptr, w, w.steps};
-  [[maybe_unused]] const uint32_t* const region_at = Jit ? ju->region_at.data() : nullptr;
+  [[maybe_unused]] const uint32_t* region_at = nullptr;   // (the entries of the regions: read afresh at each pass, for a section may become Ready meanwhile)
+  [[maybe_unused]] const uint8_t* const jrun = Jit ? ju->jrun.data() : nullptr;
   for (bool again = false;; again = true) {   // one pass is one call of step_warp
   // The warp's register file may have been resized since the last pass (USETMAXREG.TRY_ALLOC grows it, and a vector that grows moves):
   // the row pointer and the check that a program's registers are inside the file are worked out again for every pass.
@@ -2427,6 +2458,7 @@ bool Runner::tier_run_t(Block& blk, Warp& w, Mask group, uint64_t pick, const Co
   // Whether the loop may go on past an op that is not straight, as the chain below would start another call at once (the 'cont' ops); worked out
   // at the first of them in a pass (0: not yet, 1: yes, 2: no).
   uint8_t cstate = 0;
+  if constexpr (Jit) region_at = ju->active.load(std::memory_order_acquire);
   if (tier_stats_) [[unlikely]] {
     tier_stats().passes.fetch_add(1, std::memory_order_relaxed);
     if (again) tier_stats().chained.fetch_add(1, std::memory_order_relaxed);
@@ -2439,36 +2471,47 @@ bool Runner::tier_run_t(Block& blk, Warp& w, Mask group, uint64_t pick, const Co
   const tier::MOp* const ops_last = ops + (count - 1);   // (the section's last op never runs as a straight one)
   const tier::MOp* olim = ops + std::min(count - 1, first + 256);
   const tier::MOp* o = o0;
+  [[maybe_unused]] const tier::MOp* psp = o0;   // where the pass's 256-op run last restarted (tier 2 hands a region the ops the pass has taken since: o - psp)
   const unsigned glanes = popc(group);
   const tier::MOp* cur = o;
   bool all_at = false;   // the run ended by setting every lane of the group to one address, `at` (the chain below then knows where they stand)
   uint64_t at = 0;
   try {
     for (;;) {
-      // Tier 2: a region that starts here, compiled, is run in place of its ops (jit_run_region says how, and when not).
+      // Tier 2: a region that has a stretch starting here, compiled, is run in place of its ops (jit_run_region says how, and when not).
       if constexpr (Jit) {
         const size_t idx = static_cast<size_t>(o - ops);
         if (const uint32_t ri = region_at[idx]) {
+          // Whether the loop would go on past a branch or an op that is not straight (the cont path below), worked out once for the pass.
+          if (cstate == 0) cstate = (regs_ok && !tier_stats_ && tier_chain_ && !w.yield && !w.slice && !w.give_way && !w.ws_held && !w.mactive_force && group &&
+                                     w.runnable() == group) ? 1 : 2;
           const tier::MOp* faulting = nullptr;   // (not `cur`: its address would keep it out of a register in the loop below)
-          uint32_t k;
+          size_t next = 0;
+          int64_t pass_start = -1;
+          bool ran;
           try {
-            k = jit_run_region(jf, *ju, ri, c, w, st, ops, idx, static_cast<unsigned>(o - o0), group, glanes, max_steps_, tier_stats_, faulting);
+            ran = jit_run_region(jf, *ju, ri, c, w, st, ops, idx, static_cast<unsigned>(o - psp), group, glanes, max_steps_, tier_stats_, cstate == 1, faulting, next,
+                                 pass_start);
           } catch (...) {
             if (faulting) cur = faulting;
             throw;
           }
-          if (k) {
-            cur = o + k - 1;
-            o += k;
+          if (ran) {
+            o = ops + next;
+            cur = o;
+            if (pass_start >= 0) {   // a branch or an op that is not straight restarted the 256-op run, as the loop's own cont path does
+              psp = ops + pass_start;
+              olim = (reinterpret_cast<const char*>(ops_last) - reinterpret_cast<const char*>(psp) > static_cast<ptrdiff_t>(256 * sizeof(tier::MOp))) ? psp + 256 : ops_last;
+            }
             continue;
           }
         }
       }
       // A stretch of register-only instructions, each for the whole group, issued back to back: what the loop below does for each of them
       // -- the store gate (none of them is a store), the step count, the guard (none has one) and the counters -- is done for the stretch.
-      // Not in tier 2's loop (its regions would be skipped over), nor while the statistics count each instruction.
-      if constexpr (!Jit) {
-        unsigned k = o->run;
+      // Not while the statistics count each instruction. In tier 2's loop the stretch stops short of the next entry of a region (jrun).
+      {
+        unsigned k = Jit ? jrun[static_cast<size_t>(o - ops)] : o->run;
         if (k >= 2 && o + k > olim) k = static_cast<unsigned>(olim - o);   // (a stretch never reaches the section's last op: only the 256 can cut it)
         if (k >= 2 && regs_ok && group && !tier_stats_ && w.steps + k <= max_steps_) {
           w.steps += k;
@@ -2518,7 +2561,7 @@ bool Runner::tier_run_t(Block& blk, Warp& w, Mask group, uint64_t pick, const Co
       // what the chain would do (the call counted, the 256-op bound given afresh) without leaving: the lanes' addresses are set where
       // the loop does stop, as they are after any run that has moved on. A BRA that the whole group takes, or none of it, to a place in this
       // section is the same: the chain would pick the group that stands at the target.
-      if constexpr (!Jit) {
+      {
         if (op.cont || op.form == tier::Form::Bra) {
           if (cstate == 0) cstate = (regs_ok && !tier_stats_ && tier_chain_ && !w.yield && !w.slice && !w.give_way && !w.ws_held && !w.mactive_force && group &&
                                      w.runnable() == group) ? 1 : 2;
@@ -2555,6 +2598,7 @@ bool Runner::tier_run_t(Block& blk, Warp& w, Mask group, uint64_t pick, const Co
               ++w.extra;
               o = next;
               olim = (reinterpret_cast<const char*>(ops_last) - reinterpret_cast<const char*>(o) > static_cast<ptrdiff_t>(256 * sizeof(tier::MOp))) ? o + 256 : ops_last;
+              if constexpr (Jit) psp = o;
               continue;
             }
           }
