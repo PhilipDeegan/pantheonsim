@@ -21,7 +21,7 @@ programs at 1.034 (server2). The corpus total goes from 664 s to 628 s (1.057x):
   instruction form touches. Making every ALU op free would give 1.2x at most; 1.125 is what 2 ns an op gives. Getting from 1.10 to 1.15 needs the memory ops and shared memory inside generated code with their exact counters (the study's extensions (a) and (c)), which is a different design problem.
 * **What it costs.** A unit that is compiled for the first time costs 2.3 s on average (67 units, 155 s for the 22 programs; base: 37 units, 62 s), because regions are bigger and each loop is one function: the cold run is 1.22x the tier's wall on geometric mean (base 1.14x),
   SYRK 1.75x, segmentationTreeThrust 3.2x (22 units). All of the cold penalty is the compile: without it the same runs are 0.92x of the tier, as the warm ones (0.91x). `VGPU_JIT_RESIDENCE=0 VGPU_JIT_SPECIALIZE=0` cuts the compile by 22 to 48 % and
-  loses nothing at run time (2 % faster in geometric mean over 7 programs, 3 runs each); it was found too late to become the default (every correctness result here is for the defaults), see "Cold cost and what to do about it".
+  loses nothing at run time (2 % faster in geometric mean over 7 programs, 3 runs each); it was found too late to become the default of this round (every correctness result below is for the full form), and **became the default in round sp38**, whose matrix (the seven `e2e_sass_jit` shards, `test_jit*`, the 22-program same-bits comparison at 1 and 4 threads, the warm and cold tables with an A/A) was run again for it: [docs/performance.md](../performance.md), "Round sp38 (follow-ups)", `data/sp38/`. Everything below that says "default" about the generated code's form is the full form, now `VGPU_JIT_RESIDENCE=1 VGPU_JIT_SPECIALIZE=1`.
 * **Same bits.** Results, every counter and `VGPU_KERNEL_DIGEST` equal to the tier-only run and to `origin/main` on all 22 programs at one thread (cold and warm cache) and four threads, except where the tier-only run of `origin/main` already differs from itself (radixSortThrust at one and four threads,
   jacobiCudaGraphs and segmentationTreeThrust at four: controls below).
 
@@ -78,7 +78,7 @@ handler (named in `jit_gen.cpp`) and has a mutant (`VGPU_JIT_MUTANT=<form name>`
 * The loop reads the entries of the compiled regions only (`Unit::active`, switched when the unit is Ready): a region that was not selected costs no call. The function
   pointers are a flat array (`Unit::fast`).
 * An escape calls the tier's handler directly (`Ctx::ops`, `Ctx::tctx`; the handler is the first word of the 96-byte `MOp`) instead of through a callback that called it.
-* The compile command drops the distribution's stack protector, stack-clash probes and control-flow instrumentation (`-fno-stack-protector -fno-stack-clash-protection -fcf-protection=none`), a region entered at its first op only has no jump table, and the generator can emit one body per region (`VGPU_JIT_SPECIALIZE=0`).
+* The compile command drops the distribution's stack protector, stack-clash probes and control-flow instrumentation (`-fno-stack-protector -fno-stack-clash-protection -fcf-protection=none`), a region entered at its first op only has no jump table, and the generator can emit one body per region (`VGPU_JIT_SPECIALIZE=0`; since round sp38 this is the default, `1` emits the second body for whole warps).
 * New knobs: `VGPU_JIT_MIN_GEN` (the share of a region's ops that must be generated, default 50: the old fixed rule), `VGPU_JIT_SPECIALIZE`, `VGPU_JIT_DUMP=<file>` (a listing of every section that gets regions, op by op, with G / E / B / C marks); `VGPU_JIT_MAX_REGION` defaults to 200 (was 96); the statistics line says how many branches and register-only ops the generated code went on past.
 * `Ctx` ABI 3 (`kAbiVersion` 3, `kGeneratorVersion` 4): `up` and `ur` are writable, new fields `divergent`, `gate`, `budget`, `extra`, `gen_run`, `sreg`, `max_steps`, `tctx`, `ops`, `last`, `exit_idx`, `exit_ps`.
 
@@ -209,7 +209,7 @@ and the run time they give (warm, 3 runs; "residence" keeps the rows an op touch
 geomean over these 7 programs: 1.202 with residence, 1.229 without
 
 Residence does not pay in these programs (their regions are mostly escapes and short stretches), and it is the part of the generated code that a copy-and-patch JIT could not have ([the study](copy-and-patch.md)). `VGPU_JIT_RESIDENCE=0 VGPU_JIT_SPECIALIZE=0` is the better default;
-it is not made one here because every correctness result in this document is for the defaults, and changing them would need the whole matrix (`e2e_sass_jit` shards, the verify above, the mutants) again.
+it was not made one in this round because every correctness result in this document is for the full form; round sp38 re-ran the matrix (`e2e_sass_jit` shards, the verify above, `test_jit*`) and made it the default (`VGPU_JIT_RESIDENCE=1` and `VGPU_JIT_SPECIALIZE=1` are the knobs for the full form).
 
 ### Where the time is (`perf record`, histogram, warm cache; base and this branch look the same)
 
