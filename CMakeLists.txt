@@ -4071,6 +4071,10 @@ if(Python3_Interpreter_FOUND)
   # A curl that downloads a file retries on any error (a dropped HTTP/2 stream is not retried by --retry alone).
   add_test(NAME lint_curl_retries
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/lint/check_curl_retries.py)
+  # The pieces of scripts/pgo-build.sh (training runner, profile fingerprint, gcc's merge and the strict use step) on a tiny
+  # manifest and a tiny C program: seconds, no simulator build. Skipped (77) where gcc or gcov-tool is missing.
+  add_test(NAME lint_pgo_pipeline COMMAND bash ${CMAKE_SOURCE_DIR}/tests/lint/check_pgo_pipeline.sh)
+  set_tests_properties(lint_pgo_pipeline PROPERTIES SKIP_RETURN_CODE 77)
   # A key repeated in a workflow file makes GitHub refuse the whole file (it then runs on every push as a
   # failure with no jobs, and its schedule stops): the check reads every workflow for one.
   add_test(NAME lint_workflow_yaml

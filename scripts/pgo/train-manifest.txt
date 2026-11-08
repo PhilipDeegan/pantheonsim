@@ -1,0 +1,136 @@
+# PGO training manifest (scripts/pgo/manifest.py describes the columns). Generated from the Phase 0 corpus at origin/main dad11eee:
+# programs that are in test-manifest.txt are NEVER trained on (the held-out set the profile is judged by).
+# reps = round(25 M warp-instructions / the program's own count), 1..8, so that no program dominates the profile; the comment
+# at the end of a line is the program's warp-instruction count and plain wall time at one thread (Phase 0 counters, RTX 3060 profile).
+# Host-bound or very long programs are left out (they train the program's own CPU code, not the simulator).
+
+# --- NVIDIA programs (SASS engine unless the id ends in -ptx; -t4 = four threads)
+nv/polybench/2DCONV | sass | 1 | 1 | 120 | @CORP@/polybench/bin | - | @CORP@/polybench/bin/2DCONV # 22.5M winst, 0.62s
+nv/polybench/3MM | sass | 1 | 1 | 120 | @CORP@/polybench/bin | - | @CORP@/polybench/bin/3MM # 63.2M winst, 1.28s
+nv/polybench/ADI | sass | 1 | 2 | 120 | @CORP@/polybench/bin | - | @CORP@/polybench/bin/ADI # 12.9M winst, 0.16s
+nv/polybench/ATAX | sass | 1 | 1 | 120 | @CORP@/polybench/bin | - | @CORP@/polybench/bin/ATAX # 39.4M winst, 0.72s
+nv/polybench/BICG | sass | 1 | 5 | 120 | @CORP@/polybench/bin | - | @CORP@/polybench/bin/BICG # 4.9M winst, 0.20s
+nv/polybench/GEMM | sass | 1 | 1 | 120 | @CORP@/polybench/bin | - | @CORP@/polybench/bin/GEMM # 24.7M winst, 0.42s
+nv/polybench/GEMVER | sass | 1 | 1 | 120 | @CORP@/polybench/bin | - | @CORP@/polybench/bin/GEMVER # 20.5M winst, 0.44s
+nv/polybench/GESUMMV | sass | 1 | 4 | 120 | @CORP@/polybench/bin | - | @CORP@/polybench/bin/GESUMMV # 6.8M winst, 0.23s
+nv/polybench/JACOBI2D | sass | 1 | 1 | 120 | @CORP@/polybench/bin | - | @CORP@/polybench/bin/JACOBI2D # 33.9M winst, 0.41s
+nv/polybench/MVT | sass | 1 | 1 | 120 | @CORP@/polybench/bin | - | @CORP@/polybench/bin/MVT # 39.4M winst, 0.80s
+nv/rodinia/backprop | sass | 1 | 1 | 120 | tmp | - | @CORP@/rodinia/bin/backprop 262144 # 21.9M winst, 0.41s
+nv/rodinia/needle | sass | 1 | 2 | 120 | tmp | - | @CORP@/rodinia/bin/needle 2048 10 # 10.8M winst, 0.24s
+nv/rodinia/particlefilter_float | sass | 1 | 1 | 120 | tmp | - | @CORP@/rodinia/bin/particlefilter_float -x 128 -y 128 -z 10 -np 10000 # 78.2M winst, 1.18s
+nv/rodinia/sc_gpu | sass | 1 | 1 | 120 | tmp | - | @CORP@/rodinia/bin/sc_gpu 10 20 16 4096 4096 1000 none out.txt 1 # 31.5M winst, 0.52s
+nv/rodinia/bfs | sass | 1 | 8 | 120 | tmp | - | @CORP@/rodinia/bin/bfs @CORP@/rodinia/bin/data/graph4096.txt # 0.2M winst, 0.01s
+nv/hecbench/adam-cuda | sass | 1 | 8 | 120 | @CORP@/hec/src/adam-cuda | - | @CORP@/hec/src/adam-cuda/main 10000 20 1 # 1.7M winst, 0.02s
+nv/hecbench/aop-cuda | sass | 1 | 1 | 120 | @CORP@/hec/src/aop-cuda | - | @CORP@/hec/src/aop-cuda/main -runs 1 # 60.6M winst, 1.39s
+nv/hecbench/asmooth-cuda | sass | 1 | 2 | 120 | @CORP@/hec/src/asmooth-cuda | - | @CORP@/hec/src/asmooth-cuda/main 512 256 9 1 # 11.0M winst, 0.18s
+nv/hecbench/atan2-cuda | sass | 1 | 8 | 120 | @CORP@/hec/src/atan2-cuda | - | @CORP@/hec/src/atan2-cuda/main 100000 1 # 1.2M winst, 0.02s
+nv/hecbench/atomicIntrinsics-cuda | sass | 1 | 5 | 120 | @CORP@/hec/src/atomicIntrinsics-cuda | - | @CORP@/hec/src/atomicIntrinsics-cuda/main 20 1 # 5.5M winst, 0.14s
+nv/hecbench/atomicPerf-cuda | sass | 1 | 1 | 120 | @CORP@/hec/src/atomicPerf-cuda | - | @CORP@/hec/src/atomicPerf-cuda/main 1 # 34.3M winst, 0.80s
+nv/hecbench/attention-cuda | sass | 1 | 8 | 120 | @CORP@/hec/src/attention-cuda | - | @CORP@/hec/src/attention-cuda/main 4096 256 0 1 # 0.3M winst, 0.01s
+nv/hecbench/axpby-cuda | sass | 1 | 1 | 120 | @CORP@/hec/src/axpby-cuda | - | @CORP@/hec/src/axpby-cuda/main 1 # 22.4M winst, 0.27s
+nv/hecbench/backprop-cuda | sass | 1 | 8 | 120 | @CORP@/hec/src/backprop-cuda | - | @CORP@/hec/src/backprop-cuda/main 4096 # 0.2M winst, 0.01s
+nv/hecbench/bgmv-cuda | sass | 1 | 8 | 120 | @CORP@/hec/src/bgmv-cuda | - | @CORP@/hec/src/bgmv-cuda/main --op bgmv_shrink --tokens 1 --hidden 1024 --rank 16 --loras 4 --repeat 1 # 0.2M winst, 0.01s
+nv/hecbench/bitonic-sort-cuda | sass | 1 | 1 | 120 | @CORP@/hec/src/bitonic-sort-cuda | - | @CORP@/hec/src/bitonic-sort-cuda/main 16 1 # 18.1M winst, 0.21s
+nv/hecbench/blockAccess-cuda | sass | 1 | 8 | 120 | @CORP@/hec/src/blockAccess-cuda | - | @CORP@/hec/src/blockAccess-cuda/main 512 512 1 # 0.4M winst, 0.01s
+nv/hecbench/perplexity-cuda | sass | 1 | 2 | 120 | @CORP@/hec/src/perplexity-cuda | - | @CORP@/hec/src/perplexity-cuda/main 1000 50 1 # 11.8M winst, 0.30s
+nv/hecbench/s3d-cuda | sass | 1 | 2 | 120 | @CORP@/hec/src/s3d-cuda | - | @CORP@/hec/src/s3d-cuda/main -q -n 1 -s 1 # 12.5M winst, 0.28s
+nv/hecbench/silu-cuda | sass | 1 | 1 | 120 | @CORP@/hec/src/silu-cuda | - | @CORP@/hec/src/silu-cuda/main 8 8 64 64 1 # 30.5M winst, 0.36s
+nv/hecbench/sortKV-cuda | sass | 1 | 4 | 120 | @CORP@/hec/src/sortKV-cuda | - | @CORP@/hec/src/sortKV-cuda/main 65536 1 # 6.9M winst, 0.15s
+nv/samples/asyncAPI | sass | 1 | 4 | 120 | @CORP@/samples/Samples/0_Introduction/asyncAPI | - | @CORP@/samples/Samples/0_Introduction/asyncAPI/asyncAPI # 5.8M winst, 0.12s
+nv/samples/cudaOpenMP | sass | 1 | 8 | 120 | @CORP@/samples/Samples/0_Introduction/cudaOpenMP | - | @CORP@/samples/Samples/0_Introduction/cudaOpenMP/cudaOpenMP # 0.0M winst, 0.00s
+nv/samples/fp16ScalarProduct | sass | 1 | 8 | 120 | @CORP@/samples/Samples/0_Introduction/fp16ScalarProduct | - | @CORP@/samples/Samples/0_Introduction/fp16ScalarProduct/fp16ScalarProduct # 0.3M winst, 0.02s
+nv/samples/simpleAWBarrier | sass | 1 | 1 | 120 | @CORP@/samples/Samples/0_Introduction/simpleAWBarrier | - | @CORP@/samples/Samples/0_Introduction/simpleAWBarrier/simpleAWBarrier # 19.9M winst, 0.38s
+nv/samples/simpleAtomicIntrinsics | sass | 1 | 8 | 120 | @CORP@/samples/Samples/0_Introduction/simpleAtomicIntrinsics | - | @CORP@/samples/Samples/0_Introduction/simpleAtomicIntrinsics/simpleAtomicIntrinsics # 0.0M winst, 0.00s
+nv/samples/simpleCallback | sass | 1 | 8 | 120 | @CORP@/samples/Samples/0_Introduction/simpleCallback | - | @CORP@/samples/Samples/0_Introduction/simpleCallback/simpleCallback # 0.3M winst, 0.01s
+nv/samples/simpleCooperativeGroups | sass | 1 | 8 | 120 | @CORP@/samples/Samples/0_Introduction/simpleCooperativeGroups | - | @CORP@/samples/Samples/0_Introduction/simpleCooperativeGroups/simpleCooperativeGroups # 0.0M winst, 0.00s
+nv/samples/simpleCubemapTexture | sass | 1 | 8 | 120 | @CORP@/samples/Samples/0_Introduction/simpleCubemapTexture | - | @CORP@/samples/Samples/0_Introduction/simpleCubemapTexture/simpleCubemapTexture # 0.0M winst, 0.00s
+nv/samples/simpleLayeredTexture | sass | 1 | 4 | 120 | @CORP@/samples/Samples/0_Introduction/simpleLayeredTexture | - | @CORP@/samples/Samples/0_Introduction/simpleLayeredTexture/simpleLayeredTexture # 6.5M winst, 0.15s
+nv/samples/simpleOccupancy | sass | 1 | 8 | 120 | @CORP@/samples/Samples/0_Introduction/simpleOccupancy | - | @CORP@/samples/Samples/0_Introduction/simpleOccupancy/simpleOccupancy # 0.8M winst, 0.02s
+nv/samples/simpleSurfaceWrite | sass | 1 | 7 | 120 | @CORP@/samples/Samples/0_Introduction/simpleSurfaceWrite | - | @CORP@/samples/Samples/0_Introduction/simpleSurfaceWrite/simpleSurfaceWrite # 3.6M winst, 0.08s
+nv/samples/simpleVoteIntrinsics | sass | 1 | 8 | 120 | @CORP@/samples/Samples/0_Introduction/simpleVoteIntrinsics | - | @CORP@/samples/Samples/0_Introduction/simpleVoteIntrinsics/simpleVoteIntrinsics # 0.0M winst, 0.00s
+nv/samples/simpleZeroCopy | sass | 1 | 8 | 120 | @CORP@/samples/Samples/0_Introduction/simpleZeroCopy | - | @CORP@/samples/Samples/0_Introduction/simpleZeroCopy/simpleZeroCopy # 0.5M winst, 0.05s
+nv/samples/MC_EstimatePiInlineP | sass | 1 | 1 | 120 | @CORP@/samples/Samples/2_Concepts_and_Techniques/MC_EstimatePiInlineP | - | @CORP@/samples/Samples/2_Concepts_and_Techniques/MC_EstimatePiInlineP/MC_EstimatePiInlineP # 53.4M winst, 1.49s
+nv/samples/MC_EstimatePiP | sass | 1 | 8 | 120 | @CORP@/samples/Samples/2_Concepts_and_Techniques/MC_EstimatePiP | - | @CORP@/samples/Samples/2_Concepts_and_Techniques/MC_EstimatePiP/MC_EstimatePiP # 0.2M winst, 0.00s
+nv/samples/dct8x8 | sass | 1 | 1 | 120 | @CORP@/samples/Samples/2_Concepts_and_Techniques/dct8x8 | - | @CORP@/samples/Samples/2_Concepts_and_Techniques/dct8x8/dct8x8 # 30.7M winst, 0.72s
+nv/samples/inlinePTX | sass | 1 | 8 | 120 | @CORP@/samples/Samples/2_Concepts_and_Techniques/inlinePTX | - | @CORP@/samples/Samples/2_Concepts_and_Techniques/inlinePTX/inlinePTX # 0.0M winst, 0.00s
+nv/samples/scalarProd | sass | 1 | 8 | 120 | @CORP@/samples/Samples/2_Concepts_and_Techniques/scalarProd | - | @CORP@/samples/Samples/2_Concepts_and_Techniques/scalarProd/scalarProd # 0.7M winst, 0.03s
+nv/samples/shfl_scan | sass | 1 | 6 | 120 | @CORP@/samples/Samples/2_Concepts_and_Techniques/shfl_scan | - | @CORP@/samples/Samples/2_Concepts_and_Techniques/shfl_scan/shfl_scan # 3.9M winst, 0.07s
+nv/samples/streamOrderedAllocation | sass | 1 | 2 | 120 | @CORP@/samples/Samples/2_Concepts_and_Techniques/streamOrderedAllocation | - | @CORP@/samples/Samples/2_Concepts_and_Techniques/streamOrderedAllocation/streamOrderedAllocation # 11.0M winst, 0.20s
+nv/samples/threadFenceReduction | sass | 1 | 1 | 120 | @CORP@/samples/Samples/2_Concepts_and_Techniques/threadFenceReduction | - | @CORP@/samples/Samples/2_Concepts_and_Techniques/threadFenceReduction/threadFenceReduction # 22.4M winst, 0.23s
+nv/samples/StreamPriorities | sass | 1 | 1 | 120 | @CORP@/samples/Samples/3_CUDA_Features/StreamPriorities | - | @CORP@/samples/Samples/3_CUDA_Features/StreamPriorities/StreamPriorities # 68.2M winst, 1.34s
+nv/samples/binaryPartitionCG | sass | 1 | 8 | 120 | @CORP@/samples/Samples/3_CUDA_Features/binaryPartitionCG | - | @CORP@/samples/Samples/3_CUDA_Features/binaryPartitionCG/binaryPartitionCG # 0.3M winst, 0.01s
+nv/samples/cdpBezierTessellation | sass | 1 | 8 | 120 | @CORP@/samples/Samples/3_CUDA_Features/cdpBezierTessellation | - | @CORP@/samples/Samples/3_CUDA_Features/cdpBezierTessellation/cdpBezierTessellation # 0.0M winst, 0.01s
+nv/samples/cdpQuadtree | sass | 1 | 8 | 120 | @CORP@/samples/Samples/3_CUDA_Features/cdpQuadtree | - | @CORP@/samples/Samples/3_CUDA_Features/cdpQuadtree/cdpQuadtree # 0.1M winst, 0.00s
+nv/samples/cdpSimplePrint | sass | 1 | 8 | 120 | @CORP@/samples/Samples/3_CUDA_Features/cdpSimplePrint | - | @CORP@/samples/Samples/3_CUDA_Features/cdpSimplePrint/cdpSimplePrint # 0.0M winst, 0.00s
+nv/samples/cdpSimpleQuicksort | sass | 1 | 8 | 120 | @CORP@/samples/Samples/3_CUDA_Features/cdpSimpleQuicksort | - | @CORP@/samples/Samples/3_CUDA_Features/cdpSimpleQuicksort/cdpSimpleQuicksort # 0.0M winst, 0.00s
+nv/samples/newdelete | sass | 1 | 8 | 120 | @CORP@/samples/Samples/3_CUDA_Features/newdelete | - | @CORP@/samples/Samples/3_CUDA_Features/newdelete/newdelete # 0.0M winst, 0.00s
+nv/samples/ptxjit | sass | 1 | 8 | 120 | @CORP@/samples/Samples/3_CUDA_Features/ptxjit | - | @CORP@/samples/Samples/3_CUDA_Features/ptxjit/ptxjit # 0.0M winst, 0.00s
+nv/samples/simpleCudaGraphs | sass | 1 | 1 | 120 | @CORP@/samples/Samples/3_CUDA_Features/simpleCudaGraphs | - | @CORP@/samples/Samples/3_CUDA_Features/simpleCudaGraphs/simpleCudaGraphs # 81.2M winst, 1.33s
+nv/samples/warpAggregatedAtomicsCG | sass | 1 | 1 | 120 | @CORP@/samples/Samples/3_CUDA_Features/warpAggregatedAtomicsCG | - | @CORP@/samples/Samples/3_CUDA_Features/warpAggregatedAtomicsCG/warpAggregatedAtomicsCG # 63.4M winst, 1.84s
+nv/samples/LargeKernelParameter | sass | 1 | 1 | 120 | @CORP@/samples/Samples/6_Performance/LargeKernelParameter | - | @CORP@/samples/Samples/6_Performance/LargeKernelParameter/LargeKernelParameter # 20.9M winst, 0.16s
+nv/samples/cudaGraphsPerfScaling | sass | 1 | 8 | 120 | @CORP@/samples/Samples/6_Performance/cudaGraphsPerfScaling | - | @CORP@/samples/Samples/6_Performance/cudaGraphsPerfScaling/cudaGraphsPerfScaling # 0.1M winst, 0.00s
+nv/polybench/ATAX-ptx | ptx | 1 | 1 | 200 | @CORP@/polybench/bin | - | @CORP@/polybench/bin/ATAX
+nv/polybench/GEMM-ptx | ptx | 1 | 1 | 200 | @CORP@/polybench/bin | - | @CORP@/polybench/bin/GEMM
+nv/polybench/JACOBI2D-ptx | ptx | 1 | 1 | 200 | @CORP@/polybench/bin | - | @CORP@/polybench/bin/JACOBI2D
+nv/rodinia/gaussian-ptx | ptx | 1 | 1 | 240 | tmp | - | @CORP@/rodinia/bin/gaussian -s 512
+nv/rodinia/needle-ptx | ptx | 1 | 1 | 200 | tmp | - | @CORP@/rodinia/bin/needle 2048 10
+nv/hecbench/adam-cuda-ptx | ptx | 1 | 4 | 200 | @CORP@/hec/src/adam-cuda | - | @CORP@/hec/src/adam-cuda/main 10000 20 1
+nv/hecbench/atomicPerf-cuda-ptx | ptx | 1 | 1 | 200 | @CORP@/hec/src/atomicPerf-cuda | - | @CORP@/hec/src/atomicPerf-cuda/main 1
+nv/hecbench/axpby-cuda-ptx | ptx | 1 | 1 | 200 | @CORP@/hec/src/axpby-cuda | - | @CORP@/hec/src/axpby-cuda/main 1
+nv/hecbench/bitonic-sort-cuda-ptx | ptx | 1 | 1 | 200 | @CORP@/hec/src/bitonic-sort-cuda | - | @CORP@/hec/src/bitonic-sort-cuda/main 16 1
+nv/hecbench/silu-cuda-ptx | ptx | 1 | 1 | 200 | @CORP@/hec/src/silu-cuda | - | @CORP@/hec/src/silu-cuda/main 8 8 64 64 1
+nv/samples/dct8x8-ptx | ptx | 1 | 1 | 200 | @CORP@/samples/Samples/2_Concepts_and_Techniques/dct8x8 | - | @CORP@/samples/Samples/2_Concepts_and_Techniques/dct8x8/dct8x8
+nv/samples/reduction-ptx | ptx | 1 | 1 | 506 | @CORP@/samples/Samples/2_Concepts_and_Techniques/reduction | - | @CORP@/samples/Samples/2_Concepts_and_Techniques/reduction/reduction
+nv/samples/threadFenceReduction-ptx | ptx | 1 | 1 | 200 | @CORP@/samples/Samples/2_Concepts_and_Techniques/threadFenceReduction | - | @CORP@/samples/Samples/2_Concepts_and_Techniques/threadFenceReduction/threadFenceReduction
+nv/polybench/3MM-t4 | sass | 4 | 1 | 120 | @CORP@/polybench/bin | - | @CORP@/polybench/bin/3MM
+nv/hecbench/asyncAllocation-cuda-t4 | sass | 4 | 1 | 120 | @CORP@/hec/src/asyncAllocation-cuda | - | @CORP@/hec/src/asyncAllocation-cuda/main 200 2
+nv/samples/dct8x8-t4 | sass | 4 | 1 | 120 | @CORP@/samples/Samples/2_Concepts_and_Techniques/dct8x8 | - | @CORP@/samples/Samples/2_Concepts_and_Techniques/dct8x8/dct8x8
+nv/rodinia/gaussian-t4 | sass | 4 | 1 | 120 | tmp | - | @CORP@/rodinia/bin/gaussian -s 512
+nv/hecbench/aop-cuda-t4 | sass | 4 | 1 | 120 | @CORP@/hec/src/aop-cuda | - | @CORP@/hec/src/aop-cuda/main -runs 1
+
+# --- AMD programs (hipified Phase 0 corpus, built by scripts/pgo/build-amd-corpus.sh, gfx942 as amd/mi300x)
+amd/amd-hecbench/adam | amd | 1 | 8 | 120 | tmp | - | @CORP@/amd/bin/hec-adam 10000 20 1 # 1.4M winst, 0.04s
+amd/amd-hecbench/aop | amd | 1 | 1 | 120 | tmp | - | @CORP@/amd/bin/hec-aop -runs 1 # 89.9M winst, 0.90s
+amd/amd-hecbench/asmooth | amd | 1 | 3 | 120 | tmp | - | @CORP@/amd/bin/hec-asmooth 512 256 9 1 # 8.2M winst, 0.10s
+amd/amd-hecbench/asyncAllocation | amd | 1 | 1 | 120 | tmp | - | @CORP@/amd/bin/hec-asyncAllocation 200 2 # 220.4M winst, 2.68s
+amd/amd-hecbench/atan2 | amd | 1 | 8 | 120 | tmp | - | @CORP@/amd/bin/hec-atan2 100000 1 # 0.5M winst, 0.02s
+amd/amd-hecbench/atomicPerf | amd | 1 | 2 | 120 | tmp | - | @CORP@/amd/bin/hec-atomicPerf 1 # 13.4M winst, 0.44s
+amd/amd-hecbench/axpby | amd | 1 | 1 | 120 | tmp | - | @CORP@/amd/bin/hec-axpby 1 # 24.5M winst, 0.32s
+amd/amd-hecbench/bilateral | amd | 1 | 1 | 120 | tmp | - | @CORP@/amd/bin/hec-bilateral 256 128 0.5 0.5 1 # 19.4M winst, 0.97s
+amd/amd-hecbench/bitonic-sort | amd | 1 | 2 | 120 | tmp | - | @CORP@/amd/bin/hec-bitonic-sort 16 1 # 12.3M winst, 0.16s
+amd/amd-hecbench/silu | amd | 1 | 3 | 120 | tmp | - | @CORP@/amd/bin/hec-silu 8 8 64 64 1 # 9.9M winst, 0.38s
+amd/amd-hecbench/sortKV | amd | 1 | 1 | 120 | tmp | - | @CORP@/amd/bin/hec-sortKV 65536 1 # 21.3M winst, 0.36s
+amd/amd-polybench/2DCONV | amd | 1 | 1 | 120 | tmp | - | @CORP@/amd/bin/pb-2DCONV # 20.4M winst, 0.76s
+amd/amd-polybench/3MM | amd | 1 | 1 | 120 | tmp | - | @CORP@/amd/bin/pb-3MM # 82.2M winst, 2.41s
+amd/amd-polybench/ADI | amd | 1 | 8 | 120 | tmp | - | @CORP@/amd/bin/pb-ADI # 3.0M winst, 0.15s
+amd/amd-polybench/ATAX | amd | 1 | 1 | 120 | tmp | - | @CORP@/amd/bin/pb-ATAX # 21.2M winst, 0.61s
+amd/amd-polybench/BICG | amd | 1 | 4 | 120 | tmp | - | @CORP@/amd/bin/pb-BICG # 7.1M winst, 0.24s
+amd/amd-polybench/GEMM | amd | 1 | 1 | 120 | tmp | - | @CORP@/amd/bin/pb-GEMM # 31.6M winst, 0.82s
+amd/amd-polybench/GEMVER | amd | 1 | 1 | 120 | tmp | - | @CORP@/amd/bin/pb-GEMVER # 19.4M winst, 0.57s
+amd/amd-polybench/GESUMMV | amd | 1 | 4 | 120 | tmp | - | @CORP@/amd/bin/pb-GESUMMV # 6.3M winst, 0.31s
+amd/amd-polybench/JACOBI2D | amd | 1 | 1 | 120 | tmp | - | @CORP@/amd/bin/pb-JACOBI2D # 26.2M winst, 0.53s
+amd/amd-polybench/MVT | amd | 1 | 1 | 120 | tmp | - | @CORP@/amd/bin/pb-MVT # 20.5M winst, 0.73s
+amd/amd-rodinia/bfs | amd | 1 | 8 | 120 | tmp | - | @CORP@/amd/bin/rod-bfs @CORP@/rodinia/bin/data/graph4096.txt # 0.1M winst, 0.00s
+amd/amd-rodinia/gaussian | amd | 1 | 1 | 133 | tmp | - | @CORP@/amd/bin/rod-gaussian -s 512 # 250.1M winst, 3.33s
+amd/amd-rodinia/needle | amd | 1 | 2 | 120 | tmp | - | @CORP@/amd/bin/rod-needle 2048 10 # 13.1M winst, 0.27s
+amd/amd-rodinia/pathfinder | amd | 1 | 4 | 120 | tmp | - | @CORP@/amd/bin/rod-pathfinder 100000 100 20 # 6.6M winst, 0.27s
+
+# --- pantheon soak workloads (pre-built, run for a fixed duration: that duration is their time cap/weight; every workload that
+# tests/ holds out in test-manifest.txt is absent here)
+pan/pantheon/int_virus | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/int_virus 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/compute_virus | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/compute_virus 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/fp64_virus | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/fp64_virus 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/mma_virus | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/mma_virus 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/pulse_virus | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/pulse_virus 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/memory_bank_thrash | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/memory_bank_thrash 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/cache_latency | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/cache_latency 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/atomic_virus | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/atomic_virus 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/llm_prefill | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/llm_prefill 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/graph_replay | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/graph_replay 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/sfu_stress | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/sfu_stress 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/tensor_virus | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/tensor_virus 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/moe_router | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/moe_router 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/memory_pc_pingpong | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/memory_pc_pingpong 0 3 2 --kernel_loops 2 --grid_size 4
+
+# --- PyTorch (needs a PyTorch venv, @PY@): eleven sweep groups, the `nn` group is held out (test-manifest.txt)
+torch/sweep/train-groups | raw | 1 | 1 | 3600 | tmp | VGPU_THREADS=1 VGPU_SWEEP_GROUPS=amp,attention,fft,graphs,linalg,losses,ops,optim,rnn,sdpa,sparse VGPU_SWEEP_TIER=quick OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 TRITON_CACHE_DIR=@TMP@/t TORCHINDUCTOR_CACHE_DIR=@TMP@/i | @BUILD@/vgpu run --gpu nvidia/rtx5090 --preload @PY@ @SRC@/nvidia/tests/pytorch/sweep.py
