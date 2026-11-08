@@ -176,6 +176,7 @@ Config Config::from_env() {
     else c.budget = std::atof(b);
   }
   c.verify = static_cast<int>(env_u64("VGPU_MEMO_VERIFY", 0));
+  if (const char* e = std::getenv("VGPU_MEMO_EVENT_CREDIT_MS"); e && *e) c.event_credit_ns = static_cast<uint64_t>(std::atof(e) * 1e6);
   if (const char* m = std::getenv("VGPU_MEMO_TEST_MUTANT"); m && *m) c.mutant = m;
   return c;
 }
@@ -630,11 +631,46 @@ void DeviceMemo::scan_pointers(uint64_t addr, const uint8_t* p, uint64_t len) {
   if (!ptrs_ && has_pointer_like(addr, p, len)) ptrs_ = true;   // (caller holds mu_)
 }
 
+// Whether the bytes of a host write of `len` bytes may be hashed. The hashing is part of the budget that recording shares: what the events
+// have cost so far, past their credit, counts in the pool the record decision draws on (fixed + record + event), and the events have a cap of their own, the
+// same share of the kernel time (VGPU_MEMO_BUDGET) plus their own credit, so that a program that uploads more than its credit between
+// short launches cannot spend the pool on hashing. A write that does not fit is not hashed, and the caller poisons the history instead:
+// the history then names a state no other run has, so it can never produce a hit that is not the right one, and what is lost is the
+// hits after it.
+bool DeviceMemo::event_budget_allows(uint64_t len) {
+  if (cfg_.force_record) return true;
+  std::lock_guard<std::mutex> g(mu_);
+  const double est = static_cast<double>(len) / bw_ * 1e9 + 300.0;
+  const double allowed = cfg_.budget * static_cast<double>(stats_.exec_ns) + static_cast<double>(cfg_.event_credit_ns);
+  return static_cast<double>(stats_.event_ns) + est <= allowed;
+}
+
 void DeviceMemo::on_write(uint64_t dst, const void* src, uint64_t len) {
   if (t_scope == kReplay) return;
   if (t_scope == kEngine) return;   // a kernel's store: the launch's diff has it
+  if (dormant_.load(std::memory_order_relaxed)) return;   // the cache is off for good: no history is kept
   if (mut("no_write_event")) return;
+  constexpr uint64_t kTimed = 1u << 16;   // (smaller writes are charged by estimate: a clock read costs a tenth of one)
+  const uint64_t t0 = len >= kTimed ? now_ns() : 0;
+  if (src && !event_budget_allows(len)) {
+    if (!mut("event_budget_no_poison")) {
+      std::lock_guard<std::mutex> g(mu_);
+      ++event_seq_;
+      ++stats_.events_skipped;
+      poison_locked("event-budget");
+      return;
+    }
+    // (the wrong rule, for the tests: the write is an event without its bytes)
+    std::lock_guard<std::mutex> g(mu_);
+    Hasher h(0x77726974);
+    h.hash(state_), h.u64(dst), h.u64(len), h.hash(Hash128{1, 2});
+    state_ = h.done();
+    ++event_seq_;
+    invalidate_range_locked(dst, len);
+    return;
+  }
   const Hash128 bytes = src ? hash_bytes(src, static_cast<size_t>(len)) : Hash128{1, 2};
+  const uint64_t t1 = len >= kTimed ? now_ns() : 0;
   std::lock_guard<std::mutex> g(mu_);
   Hasher h(0x77726974);
   h.hash(state_), h.u64(dst), h.u64(len), h.hash(bytes);
@@ -642,6 +678,13 @@ void DeviceMemo::on_write(uint64_t dst, const void* src, uint64_t len) {
   ++event_seq_;
   invalidate_range_locked(dst, len);
   if (src) scan_pointers(dst, static_cast<const uint8_t*>(src), len);
+  if (len >= kTimed) {
+    const uint64_t t2 = now_ns();
+    stats_.event_ns += t2 - t0;
+    if (len >= (1u << 20) && t1 > t0) bw_ = 0.7 * bw_ + 0.3 * (static_cast<double>(len) / static_cast<double>(t1 - t0) * 1e9);
+  } else {
+    stats_.event_ns += 300 + static_cast<uint64_t>(static_cast<double>(len) / bw_ * 1e9);
+  }
 }
 
 void DeviceMemo::on_fill(uint64_t dst, const uint8_t* pattern, uint32_t pattern_len, uint64_t len) {
@@ -964,7 +1007,7 @@ bool DeviceMemo::begin(const KernelRef& k, Ticket& t, exec::LaunchStats* out_sta
 
 bool DeviceMemo::begin_impl(const KernelRef& k, Ticket& t, exec::LaunchStats* out_stats) {
   t = Ticket{};
-  if (dormant_) {
+  if (dormant_.load(std::memory_order_relaxed)) {
     std::lock_guard<std::mutex> g(mu_);
     ++stats_.dormant_launches;
     return false;
@@ -1055,7 +1098,9 @@ bool DeviceMemo::begin_impl(const KernelRef& k, Ticket& t, exec::LaunchStats* ou
     }
     std::lock_guard<std::mutex> g(mu_);
     const double allowed = cfg_.budget * static_cast<double>(stats_.exec_ns) + static_cast<double>(cfg_.credit_ns);
-    record = static_cast<double>(stats_.fixed_ns + stats_.record_ns + est) <= allowed;
+    // (the hashing of host writes draws on the same pool, past the credit of its own: uploads the program does before its first launch are free)
+    const uint64_t event_over = stats_.event_ns > cfg_.event_credit_ns ? stats_.event_ns - cfg_.event_credit_ns : 0;
+    record = static_cast<double>(stats_.fixed_ns + stats_.record_ns + event_over + est) <= allowed;
   }
   if (record && !have_bases) collect_bases(k, t);
   t.record = record;
@@ -1310,7 +1355,7 @@ void DeviceMemo::end(Ticket& t, const exec::LaunchStats& stats, uint64_t exec_ns
     // nothing later can match across the gap).
     if (executed_ >= 256 && stats_.hits == 0 && static_cast<double>(stats_.fixed_ns) > 0.05 * static_cast<double>(stats_.exec_ns) &&
         !cfg_.force_record && !cfg_.verify) {
-      dormant_ = true;
+      dormant_.store(true, std::memory_order_relaxed);
       poison_locked("dormant-fixed-cost");
     }
   }
@@ -1391,10 +1436,10 @@ void DeviceMemo::report(std::FILE* f) const {
   std::fprintf(f,
                "[vgpu][memo] launches=%" PRIu64 " hits=%" PRIu64 " disk_hits=%" PRIu64 " recorded=%" PRIu64 " unrecorded=%" PRIu64 " poisoned=%" PRIu64
                " dormant_launches=%" PRIu64 " replay_refused=%" PRIu64 " verify_checked=%" PRIu64 " verify_mismatch=%" PRIu64 " entries_put=%" PRIu64
-               " entry_bytes=%" PRIu64 " exec_ms=%.3f fixed_ms=%.3f record_ms=%.3f hit_ms=%.3f saved_ms=%.3f reasons=%s\n",
+               " entry_bytes=%" PRIu64 " exec_ms=%.3f fixed_ms=%.3f record_ms=%.3f event_ms=%.3f events_skipped=%" PRIu64 " hit_ms=%.3f saved_ms=%.3f reasons=%s\n",
                s.launches, s.hits, s.disk_hits, s.recorded, s.unrecorded, s.poisoned, s.dormant_launches, s.replay_refused, s.verify_checked,
                s.verify_mismatch, s.entries_put, s.entry_bytes, static_cast<double>(s.exec_ns) / 1e6, static_cast<double>(s.fixed_ns) / 1e6,
-               static_cast<double>(s.record_ns) / 1e6, static_cast<double>(s.hit_ns) / 1e6, static_cast<double>(s.saved_ns) / 1e6,
+               static_cast<double>(s.record_ns) / 1e6, static_cast<double>(s.event_ns) / 1e6, s.events_skipped, static_cast<double>(s.hit_ns) / 1e6, static_cast<double>(s.saved_ns) / 1e6,
                reasons.empty() ? "-" : reasons.c_str());
 }
 

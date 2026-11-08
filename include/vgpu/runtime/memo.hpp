@@ -37,6 +37,8 @@ struct Config {
   bool force_record = false;          // VGPU_MEMO_BUDGET=inf: capture every miss whatever it costs (measurement, tests)
   int verify = 0;                     // VGPU_MEMO_VERIFY=1: run every hit for real and compare (abort on a difference); 2: count
   uint64_t credit_ns = 150000;        // recording is free until it has cost this much
+  uint64_t event_credit_ns = 8000000;    // VGPU_MEMO_EVENT_CREDIT_MS: hashing the bytes of host writes is free until it has cost this much
+                                         // (past it, it eats the pool above: a program's uploads before its first launch are not poison)
   std::string mutant;                 // VGPU_MEMO_TEST_MUTANT: a deliberately wrong rule, for the tests that must catch it
   static Config from_env();
 };
@@ -68,6 +70,8 @@ struct Stats {
   uint64_t exec_ns = 0;      // kernel time of the launches that ran
   uint64_t fixed_ns = 0;     // what the key, the lookup and the checks cost those launches
   uint64_t record_ns = 0;    // what capturing write sets and storing entries cost them
+  uint64_t event_ns = 0;     // what hashing the bytes of host writes cost (part of the same budget as record_ns)
+  uint64_t events_skipped = 0;   // host writes not hashed because the budget was spent (each poisoned the history instead)
   uint64_t hit_ns = 0;       // what hits cost (lookup and replay)
   uint64_t saved_ns = 0;     // what the hits' launches took when they ran, less hit_ns
   std::map<std::string, uint64_t> reasons;   // why launches were not cached, by rule
@@ -176,8 +180,9 @@ class DeviceMemo final : public EventSink {
   uint64_t poison_seq_ = 0;
   uint64_t event_seq_ = 0;       // host events (writes, fills, copies, allocations, frees)
   bool ptrs_ = true;             // device pointers may be stored in memory (until shown otherwise)
-  bool dormant_ = false;
+  std::atomic<bool> dormant_{false};
   std::atomic<int> active_launches_{0};
+  bool event_budget_allows(uint64_t len);   // false: the write's bytes are not hashed (the caller poisons)
   std::atomic<bool> tainted_{false};
   std::map<uint64_t, PageCache> cache_;
   struct KernelInfo {

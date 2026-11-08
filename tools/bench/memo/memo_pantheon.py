@@ -19,6 +19,7 @@ ap.add_argument("--max-load", type=float, default=8.0)
 ap.add_argument("--timeout", type=float, default=120)
 ap.add_argument("--lock", default="/tmp/pantheonsim-builder.lock")
 ap.add_argument("--budget", default="")
+ap.add_argument("--event-credit-ms", default="", help="VGPU_MEMO_EVENT_CREDIT_MS (a huge number: the hashing of host writes unbudgeted, as before round sp38)")
 a = ap.parse_args()
 a.build, a.bin, a.out = os.path.abspath(a.build), os.path.abspath(a.bin), os.path.abspath(a.out)
 os.makedirs(a.out, exist_ok=True)
@@ -98,6 +99,8 @@ for w in names:
         inf = {"VGPU_MEMO_DIR": cache}
         if a.budget:
             inf["VGPU_MEMO_BUDGET"] = a.budget
+        if a.event_credit_ms:
+            inf["VGPU_MEMO_EVENT_CREDIT_MS"] = a.event_credit_ms
         r = {"off": run(w, None, work), "cold": run(w, inf, work), "warm": run(w, inf, work),
              "verify": run(w, dict(inf, VGPU_MEMO_VERIFY="2"), work)}
         r["cache_bytes"] = sum(os.path.getsize(os.path.join(rt, f)) for rt, _, fs in os.walk(cache) for f in fs) if os.path.exists(cache) else 0
