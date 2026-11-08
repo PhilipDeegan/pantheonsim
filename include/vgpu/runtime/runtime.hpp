@@ -21,10 +21,16 @@
 #include <vector>
 
 #include "vgpu/exec/launch.hpp"
+#include "vgpu/memo.hpp"
 #include "vgpu/memory.hpp"
 #include "vgpu/profile.hpp"
 #include "vgpu/ptx/ast.hpp"
 #include "vgpu/telemetry.hpp"
+
+namespace vgpu::memo {
+class DeviceMemo;
+struct Config;
+}  // namespace vgpu::memo
 
 namespace vgpu::runtime {
 
@@ -47,6 +53,11 @@ class Device {
   // How many devices the machine has, for device-side cudaGetDeviceCount.
   void set_device_count(int n) { device_count_ = n; }
   MemoryManager& memory() { return mem_; }
+
+  // Launch-level result caching (vgpu/runtime/memo.hpp): opt-in, made from VGPU_MEMO and its knobs when the device is
+  // made; this makes (or replaces) it with a configuration of a test's own. Null when it is off.
+  void enable_memo(const memo::Config& cfg);
+  memo::DeviceMemo* memo() { return memo_.get(); }
 
   // Reports device-busy time to telemetry without running a kernel. Used by
   // `vgpu serve` to present a rack under a chosen synthetic load.
@@ -150,7 +161,7 @@ class Device {
   // own fault raises.
   void install_fault_hook();
   void run_kernel(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg,
-                  const std::vector<std::vector<uint8_t>>& args, const exec::SymbolTable* syms);
+                  const std::vector<std::vector<uint8_t>>& args, const exec::SymbolTable* syms, exec::LaunchStats* stats_out = nullptr);
   struct LoadedModule;
   const ptx::EntryFn* lazy_function(LoadedModule& lm, const std::string& name) const;
   std::unique_ptr<class FaultHook> fault_;
@@ -166,7 +177,7 @@ class Device {
   // A large module is not parsed whole (see load_module): its kernels are
   // parsed one at a time, the first time each is looked up.
   struct LazyModule;
-  uint64_t install_module(std::shared_ptr<ptx::Module> mod, std::shared_ptr<LazyModule> lazy);
+  uint64_t install_module(std::shared_ptr<ptx::Module> mod, std::shared_ptr<LazyModule> lazy, const memo::Hash128* code = nullptr);
   struct LoadedModule {
     uint64_t id = 0;
     std::shared_ptr<ptx::Module> mod;   // the whole module, or only its declarations when lazy
@@ -207,6 +218,18 @@ class Device {
   bool launch_cache_ = true;
   mutable std::mutex kernel_table_mu_;
   mutable std::shared_ptr<const exec::KernelTable> kernel_table_;
+  // What launch-level result caching knows of each loaded module, by its symbol table (which a launch passes): a hash of
+  // the module's source or image, and the addresses of its global variables (built when first asked for).
+  struct MemoModule {
+    memo::Hash128 code;
+    bool ok = false;
+    std::vector<uint64_t> globals;
+    bool globals_built = false;
+  };
+  std::unordered_map<const exec::SymbolTable*, MemoModule> memo_modules_;
+  std::mutex memo_modules_mu_;
+  // Last: destroyed first, while the memory it reports on is whole.
+  std::unique_ptr<memo::DeviceMemo> memo_;
 };
 
 // A range of host memory CUDA knows about, and the device that was current

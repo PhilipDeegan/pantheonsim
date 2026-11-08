@@ -249,6 +249,7 @@ add_library(vgpu STATIC
   src/core/profile.cpp
   src/core/registry.cpp
   src/core/memory.cpp
+  src/core/memo_hash.cpp
   src/core/memory_backing.cpp
   src/core/telemetry.cpp
   src/core/profiling.cpp
@@ -271,6 +272,7 @@ add_library(vgpu STATIC
   src/exec/devrt.cpp
   src/exec/worker_pool.cpp
   src/runtime/runtime.cpp
+  src/runtime/memo.cpp
   src/runtime/host_gpu.cpp
   src/runtime/shared_runtime.cpp
   src/runtime/visible_devices.cpp
@@ -1594,6 +1596,8 @@ vgpu_unit_test(test_barriers)
 vgpu_unit_test(test_dynpar)
 # What a device remembers between launches gives the answers a device that remembers nothing gives.
 vgpu_unit_test(test_launch_cache)
+# Launch-level result caching (VGPU_MEMO): the history chain, the poisoning table, exact replay, the disk store, the mutants.
+vgpu_unit_test(test_memo)
 # The AST builder: a kernel made with no PTX text, loaded and launched through the runtime facade (E9, E10); what it
 # lays out against what the parser lays out; no mul/add contraction.
 vgpu_unit_test(test_ast_builder)
@@ -3504,6 +3508,14 @@ if(TARGET vgpucublas)
     DEPENDS vgpucudart
     ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
     TIMEOUT 300)
+
+  # Launch-level result caching through the runtime API: off, cold, warm and verified runs of one program must agree.
+  add_test(NAME e2e_memo_api_matrix
+           COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_memo_api_matrix.sh)
+  set_tests_properties(e2e_memo_api_matrix PROPERTIES
+    DEPENDS vgpucudart
+    ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
+    TIMEOUT 600)
 
   add_test(NAME e2e_occupancy_rules
            COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_occupancy_rules.sh)

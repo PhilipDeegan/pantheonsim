@@ -168,6 +168,7 @@ uint64_t MemoryManager::alloc(uint64_t size, uint64_t request) {
   }
   notify_usage();
   VGPU_MEM_TRACE('A', base, size);
+  if (memo_sink_) memo_sink_->on_alloc(base, size);
   return base;
 }
 
@@ -198,6 +199,7 @@ void MemoryManager::remember_freed(uint64_t ptr, uint64_t size) {
 }
 
 void MemoryManager::free(uint64_t ptr) {
+  if (memo_sink_) memo_sink_->on_free(ptr);
   // The gate is told of every free, not only while some allocation holds a card copy: it tracks allocations that have none (a launch the size rule
   // refused still registers them), and an entry that outlives its allocation points into a freed record and reads freed memory.
   if (CardGate* gate = card_gate_.load(std::memory_order_acquire)) gate->before_free(ptr);
@@ -956,6 +958,7 @@ uint8_t* MemoryManager::materialize(Allocation& a, uint64_t chunk_idx) {
 
 void MemoryManager::fill(uint64_t dst, const uint8_t* pattern, uint32_t pattern_len, uint64_t len) {
   if (len == 0) return;
+  if (memo_sink_) memo_sink_->on_fill(dst, pattern, pattern_len, len);
   VGPU_MEM_TRACE('Z', dst, len);
   // Host memory mapped here is filled where it is, the pattern's phase
   // running on across pieces.
@@ -1027,6 +1030,7 @@ uint64_t MemoryManager::resident_bytes() const {
 
 void MemoryManager::write(uint64_t dst, const void* src, uint64_t len) {
   if (len == 0) return;
+  if (memo_sink_) memo_sink_->on_write(dst, src, len);
   VGPU_MEM_TRACE('W', dst, len);
   if (host_maps_ && host_maps_->may_contain(dst)) {
     if (HostHit h; lookup_host(dst, len, &h)) {
@@ -1081,6 +1085,7 @@ bool MemoryManager::host_pieces(uint64_t addr, uint64_t len, std::vector<HostPie
     at += n;
     left -= n;
   }
+  host_maps_->touched.store(true, std::memory_order_relaxed);
   return true;
 }
 
@@ -1101,6 +1106,12 @@ std::atomic<bool> g_host_lookup_cache{[] {
 void MemoryManager::set_host_lookup_cache(bool on) { g_host_lookup_cache.store(on, std::memory_order_relaxed); }
 
 bool MemoryManager::lookup_host(uint64_t addr, uint64_t len, HostHit* out) const {
+  if (!lookup_host_core(addr, len, out)) return false;
+  if (!host_maps_->touched.load(std::memory_order_relaxed)) host_maps_->touched.store(true, std::memory_order_relaxed);
+  return true;
+}
+
+bool MemoryManager::lookup_host_core(uint64_t addr, uint64_t len, HostHit* out) const {
   if (!g_host_lookup_cache.load(std::memory_order_relaxed)) {   // VGPU_HOSTMAP_CACHE=0: the table, under its mutex, every time
     std::lock_guard<std::mutex> lock(host_maps_->mu);
     const HostMap* m = find_host_map_locked(addr, len);
@@ -1170,6 +1181,7 @@ void MemoryManager::unmap_host(uint64_t addr) {
 }
 
 void MemoryManager::free_all() {
+  if (memo_sink_) memo_sink_->on_poison("free_all");
   if (CardGate* gate = card_gate_.load(std::memory_order_acquire)) gate->before_free(UINT64_MAX);
   // The heap's blocks go in the sweep below with every other allocation; its
   // record of them, and the budget they held, go here.
@@ -1209,6 +1221,7 @@ uint64_t round_up(uint64_t v, uint64_t to) { return (v + to - 1) / to * to; }
 }  // namespace
 
 uint64_t MemoryManager::reserve(uint64_t size, uint64_t alignment) {
+  if (memo_sink_) memo_sink_->on_poison("reserve");
   ExclusiveGuard table_guard(table_lock_.get());
   if (size == 0 || size % kVmmGranularity)
     throw Error::make(Err::InvalidValue, "reserving ", size,
@@ -1243,6 +1256,7 @@ bool MemoryManager::range_mapped(uint64_t va, uint64_t size) const {
 }
 
 void MemoryManager::address_free(uint64_t va, uint64_t size) {
+  if (memo_sink_) memo_sink_->on_poison("address_free");
   ExclusiveGuard table_guard(table_lock_.get());
   auto it = reserved_.find(va);
   if (it == reserved_.end() || it->second.size != size)
@@ -1256,6 +1270,7 @@ void MemoryManager::address_free(uint64_t va, uint64_t size) {
 }
 
 uint64_t MemoryManager::create_handle(uint64_t size, int shareable_types, bool compressible) {
+  if (memo_sink_) memo_sink_->on_poison("create_handle");
   ExclusiveGuard table_guard(table_lock_.get());
   if (size == 0 || size % kVmmGranularity)
     throw Error::make(Err::InvalidValue, "creating ", size,
@@ -1298,6 +1313,7 @@ bool MemoryManager::handle_compressible(uint64_t handle) const {
 // that one mapping (Allocation::external), so reads, writes and kernels reach it as they reach any
 // handle's memory, and a process that maps the file reaches the same bytes.
 int MemoryManager::export_handle(uint64_t handle) {
+  if (memo_sink_) memo_sink_->on_poison("export_handle");
   ExclusiveGuard table_guard(table_lock_.get());
   auto it = handles_.find(handle);
   if (it == handles_.end())
@@ -1346,6 +1362,7 @@ int MemoryManager::export_handle(uint64_t handle) {
 }
 
 uint64_t MemoryManager::import_handle(int fd) {
+  if (memo_sink_) memo_sink_->on_poison("import_handle");
   struct stat st;
   if (fd < 0 || ::fstat(fd, &st) != 0 || st.st_size <= 0)
     throw Error::make(Err::NotFound, "importing a memory handle: ", fd, " is not an exported handle");
@@ -1388,6 +1405,7 @@ uint64_t MemoryManager::handle_size(uint64_t handle) const {
 }
 
 void MemoryManager::retain_handle(uint64_t handle) {
+  if (memo_sink_) memo_sink_->on_poison("retain_handle");
   ExclusiveGuard table_guard(table_lock_.get());
   auto it = handles_.find(handle);
   if (it == handles_.end())
@@ -1396,6 +1414,7 @@ void MemoryManager::retain_handle(uint64_t handle) {
 }
 
 uint64_t MemoryManager::retain_handle_at(uint64_t va) {
+  if (memo_sink_) memo_sink_->on_poison("retain_handle_at");
   ExclusiveGuard table_guard(table_lock_.get());
   auto mu = maps_.upper_bound(va);
   if (mu == maps_.begin()) return 0;
@@ -1407,6 +1426,7 @@ uint64_t MemoryManager::retain_handle_at(uint64_t va) {
 }
 
 void MemoryManager::release_handle(uint64_t handle) {
+  if (memo_sink_) memo_sink_->on_poison("release_handle");
   ExclusiveGuard table_guard(table_lock_.get());
   auto it = handles_.find(handle);
   if (it == handles_.end())
@@ -1429,6 +1449,7 @@ void MemoryManager::collect_handle(uint64_t handle) {
 }
 
 void MemoryManager::map(uint64_t va, uint64_t size, uint64_t offset, uint64_t handle) {
+  if (memo_sink_) memo_sink_->on_poison("map");
   ExclusiveGuard table_guard(table_lock_.get());
   if (size == 0 || size % kVmmGranularity || va % kVmmGranularity)
     throw Error::make(Err::InvalidValue, "mapping ", size, " bytes at ", Hex{va},
@@ -1470,6 +1491,7 @@ void MemoryManager::map(uint64_t va, uint64_t size, uint64_t offset, uint64_t ha
 }
 
 void MemoryManager::unmap(uint64_t va, uint64_t size) {
+  if (memo_sink_) memo_sink_->on_poison("unmap");
   ExclusiveGuard table_guard(table_lock_.get());
   // The range is whole mappings, one after another: a program that maps a
   // pool a chunk at a time (ggml's VMM pool) unmaps it all in one call.
@@ -1499,6 +1521,7 @@ void MemoryManager::unmap(uint64_t va, uint64_t size) {
 }
 
 void MemoryManager::set_access(uint64_t va, uint64_t size, bool readable, bool writable) {
+  if (memo_sink_) memo_sink_->on_poison("set_access");
   ExclusiveGuard table_guard(table_lock_.get());
   if (size == 0 || size % kVmmGranularity || va % kVmmGranularity)
     throw Error::make(Err::InvalidValue, "granting access to ", size, " bytes at ", Hex{va},
@@ -1532,6 +1555,7 @@ bool MemoryManager::access_at(uint64_t va, bool* readable, bool* writable) const
 // ---- memory another process can map -------------------------------------------
 
 uint64_t MemoryManager::share(uint64_t ptr, const std::string& path) {
+  if (memo_sink_) memo_sink_->on_poison("share");
   // The exported file is the allocation from here on: whatever only the card holds comes back first.
   // (the allocation leaves live_ below, for a file: the gate drops what it tracks of it as well)
   if (CardGate* gate = card_gate_.load(std::memory_order_acquire)) {
@@ -1585,6 +1609,7 @@ bool MemoryManager::is_shared(uint64_t ptr) const {
 }
 
 uint64_t MemoryManager::adopt(const std::string& path, uint64_t size) {
+  if (memo_sink_) memo_sink_->on_poison("adopt");
   ExclusiveGuard table_guard(table_lock_.get());
   const int fd = ::open(path.c_str(), O_RDWR);
   if (fd < 0)
@@ -1607,6 +1632,7 @@ uint64_t MemoryManager::adopt(const std::string& path, uint64_t size) {
 }
 
 bool MemoryManager::unlink_shared(uint64_t ptr) {
+  if (memo_sink_) memo_sink_->on_poison("unlink_shared");
   ExclusiveGuard table_guard(table_lock_.get());
   const auto it = shared_.find(ptr);
   if (it == shared_.end() || !it->second.owner) return false;
@@ -1615,6 +1641,7 @@ bool MemoryManager::unlink_shared(uint64_t ptr) {
 }
 
 void MemoryManager::abandon(uint64_t va) {
+  if (memo_sink_) memo_sink_->on_poison("abandon");
   ExclusiveGuard table_guard(table_lock_.get());
   const auto it = shared_.find(va);
   if (it == shared_.end() || it->second.owner)
@@ -1814,6 +1841,7 @@ bool MemoryManager::store_host_run(uint64_t addr, const void* src, uint64_t len,
 // interpreters' rows by a few percent at equal instructions)
 [[gnu::cold, gnu::noinline]] bool MemoryManager::copy_to(MemoryManager& dst_mm, uint64_t dst, uint64_t src, uint64_t len) const {
   if (len == 0) return true;
+  const uint64_t len_in = len;
   // read() takes a fault armed on copies and write() none; run_allocation declines the others (loads, stores, stuck cells).
   const auto armed = [](const uint64_t* pending) { return pending && __atomic_load_n(pending, __ATOMIC_RELAXED); };
   const auto copy_armed = [&](const MemoryManager& m) { return m.access_fault_ && armed(m.access_fault_->copy_pending); };
@@ -1857,6 +1885,7 @@ bool MemoryManager::store_host_run(uint64_t addr, const void* src, uint64_t len,
     doff += n;
     len -= n;
   }
+  if (dst_mm.memo_sink_) dst_mm.memo_sink_->on_copy(dst, src, len_in);
   return true;
 }
 
@@ -2358,6 +2387,95 @@ bool MemoryManager::load_texels(const uint64_t* addrs, unsigned n, uint32_t size
       out[i * channels + c] = v;
     }
   }
+  return true;
+}
+
+}  // namespace vgpu
+
+// ---- support for launch-level result caching (vgpu/memo.hpp) ----
+
+namespace vgpu {
+
+bool MemoryManager::memo_untrackable() const {
+  SharedGuard table_guard(table_lock_.get());
+  return !maps_.empty() || !handles_.empty() || !reserved_.empty() || !shared_.empty();
+}
+
+size_t MemoryManager::memo_host_map_count() const {
+  if (!host_maps_) return 0;
+  std::lock_guard<std::mutex> lock(host_maps_->mu);
+  return host_maps_->maps.size();
+}
+
+bool MemoryManager::memo_host_maps() const { return host_maps_ && memo_host_map_count() != 0; }
+
+bool MemoryManager::memo_host_touched(bool clear) {
+  if (!host_maps_) return false;
+  return clear ? host_maps_->touched.exchange(false, std::memory_order_relaxed) : host_maps_->touched.load(std::memory_order_relaxed);
+}
+
+bool MemoryManager::memo_faults_armed() const {
+  if (!access_fault_) return false;
+  const auto armed = [](const uint64_t* pending) { return pending && __atomic_load_n(pending, __ATOMIC_RELAXED); };
+  return armed(access_fault_->copy_pending) || armed(access_fault_->stuck_pending) || armed(access_fault_->alu_pending) ||
+         armed(access_fault_->load_pending) || armed(access_fault_->store_pending) || armed(access_fault_->shared_pending);
+}
+
+bool MemoryManager::memo_trace_active() { return g_mem_trace.load(std::memory_order_relaxed) != nullptr; }
+
+uint64_t MemoryManager::memo_materialized(uint64_t base) const {
+  SharedGuard table_guard(table_lock_.get());
+  const auto it = live_.find(base);
+  if (it == live_.end() || !it->second.chunks) return 0;
+  const Allocation& a = it->second;
+  uint64_t n = 0;
+  for (size_t i = 0; i < a.chunk_count; ++i) {
+    const uint8_t* c = a.chunks[i].load(std::memory_order_relaxed);
+    if (c && !is_uniform(c)) n += i + 1 < a.chunk_count ? kChunkSize : a.size - i * kChunkSize;
+  }
+  return n;
+}
+
+bool MemoryManager::memo_page_hashes(uint64_t base, std::vector<uint64_t>* out, uint64_t* materialized) const {
+  SharedGuard table_guard(table_lock_.get());
+  const auto it = live_.find(base);
+  if (it == live_.end() || !it->second.chunks) return false;
+  const Allocation& a = it->second;
+  if (a.external) return false;
+  const uint64_t pages = (a.size + kMemoPage - 1) / kMemoPage;
+  out->assign(static_cast<size_t>(pages), 0);
+  uint64_t real = 0;
+  // What a page of one repeated byte hashes to, for a whole page (the common case) and, computed on the spot, for a
+  // short last page.
+  static thread_local uint64_t uni[256];
+  static thread_local bool have[256];
+  static thread_local uint8_t buf[kMemoPage];
+  const auto uniform_hash = [&](uint8_t b, uint64_t len) -> uint64_t {
+    if (len == kMemoPage) {
+      if (!have[b]) {
+        std::memset(buf, b, kMemoPage);
+        uni[b] = memo::page_hash(buf, kMemoPage);
+        have[b] = true;
+      }
+      return uni[b];
+    }
+    std::memset(buf, b, static_cast<size_t>(len));
+    return memo::page_hash(buf, static_cast<size_t>(len));
+  };
+  for (uint64_t p = 0; p < pages; ++p) {
+    const uint64_t off = p * kMemoPage;
+    const uint64_t len = std::min<uint64_t>(kMemoPage, a.size - off);
+    const uint8_t* c = a.chunks[off / kChunkSize].load(std::memory_order_acquire);
+    if (!c) {
+      (*out)[p] = uniform_hash(0, len);
+    } else if (is_uniform(c)) {
+      (*out)[p] = uniform_hash(uniform_byte(c), len);
+    } else {
+      (*out)[p] = memo::page_hash(c + off % kChunkSize, static_cast<size_t>(len));
+      real += len;
+    }
+  }
+  if (materialized) *materialized = real;
   return true;
 }
 
