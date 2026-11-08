@@ -44,6 +44,7 @@ endif()
 set(VGPU_PGO "" CACHE STRING "Profile-guided optimization: generate, use, or empty for off")
 set_property(CACHE VGPU_PGO PROPERTY STRINGS "" generate use)
 set(VGPU_PGO_DIR "${CMAKE_BINARY_DIR}/pgo" CACHE PATH "Where the PGO profile (.gcda files) is written and read")
+option(VGPU_PGO_STRICT "With VGPU_PGO=use: a source that does not match its profile is a compile error" ON)
 if(VGPU_PGO)
   if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     message(FATAL_ERROR "VGPU_PGO is written for GCC (-fprofile-generate=DIR); this is ${CMAKE_CXX_COMPILER_ID}")
@@ -52,10 +53,17 @@ if(VGPU_PGO)
     # prefer-atomic: a training run may use several host threads.
     set(_pgo_flags -fprofile-generate=${VGPU_PGO_DIR} -fprofile-update=prefer-atomic)
   elseif(VGPU_PGO STREQUAL "use")
-    # A function whose source changed since the profile was taken is compiled
-    # without it (-Wno-coverage-mismatch), not rejected.
-    set(_pgo_flags -fprofile-use=${VGPU_PGO_DIR} -fprofile-correction -Wno-missing-profile
-                   -Wno-coverage-mismatch)
+    # VGPU_PGO_STRICT (default): a function whose source changed since the profile was taken is a
+    # compile error (-Werror=coverage-mismatch), so a stale profile can never be used silently.
+    # OFF: such a function is compiled without its profile and nothing is said (the old behaviour).
+    # A translation unit with no profile file at all stays silent either way (-Wno-missing-profile):
+    # tests and tools that training does not run have none; scripts/pgo-build.sh counts them.
+    set(_pgo_flags -fprofile-use=${VGPU_PGO_DIR} -fprofile-correction -Wno-missing-profile)
+    if(VGPU_PGO_STRICT)
+      list(APPEND _pgo_flags -Werror=coverage-mismatch)
+    else()
+      list(APPEND _pgo_flags -Wno-coverage-mismatch)
+    endif()
   else()
     message(FATAL_ERROR "VGPU_PGO must be generate, use or empty, not '${VGPU_PGO}'")
   endif()
