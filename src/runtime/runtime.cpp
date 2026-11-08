@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <utility>
 #include "vgpu/runtime/runtime.hpp"
+#include "vgpu/runtime/memo.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -360,7 +361,8 @@ uint64_t Device::load_module(const std::string& ptx_src) {
                         suffix == 'a' ? std::to_string(want / 10) + "." + std::to_string(want % 10)
                                       : std::to_string(want / 10) + ".x",
                         ", and this device is ", profile_.cc_major, ".", profile_.cc_minor);
-    return install_module(std::move(mod), std::move(lazy));
+    const memo::Hash128 code = memo::hash_bytes(ptx_src.data(), ptx_src.size());
+    return install_module(std::move(mod), std::move(lazy), &code);
   } catch (const Error& e) {
     if (e.code() == Err::UnsupportedPtx)
       throw Error::make(e.code(), e.message(), "\n  GPU profile: ", profile_.id);
@@ -370,7 +372,7 @@ uint64_t Device::load_module(const std::string& ptx_src) {
 
 // Gives a parsed (or built) module its device memory and addresses and records it: the part of loading that does not
 // depend on where the module came from. `lazy` is a lazily parsed module's bookkeeping, null for the others.
-uint64_t Device::install_module(std::shared_ptr<ptx::Module> mod, std::shared_ptr<LazyModule> lazy) {
+uint64_t Device::install_module(std::shared_ptr<ptx::Module> mod, std::shared_ptr<LazyModule> lazy, const memo::Hash128* code) {
   LoadedModule lm;
   lm.id = next_module_id_++;
   // Materialize module .global variables into device memory.
@@ -424,6 +426,12 @@ uint64_t Device::install_module(std::shared_ptr<ptx::Module> mod, std::shared_pt
   uint64_t id = lm.id;
   modules_.push_back(std::move(lm));
   module_index_[id] = std::prev(modules_.end());
+  {
+    std::lock_guard<std::mutex> g(memo_modules_mu_);
+    MemoModule mm;
+    if (code) mm.code = *code, mm.ok = true;
+    memo_modules_[&modules_.back().symbols] = std::move(mm);
+  }
   forget_kernel_table();
   return id;
 }
@@ -498,6 +506,12 @@ uint64_t Device::load_cubin(const uint8_t* image, size_t size) {
   const uint64_t id = lm.id;
   modules_.push_back(std::move(lm));
   module_index_[id] = std::prev(modules_.end());
+  {
+    std::lock_guard<std::mutex> g(memo_modules_mu_);
+    MemoModule mm;
+    mm.code = memo::hash_bytes(image, size), mm.ok = true;
+    memo_modules_[&modules_.back().symbols] = std::move(mm);
+  }
   forget_kernel_table();
   return id;
 }
@@ -519,6 +533,11 @@ void Device::unload_module(uint64_t module_id) {
   const auto it = found->second;
   for (uint64_t va : it->global_vas) mem_.free(va);
   if (it->sass) sass::unload(*it->sass, mem_);
+  {
+    std::lock_guard<std::mutex> g(memo_modules_mu_);
+    memo_modules_.erase(&it->symbols);
+  }
+  if (memo_) memo_->forget_kernels();
   module_index_.erase(found);
   modules_.erase(it);
   unload_epoch_.fetch_add(1, std::memory_order_release);
@@ -663,6 +682,11 @@ void Device::rebind_global(uint64_t module_id, const std::string& name, uint64_t
     if (it == lm.symbols.end() || !lm.mod)
       throw Error::make(Err::NotFound, "module ", module_id, " has no global '", name, "'");
     it->second = addr;
+    if (memo_) memo_->on_poison("rebind_global");   // the module's variable now lives somewhere the history does not describe
+    {
+      std::lock_guard<std::mutex> g(memo_modules_mu_);
+      if (const auto m = memo_modules_.find(&lm.symbols); m != memo_modules_.end()) m->second.globals_built = false;
+    }
     if (lm.sass) {   // a cubin: its code and banks hold the address, patched again
       sass::rebind(*lm.sass, mem_, name, addr);
       return;
@@ -1112,6 +1136,14 @@ class FaultHook final : public MemoryManager::AccessFault {
   std::atomic<uint64_t> flips_{0};
 };
 
+void Device::enable_memo(const memo::Config& cfg) {
+  mem_.set_memo_sink(nullptr);
+  memo_.reset();
+  if (!cfg.enabled || profile_.vendor != "nvidia") return;
+  memo_ = std::make_unique<memo::DeviceMemo>(mem_, cfg, profile_);
+  mem_.set_memo_sink(memo_.get());
+}
+
 Device::Device(DeviceProfile profile, int ordinal, telemetry::Publisher* telemetry, int physical)
     : profile_(std::move(profile)), ordinal_(ordinal), physical_(physical < 0 ? ordinal : physical),
       mem_(profile_.vram_bytes, static_cast<uint32_t>(physical_)), telemetry_(telemetry) {
@@ -1128,9 +1160,15 @@ Device::Device(DeviceProfile profile, int ordinal, telemetry::Publisher* telemet
         [pub, ord](uint64_t used) { pub->note_memory(static_cast<uint32_t>(ord), used); });
   }
   install_fault_hook();
+  if (const char* fh = std::getenv("VGPU_MEMO_FINAL_HASH"); fh && *fh) memo::final_hash_register(&mem_);
+  // VGPU_MEMO=1: launch-level result caching (vgpu/runtime/memo.hpp). Not with a real GPU in the loop.
+  if (const memo::Config mc = memo::Config::from_env(); mc.enabled && !std::getenv("VGPU_HOST_GPU") && !std::getenv("VGPU_HOSTGPU_CAPTURE")) enable_memo(mc);
 }
 
-Device::~Device() = default;
+Device::~Device() {
+  memo::final_hash_write(&mem_);
+  mem_.set_memo_sink(nullptr);
+}
 
 void Device::install_fault_hook() {
   // Without a writable runtime directory no fault can be armed for this device;
@@ -1217,8 +1255,64 @@ void Device::launch(const ptx::EntryFn& fn, const exec::LaunchConfig& in_cfg,
       return;
     }
     if (hg) hg->before_simulated(mem_);
+    // Launch-level result caching (vgpu/runtime/memo.hpp): a stored result is applied instead of running the kernel.
+    memo::Ticket mt;
+    exec::LaunchStats mstats;
+    if (memo_ && !hg && !(cap.dir && *cap.dir)) {
+      memo::KernelRef kr;
+      const exec::LaunchEnv* env = cfg.env;
+      exec::LaunchEnv own_env;
+      if (!env) {
+        own_env = exec::read_launch_env();
+        env = &own_env;
+      }
+      MemoModule* mm = nullptr;
+      std::lock_guard<std::mutex> g(memo_modules_mu_);
+      if (syms) {
+        const auto f = memo_modules_.find(syms);
+        if (f != memo_modules_.end()) mm = &f->second;
+      }
+      if (mm) {
+        if (!mm->globals_built) {
+          mm->globals.clear();
+          for (const auto& [name, va] : *syms)
+            if (va >= kDeviceVaBase && va < kDeviceVaEnd) mm->globals.push_back(va);
+          mm->globals_built = true;
+        }
+        kr.code = mm->code;
+        kr.code_ok = mm->ok;
+        kr.module_globals = &mm->globals;
+        kr.symbols_known = true;
+      }
+      kr.name = &fn.name;
+      kr.sass = fn.sass != nullptr;
+      kr.fn = &fn;
+      kr.cfg = &cfg;
+      kr.args = &args;
+      kr.env = env;
+      kr.device_count = device_count_;
+      if (memo_->begin(kr, mt, &mstats)) {
+        report_counters(ordinal_, fn.name, cfg, mstats);
+        if (telemetry_) telemetry_->note_kernel(static_cast<uint32_t>(physical_), 0.0);
+        digest_launch(mem_, fn.name, args);
+        return;
+      }
+    }
     const auto sim_t0 = std::chrono::steady_clock::now();   // after the card path: a verify run does both, and the simulator's time is this alone
-    run_kernel(fn, cfg, args, syms);
+    if (mt.active) {
+      exec::LaunchStats rstats;
+      try {
+        memo::ScopeGuard engine(memo::kEngine);   // the launch's own stores are not events in the device's history
+        run_kernel(fn, cfg, args, syms, &rstats);
+      } catch (...) {
+        memo_->abort(mt, "launch-threw");
+        throw;
+      }
+      memo_->end(mt, rstats,
+                 static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - sim_t0).count()));
+    } else {
+      run_kernel(fn, cfg, args, syms);
+    }
     if (hg) hg->note_simulated(fn, cfg, std::chrono::duration<double>(std::chrono::steady_clock::now() - sim_t0).count(), &mem_, &args);
     if (cap_seq != ~0ull) {
       char p[600];
@@ -1245,7 +1339,7 @@ void Device::launch(const ptx::EntryFn& fn, const exec::LaunchConfig& in_cfg,
 }
 
 void Device::run_kernel(const ptx::EntryFn& fn, const exec::LaunchConfig& in_cfg,
-                        const std::vector<std::vector<uint8_t>>& args, const exec::SymbolTable* syms) {
+                        const std::vector<std::vector<uint8_t>>& args, const exec::SymbolTable* syms, exec::LaunchStats* stats_out) {
   // How many of this kernel's blocks the device holds at once: what a kernel whose blocks wait on one
   // another needs to know (vgpu/exec/lockstep.hpp). The same figure cudaOccupancyMaxActiveBlocksPerMultiprocessor
   // gives, times the SMs.
@@ -1274,12 +1368,16 @@ void Device::run_kernel(const ptx::EntryFn& fn, const exec::LaunchConfig& in_cfg
     exec::LaunchConfig c = cfg;
     if (c.cluster == std::array<uint32_t, 3>{0, 0, 0}) c.cluster = fn.req_cluster;
     exec::validate_launch(fn, c, profile_);
-    report_counters(ordinal_, fn.name, c, sass::launch(*fn.sass, fn.name, c, args, mem_, profile_));
+    exec::LaunchStats st = sass::launch(*fn.sass, fn.name, c, args, mem_, profile_);
+    if (stats_out) *stats_out = st;
+    report_counters(ordinal_, fn.name, c, st);
     if (telemetry_) telemetry_->note_kernel(static_cast<uint32_t>(physical_), 0.0);   // the machine's slot, not the program's index
     return;
   }
   if (!telemetry_) {
-    report_counters(ordinal_, fn.name, cfg, exec::launch(fn, cfg, args, mem_, profile_, syms));
+    exec::LaunchStats st = exec::launch(fn, cfg, args, mem_, profile_, syms);
+    if (stats_out) *stats_out = st;
+    report_counters(ordinal_, fn.name, cfg, st);
     return;
   }
   // Utilization is the real fraction of wall time spent executing kernels. The
@@ -1289,6 +1387,7 @@ void Device::run_kernel(const ptx::EntryFn& fn, const exec::LaunchConfig& in_cfg
   telemetry::Publisher* pub = telemetry_;
   const exec::LaunchStats st = exec::launch(fn, cfg, args, mem_, profile_, syms,
                [pub, ord](double dt) { pub->note_kernel(ord, dt); });
+  if (stats_out) *stats_out = st;
   report_counters(ordinal_, fn.name, cfg, st);
   pub->note_kernel(ord, 0.0);
 }

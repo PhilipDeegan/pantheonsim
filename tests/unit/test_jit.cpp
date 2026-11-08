@@ -123,14 +123,19 @@ struct Counters {
 using Calls = std::vector<std::pair<uint32_t, uint32_t>>;
 
 struct Rec {
-  Calls calls;
+  Calls calls;                    // the handler's calls: (op, lanes)
+  std::vector<uint32_t> notes;    // the tier's statistics of an op (asked for by the flag)
+  const tier::MOp* base = nullptr;
   long throw_at = -1;
 };
-void rec_escape(jit::Ctx* c, uint32_t op, uint32_t ex) {
-  Rec* r = static_cast<Rec*>(c->host);
+// The tier's handler of an op, as the generated code calls it (Ctx::ops, Ctx::tctx): the op's number is its place among the MOps.
+void rec_handler(void* ctx, const tier::MOp& m, uint32_t ex) {
+  Rec* r = static_cast<Rec*>(ctx);
+  const uint32_t op = static_cast<uint32_t>(&m - r->base);
   r->calls.emplace_back(op, ex);
   if (static_cast<long>(r->calls.size()) - 1 == r->throw_at) throw std::runtime_error("boom at " + std::to_string(op));
 }
+void rec_note(jit::Ctx* c, uint32_t op) { static_cast<Rec*>(c->host)->notes.push_back(op); }
 
 uint32_t model_ex(const jit::OpFacts& o, uint32_t group, const uint32_t* p, const bool* up) {
   if (o.unguarded) return group;
@@ -143,6 +148,7 @@ uint32_t model_ex(const jit::OpFacts& o, uint32_t group, const uint32_t* p, cons
 }
 
 void model_run(const jit::RegionSpec& r, uint32_t group, const uint32_t* p, const bool* up, bool stats, Counters& c, Calls& calls) {
+  (void)stats;   // (the handler is called only for a lane that executes the op; the statistics' note of every op is checked apart)
   for (size_t i = 0; i < r.ops.size(); ++i) {
     const uint32_t ex = model_ex(r.ops[i], group, p, up);
     const uint32_t lanes = static_cast<uint32_t>(__builtin_popcount(ex));
@@ -150,38 +156,47 @@ void model_run(const jit::RegionSpec& r, uint32_t group, const uint32_t* p, cons
     ++c.instructions;
     c.thread_instructions += lanes;
     c.by_class[r.ops[i].cls] += lanes;
-    if (ex || stats) calls.emplace_back(static_cast<uint32_t>(i), ex);
+    if (ex) calls.emplace_back(static_cast<uint32_t>(i), ex);
   }
 }
 
 struct Run {
   Counters counters;
   Calls calls;
+  std::vector<uint32_t> notes;
   bool threw = false;
   std::string what;
 };
-Run run_region(jit::RegionFn fn, uint32_t group, const uint32_t* p, const bool* up, bool stats, long throw_at = -1) {
+Run run_region(jit::RegionFn fn, size_t nops, uint32_t group, const uint32_t* p, const bool* up, bool stats, long throw_at = -1) {
   Run out;
   Rec rec;
   rec.throw_at = throw_at;
+  std::vector<tier::MOp> mops(nops);
+  for (tier::MOp& m : mops) m.fn = &rec_handler;
+  rec.base = mops.data();
   jit::Ctx c{};
   c.abi = jit::kAbiVersion;
   c.flags = stats ? 1u : 0u;
-  c.up = up;
+  c.up = const_cast<bool*>(up);
   c.p = const_cast<uint32_t*>(p);
   c.steps = &out.counters.steps;
   c.instructions = &out.counters.instructions;
   c.thread_instructions = &out.counters.thread_instructions;
   c.by_class = out.counters.by_class;
-  c.escape = &rec_escape;
+  c.tctx = &rec;
+  c.ops = reinterpret_cast<const uint8_t*>(mops.data());
+  c.note = &rec_note;
   c.host = &rec;
+  c.max_steps = ~uint64_t{0};
+  c.last = ~0u;
   try {
-    fn(&c, group, static_cast<uint32_t>(__builtin_popcount(group)));
+    fn(&c, group, static_cast<uint32_t>(__builtin_popcount(group)), 0, 0);
   } catch (const std::runtime_error& e) {
     out.threw = true;
     out.what = e.what();
   }
   out.calls = rec.calls;
+  out.notes = rec.notes;
   return out;
 }
 
@@ -205,10 +220,14 @@ void check_against_model(const jit::UnitSpec& spec, const jit::Loaded& lib, uint
       Counters mc;
       Calls mcalls;
       model_run(spec.regions[r], group, p, up, stats, mc, mcalls);
-      const Run got = run_region(lib.fns[r], group, p, up, stats);
+      const Run got = run_region(lib.fns[r], spec.regions[r].ops.size(), group, p, up, stats);
       VCHECK(!got.threw);
       VCHECK(got.counters == mc);
       VCHECK(got.calls == mcalls);
+      // (with the statistics on, the tier's note of every op, whether or not a lane ran it: the order of the ops)
+      std::vector<uint32_t> want_notes;
+      for (size_t i = 0; stats && i < spec.regions[r].ops.size(); ++i) want_notes.push_back(static_cast<uint32_t>(i));
+      VCHECK(got.notes == want_notes);
     }
   }
 }
@@ -248,7 +267,7 @@ VTEST(jit_source_is_a_function_of_the_spec_and_names_every_layout_offset) {
   VCHECK(jit::Engine::source(a) != jit::Engine::source(c));
   const std::string src = jit::Engine::source(a);
   VCHECK_CONTAINS(src, "static_assert(sizeof(Ctx) == " + std::to_string(sizeof(jit::Ctx)));
-  VCHECK_CONTAINS(src, "static_assert(offsetof(Ctx, escape) == " + std::to_string(offsetof(jit::Ctx, escape)));
+  VCHECK_CONTAINS(src, "static_assert(offsetof(Ctx, ops) == " + std::to_string(offsetof(jit::Ctx, ops)));
   VCHECK_CONTAINS(src, "vgpu_jit_r2(");
   // Nothing in the text but numbers and fixed templates: no byte of it comes from a string in the input.
   for (char ch : src) VCHECK(ch == '\n' || (ch >= 32 && ch < 127));
@@ -322,18 +341,20 @@ VTEST(jit_exceptions_unwind_through_the_generated_frames_with_and_without_fexcep
     const uint32_t p[8] = {0xaaaaaaaau, 0x55555555u, 0xffffffffu, 0, 1, 2, 3, 0xffffffffu};
     const bool up[8] = {true, false, true, false, true, false, true, true};
     // Throw at the 6th escape: the exception reaches the caller, the ops before it and the one that threw are counted, none after.
-    const Run full = run_region(r.lib->fns[0], 0xffffffffu, p, up, true);
+    const Run full = run_region(r.lib->fns[0], 20, 0xffffffffu, p, up, true);
     VCHECK(!full.threw);
-    VCHECK_EQ(full.calls.size(), size_t{20});   // (stats on: every op reaches the escape)
-    const Run cut = run_region(r.lib->fns[0], 0xffffffffu, p, up, true, 5);
+    VCHECK_EQ(full.notes.size(), size_t{20});   // (stats on: every op is noted)
+    VCHECK(full.calls.size() >= 6);
+    const uint32_t k = full.calls[5].first;   // the op of the 6th handler call (an op with no lane does not call its handler)
+    const Run cut = run_region(r.lib->fns[0], 20, 0xffffffffu, p, up, true, 5);
     VCHECK(cut.threw);
-    VCHECK_EQ(cut.what, std::string("boom at 5"));
+    VCHECK_EQ(cut.what, "boom at " + std::to_string(k));
     VCHECK_EQ(cut.calls.size(), size_t{6});
-    VCHECK_EQ(cut.counters.steps, uint64_t{6});
-    VCHECK_EQ(cut.counters.instructions, uint64_t{6});
-    // The same counters the model has for the first six ops.
+    VCHECK_EQ(cut.counters.steps, uint64_t{k} + 1);
+    VCHECK_EQ(cut.counters.instructions, uint64_t{k} + 1);
+    // The same counters the model has for the ops up to and including the one that threw.
     jit::RegionSpec head;
-    head.ops.assign(spec.regions[0].ops.begin(), spec.regions[0].ops.begin() + 6);
+    head.ops.assign(spec.regions[0].ops.begin(), spec.regions[0].ops.begin() + k + 1);
     Counters mc;
     Calls mcalls;
     model_run(head, 0xffffffffu, p, up, true, mc, mcalls);
@@ -791,7 +812,8 @@ void dummy_handler(void*, const tier::MOp&, uint32_t) {}
 struct FakeProgram {
   std::vector<Instr> instrs;
   tier::Program prog;
-  // kinds: 'a' a handler, straight; 's' a store (STG); 'n' a @!PT op with no handler; 'x' no handler, not @!PT; 'b' a BRA to `target`
+  // kinds: 'a' a handler, straight; 's' a store (STG); 'n' a @!PT op with no handler; 'x' no handler, not @!PT; 'b' a BRA to `target`;
+  // 'c' a handler that is not straight and only writes registers (MOp::cont)
   FakeProgram(const std::string& kinds, std::vector<std::pair<size_t, size_t>> branches = {}) {
     instrs.resize(kinds.size());
     prog.ops.resize(kinds.size());
@@ -802,8 +824,10 @@ struct FakeProgram {
       in.op = kinds[i] == 's' ? Op::STG : kinds[i] == 'b' ? Op::BRA : Op::IADD3;
       tier::MOp& op = prog.ops[i];
       op.ins = &instrs[i];
-      op.straight = kinds[i] != 'b';
-      op.fn = (kinds[i] == 'a' || kinds[i] == 's') ? &dummy_handler : nullptr;
+      op.straight = kinds[i] != 'b' && kinds[i] != 'c';
+      op.fn = (kinds[i] == 'a' || kinds[i] == 's' || kinds[i] == 'c') ? &dummy_handler : nullptr;
+      op.cont = kinds[i] == 'c';
+      op.store = kinds[i] == 's';
       op.form = kinds[i] == 'b' ? tier::Form::Bra : kinds[i] == 's' ? tier::Form::Stg : tier::Form::None;   // (None: the generated code calls the handler, which these tests give the fake context for)
       op.never = kinds[i] == 'n';
       op.unguarded = kinds[i] != 'n';
@@ -820,25 +844,83 @@ std::vector<std::pair<uint32_t, uint32_t>> shape(const jit::Unit& u) {
 }
 }  // namespace
 
-VTEST(jit_regions_are_straight_runs_of_ops_with_a_handler_and_no_store) {
+VTEST(jit_regions_are_runs_of_ops_the_loop_goes_on_past_and_a_store_does_not_end_one) {
   NEED_COMPILER();
   if (!jit::requested()) return;
   //                      0123456789...
   FakeProgram fp("aasaaaaannxaabaa", {{13, 5}});
-  // 0,1 a a -> region; 2 is a store; 3,4 -> region; 5..7 a,a,a start a region (5 is a BRA target) and run on through the @!PT op 8; 9 (n, second)
-  // is a @!PT op too, so the region is 5..9; 10 has no handler; 11,12 -> region; 13 is the BRA; 14 is the second to last; 15 is the last op of
-  // the section: never in a region.
+  // 0..9 are one region: a, a, a store (a store no longer ends a region: the host checks the store gate before it runs one), then more ops and the two
+  // @!PT ops (8 and 9); 10 has no handler; 11, 12 and the BRA 13 (a branch to 5, outside this region) and 14 (the second to last) are one region;
+  // 15 is the last op of the section: never in a region.
   const auto u = jit::make_unit(fp.prog, 80);
   VCHECK(u != nullptr);
-  const std::vector<std::pair<uint32_t, uint32_t>> want{{0, 2}, {3, 2}, {5, 5}, {11, 2}};
+  const std::vector<std::pair<uint32_t, uint32_t>> want{{0, 10}, {11, 4}};
   VCHECK(shape(*u) == want);
+  VCHECK(u->regions[0].has_store);
+  VCHECK(!u->regions[0].ctl);
+  VCHECK(!u->regions[1].has_store);
+  VCHECK(u->regions[1].ctl);
+  // The entries are the stretch starts: the first op, the op after a branch (here 14). Not the target of a branch outside the region, and not the middle.
   VCHECK_EQ(u->region_at[0], 1u);
-  VCHECK_EQ(u->region_at[1], 0u);   // (only the first op of a region has an entry)
-  VCHECK_EQ(u->region_at[5], 3u);
-  VCHECK_EQ(u->regions[2].maxreg, 4u + 7u);   // the @!PT ops have no handler and so no register demand: op 7 is the highest that has one
-  VCHECK_EQ(u->spec.regions[2].ops.size(), size_t{5});
+  VCHECK_EQ(u->region_at[1], 0u);
+  VCHECK_EQ(u->region_at[5], 0u);
+  VCHECK_EQ(u->region_at[11], 2u);
+  VCHECK_EQ(u->region_at[12], 0u);
+  VCHECK_EQ(u->region_at[14], 2u);
+  VCHECK_EQ(static_cast<unsigned>(u->entry_ops[11]), 3u);   // 11, 12 and the branch that ends the stretch
+  VCHECK_EQ(static_cast<unsigned>(u->entry_ops[14]), 1u);
+  VCHECK_EQ(u->regions[0].maxreg, 4u + 7u);   // the @!PT ops have no handler and so no register demand: op 7 is the highest that has one
+  VCHECK_EQ(u->spec.regions[0].ops.size(), size_t{10});
   VCHECK_EQ(u->spec.regions[0].ops[0].lo, uint64_t{0x1111000000000000ull});
   VCHECK_EQ(u->spec.regions[0].ops[1].lo, uint64_t{0x1111000000000001ull});
+  // The branch carries where it goes, relative to its region: op 5 is 11 - 5 = 6 before op 11.
+  const jit::OpFacts& br = u->spec.regions[1].ops[2];
+  VCHECK(br.br);
+  VCHECK_EQ(br.tgt, -6);
+  VCHECK(u->spec.regions[1].ops[0].form == 0 && !u->spec.regions[1].ops[0].br && !u->spec.regions[1].ops[0].cont);
+}
+
+VTEST(jit_branches_and_cont_ops_cut_a_region_into_stretches_a_branch_target_inside_it_starts_one) {
+  NEED_COMPILER();
+  if (!jit::requested()) return;
+  //                      0123456789012345
+  //                      a a c a a b a a a n a a x a a a    (b at 5: to 1; c = cont op at 2; op 12 has no handler)
+  FakeProgram fp("aacaabaaanaaxaaa", {{5, 1}});
+  const auto u = jit::make_unit(fp.prog, 80);
+  VCHECK(u != nullptr);
+  const std::vector<std::pair<uint32_t, uint32_t>> want{{0, 12}, {13, 2}};
+  VCHECK(shape(*u) == want);
+  // Starts: 0 (first), 1 (the branch's target), 3 (after the cont op), 6 (after the branch). Region 1 (ops 13, 14): its first op only.
+  const std::vector<uint32_t> s0{0, 1, 3, 6};
+  VCHECK(u->regions[0].starts == s0);
+  VCHECK_EQ(u->region_at[0], 1u);
+  VCHECK_EQ(u->region_at[1], 1u);
+  VCHECK_EQ(u->region_at[3], 1u);
+  VCHECK_EQ(u->region_at[6], 1u);
+  VCHECK_EQ(u->region_at[2], 0u);
+  VCHECK_EQ(u->region_at[13], 2u);
+  // A stretch ends with its branch or cont op.
+  VCHECK_EQ(jit::stretch_end(u->spec.regions[0], 0), 3u);   // 0, 1, 2 (the cont op)
+  VCHECK_EQ(jit::stretch_end(u->spec.regions[0], 1), 3u);
+  VCHECK_EQ(jit::stretch_end(u->spec.regions[0], 3), 6u);   // 3, 4, 5 (the branch)
+  VCHECK_EQ(jit::stretch_end(u->spec.regions[0], 6), 12u);  // to the end of the region
+  VCHECK_EQ(static_cast<unsigned>(u->entry_ops[1]), 2u);
+}
+
+VTEST(jit_a_branch_the_loop_could_not_go_on_past_ends_the_region_before_it) {
+  NEED_COMPILER();
+  if (!jit::requested()) return;
+  // A branch to an odd offset, one past the section, a negative one, or with three conditions is not eligible (the loop's own chain would not take it).
+  FakeProgram fp("aaaabaaaabaaaabaaaabaaaa", {{4, 0}, {9, 0}, {14, 0}, {19, 0}});
+  fp.prog.ops[4].imm += 8;                      // not a multiple of 16
+  fp.prog.ops[9].imm = 16 * 24;                 // the section's end
+  fp.prog.ops[14].imm = -16;                    // before it
+  fp.prog.ops[19].aux = 3;                      // more conditions than the loop's BRA has
+  const auto u = jit::make_unit(fp.prog, 80);
+  VCHECK(u != nullptr);
+  const std::vector<std::pair<uint32_t, uint32_t>> want{{0, 4}, {5, 4}, {10, 4}, {15, 4}, {20, 3}};
+  VCHECK(shape(*u) == want);
+  for (const jit::Region& r : u->regions) VCHECK(!r.ctl);
 }
 
 VTEST(jit_long_runs_are_split_and_the_last_op_of_a_section_is_never_in_a_region) {
@@ -847,7 +929,7 @@ VTEST(jit_long_runs_are_split_and_the_last_op_of_a_section_is_never_in_a_region)
   FakeProgram fp(std::string(300, 'a'));
   const auto u = jit::make_unit(fp.prog, 80);
   VCHECK(u != nullptr);
-  const std::vector<std::pair<uint32_t, uint32_t>> want{{0, 96}, {96, 96}, {192, 96}, {288, 11}};
+  const std::vector<std::pair<uint32_t, uint32_t>> want{{0, 200}, {200, 99}};
   VCHECK(shape(*u) == want);
   VCHECK(jit::make_unit(FakeProgram("ab").prog, 80) == nullptr);   // nothing of two ops or more: no unit
   VCHECK(jit::make_unit(FakeProgram("aaa").prog, 80) != nullptr);  // two ops and a last one

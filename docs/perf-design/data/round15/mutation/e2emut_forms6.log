@@ -1,0 +1,4 @@
+jit_radix.sh uisetp: caught (2 lines differ)
+jit_radix.sh none: SURVIVED (output identical to the tier)
+jit_radix.sh usel: SURVIVED (output identical to the tier)
+=== done 12:34:42

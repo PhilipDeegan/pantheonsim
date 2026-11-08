@@ -1,4 +1,5 @@
 #include "vgpu/exec/worker_pool.hpp"
+#include "vgpu/memo.hpp"
 
 #include <unistd.h>
 
@@ -118,6 +119,7 @@ struct Pool {
 };
 
 void worker_main(Worker* w) {
+  vgpu::memo::t_scope = vgpu::memo::kEngine;   // a worker only ever runs a launch's blocks (vgpu/memo.hpp)
   sigset_t current;
   pthread_sigmask(SIG_BLOCK, nullptr, &current);   // what this thread was created with
   bool hot = false;

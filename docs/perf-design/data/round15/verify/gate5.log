@@ -1,0 +1,33 @@
+=== shard loops 20:33:39
+ok   sm_86 jit_loops  (12 units (27 regions), 12 ready, 0 cache hits, 12 compiles (24432.4 ms), 0 failures, 0 damaged objects replaced; 156341 region calls ran 1417469 warp instructions (1289573 computed by generated code), 0 exceptions unwound through them; share rule: 0 declined, 0 accepted; 0 branches and register-only ops continued inside generated code)
+PASS
+=== shard loops rc=0 20:34:45
+=== shard tier 20:34:45
+ok   sm_86 sass_tier  (30 units (253 regions), 30 ready, 0 cache hits, 30 compiles (98357.7 ms), 0 failures, 0 damaged objects replaced; 245350 region calls ran 1543985 warp instructions (1160327 computed by generated code), 0 exceptions unwound through them; share rule: 0 declined, 0 accepted; 0 branches and register-only ops continued inside generated code)
+PASS
+=== shard tier rc=0 20:38:28
+=== shard steps 20:38:28
+ok   sm_86 sass_tier_steps  (26 units (213 regions), 26 ready, 0 cache hits, 26 compiles (124295.1 ms), 0 failures, 0 damaged objects replaced; 3468022 region calls ran 186340496 warp instructions (185544325 computed by generated code), 0 exceptions unwound through them; share rule: 0 declined, 0 accepted; 0 branches and register-only ops continued inside generated code)  [2 faults thrown inside regions]
+PASS
+=== shard steps rc=0 20:52:24
+=== shard random 20:52:24
+ok   sm_86 jit_random seed 1  (16 units (37 regions), 16 ready, 0 cache hits, 16 compiles (72166.3 ms), 0 failures, 0 damaged objects replaced; 6100 region calls ran 395616 warp instructions (362464 computed by generated code), 0 exceptions unwound through them; share rule: 0 declined, 0 accepted; 16788 branches and register-only ops continued inside generated code)
+PASS
+=== shard random rc=0 20:53:36
+=== shard modes 20:53:36
+ok   sm_86 sass_tier (no compiler)  (1 units (2 regions), 0 ready, 0 cache hits, 0 compiles (0.0 ms), 1 failures, 0 damaged objects replaced; 0 region calls ran 0 warp instructions (0 computed by generated code), 0 exceptions unwound through them; share rule: 0 declined, 0 accepted; 0 branches and register-only ops continued inside generated code)
+ok   sm_86 sass_tier (a compiler that fails)  (30 units (202 regions), 0 ready, 0 cache hits, 30 compiles (265.3 ms), 30 failures, 0 damaged objects replaced; 0 region calls ran 0 warp instructions (0 computed by generated code), 0 exceptions unwound through them; share rule: 0 declined, 0 accepted; 0 branches and register-only ops continued inside generated code)
+ok   sm_86 sass_tier (a cache that cannot be created)  (1 units (2 regions), 0 ready, 0 cache hits, 0 compiles (0.0 ms), 1 failures, 0 damaged objects replaced; 0 region calls ran 0 warp instructions (0 computed by generated code), 0 exceptions unwound through them; share rule: 0 declined, 0 accepted; 0 branches and register-only ops continued inside generated code)
+ok   sm_86 sass_tier (a cache others can write to)  (1 units (2 regions), 0 ready, 0 cache hits, 0 compiles (0.0 ms), 1 failures, 0 damaged objects replaced; 0 region calls ran 0 warp instructions (0 computed by generated code), 0 exceptions unwound through them; share rule: 0 declined, 0 accepted; 0 branches and register-only ops continued inside generated code)
+ok   sm_86 sass_tier (a compile that times out)  (30 units (202 regions), 0 ready, 0 cache hits, 30 compiles (30364.5 ms), 30 failures, 0 damaged objects replaced; 0 region calls ran 0 warp instructions (0 computed by generated code), 0 exceptions unwound through them; share rule: 0 declined, 0 accepted; 0 branches and register-only ops continued inside generated code)
+PASS
+=== shard modes rc=0 20:54:08
+=== shard steps_gather 20:54:08
+ok   sm_86 sass_tier_steps  (26 units (213 regions), 26 ready, 0 cache hits, 26 compiles (126501.8 ms), 0 failures, 0 damaged objects replaced; 3468022 region calls ran 186340496 warp instructions (185544325 computed by generated code), 0 exceptions unwound through them; share rule: 0 declined, 0 accepted; 0 branches and register-only ops continued inside generated code)
+PASS
+=== shard steps_gather rc=0 20:57:16
+=== shard steps_shared 20:57:16
+ok   sm_86 sass_tier_steps  (26 units (213 regions), 26 ready, 0 cache hits, 26 compiles (126271.1 ms), 0 failures, 0 damaged objects replaced; 3468022 region calls ran 186340496 warp instructions (185544325 computed by generated code), 0 exceptions unwound through them; share rule: 0 declined, 0 accepted; 0 branches and register-only ops continued inside generated code)
+PASS
+=== shard steps_shared rc=0 21:00:05
+=== all done

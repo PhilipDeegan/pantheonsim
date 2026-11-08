@@ -44,6 +44,10 @@
 #include <cstring>
 #include <vector>
 
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
+
 #include "vgpu/simd/simd.hpp"
 
 namespace vgpu::exec::memcount {
@@ -340,6 +344,7 @@ inline bool sectors_hash(const uint64_t* addrs, uint64_t m, uint64_t span, uint6
   // the forward walk below gives up at the first lane that goes back (a thread-private array's index wraps half way).
   if (near)
     if (const simd::SectorWindowFn window = simd::sector_window_kernel(); window && window(addrs, m, span, out)) return true;
+  if (const simd::SectorUpFn up = simd::sector_up_kernel(); up && up(addrs, m, span, out)) return true;
   if (sectors_monotone<true>(addrs, m, span, out)) return true;
   if (near && sectors_window(addrs, m, span, out)) return true;
   // (Only a warp whose second lane is below its first can go backward all the way.)
@@ -885,11 +890,156 @@ inline V4 load_v4(const uint32_t* p) { return *reinterpret_cast<const V4u*>(p); 
 inline void store_v4(uint32_t* p, V4 v) { *reinterpret_cast<V4u*>(p) = v; }
 }  // namespace detail
 
-// The offsets widened (an active lane's as it is, the others' zero) and counted as sass_bank_passes does.
+namespace detail {
+// The passes of up to 32 lanes of 1 to 16 bytes (32-bit offsets, the lanes of `m`, not zero), by the words of each bank: a bank keeps its first
+// four distinct words in a row of a small array, and a word is new unless the row's four compare equal to it (one vector compare). That is the
+// BankTable's counting without its 16 KB of words (a stack frame that is probed on entry, and a bank's words 512 bytes from the next bank's, which
+// alias each other in the cache) and without a lane loop per word per bank: a lane's words (1 to 5) go in one after the other, no branch depends on the
+// data but the end of a lane's words and a bank that would need a fifth word, which gives the warp up (false, nothing counted: the table counts it).
+// Also false for an offset within 16 of 2^32 (the words would wrap) and where there is no SSE2.
+inline bool bank_passes_slots(const uint32_t* offs, uint32_t m, uint32_t bytes, uint32_t& out) {
+#if defined(__SSE2__)
+  if (bytes - 1u >= 16u) return false;
+  // (Not cleared: a row is read whole, and the words past the bank's count are masked off before they are looked at.)
+  alignas(16) uint32_t slot[32][8];   // (the first four words of a bank; the fifth store of a bank that is full is past them, and is given up on)
+  alignas(16) uint8_t cnt[32] = {};
+  for (uint32_t r = m; r; r &= r - 1) {
+    const uint32_t o = offs[std::countr_zero(r)];
+    if (o > 0xFFFFFFF0u) return false;
+    const uint32_t last = (o + bytes - 1) >> 2;
+    for (uint32_t w = o >> 2;; ++w) {
+      const unsigned b = w & 31;
+      const unsigned c = cnt[b];
+      const __m128i eq = _mm_cmpeq_epi32(_mm_load_si128(reinterpret_cast<const __m128i*>(slot[b])), _mm_set1_epi32(static_cast<int>(w)));
+      const unsigned seen = static_cast<unsigned>(_mm_movemask_ps(_mm_castsi128_ps(eq))) & ((1u << c) - 1u);
+      slot[b][c] = w;
+      const unsigned n = c + (seen == 0);
+      if (n > 4) return false;
+      cnt[b] = static_cast<uint8_t>(n);
+      if (w == last) break;
+    }
+  }
+  __m128i v = _mm_max_epu8(_mm_load_si128(reinterpret_cast<const __m128i*>(cnt)), _mm_load_si128(reinterpret_cast<const __m128i*>(cnt) + 1));
+  v = _mm_max_epu8(v, _mm_srli_si128(v, 8));
+  v = _mm_max_epu8(v, _mm_srli_si128(v, 4));
+  v = _mm_max_epu8(v, _mm_srli_si128(v, 2));
+  v = _mm_max_epu8(v, _mm_srli_si128(v, 1));
+  out = static_cast<uint32_t>(_mm_cvtsi128_si32(v)) & 0xffu;
+  return true;
+#else
+  (void)offs, (void)m, (void)bytes, (void)out;
+  return false;
+#endif
+}
+}  // namespace detail
+
+namespace detail {
+// The passes of up to 32 lanes of 1 to 4 bytes none of which runs into a second word (32-bit offsets, the lanes of `m`, not zero), when the bank that is asked
+// for the most lanes is asked for that many different words. Each lane is one word in one bank, so a bank holds at most as many words as it has lanes: the
+// passes are at most M, the most lanes any bank has; and if a bank with M lanes has M different words, its M passes are the passes. So: one count of lanes
+// by bank (a byte counter each), the most M, and for each bank that has M lanes the words of those lanes compared to one another; the first bank whose words
+// are all different gives M. False, nothing counted, when a lane's bytes run into the next word, M is over 8, or every bank
+// with M lanes has two lanes on one word (the words of the banks are then counted another way: lanes on one word are one pass).
+inline bool bank_passes_max_lanes(const uint32_t* offs, uint32_t m, uint32_t bytes, uint32_t& out) {
+#if defined(__SSE2__)
+  if (bytes - 1u >= 4u) return false;
+  alignas(16) uint8_t cnt[32] = {};
+  uint32_t reach = 0;   // (the most bytes a lane's word-offset and width cover: over 4 means some lane runs into a second word)
+  if (m == 0xFFFFFFFFu) {
+    for (unsigned l = 0; l < 32; ++l) {
+      const uint32_t o = offs[l];
+      reach = std::max(reach, (o & 3u) + bytes);
+      ++cnt[(o >> 2) & 31u];
+    }
+  } else {
+    for (uint32_t r = m; r; r &= r - 1) {
+      const uint32_t o = offs[std::countr_zero(r)];
+      reach = std::max(reach, (o & 3u) + bytes);
+      ++cnt[(o >> 2) & 31u];
+    }
+  }
+  if (reach > 4u) return false;
+  __m128i v = _mm_max_epu8(_mm_load_si128(reinterpret_cast<const __m128i*>(cnt)), _mm_load_si128(reinterpret_cast<const __m128i*>(cnt) + 1));
+  v = _mm_max_epu8(v, _mm_srli_si128(v, 8));
+  v = _mm_max_epu8(v, _mm_srli_si128(v, 4));
+  v = _mm_max_epu8(v, _mm_srli_si128(v, 2));
+  v = _mm_max_epu8(v, _mm_srli_si128(v, 1));
+  const unsigned most = static_cast<unsigned>(_mm_cvtsi128_si32(v)) & 0xffu;
+  if (most == 1) {
+    out = 1;
+    return true;
+  }
+  if (most > 8) return false;
+  const __m128i want = _mm_set1_epi8(static_cast<char>(most));
+  uint32_t banks = static_cast<uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_load_si128(reinterpret_cast<const __m128i*>(cnt)), want))) |
+                   static_cast<uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_load_si128(reinterpret_cast<const __m128i*>(cnt) + 1), want))) << 16;
+  // Each lane's bank as a byte, so that the lanes of one bank are a compare and a mask away.
+  const __m128i low5 = _mm_set1_epi32(31);
+  __m128i q[4];
+  for (unsigned i = 0; i < 4; ++i) {
+    const __m128i a = _mm_and_si128(_mm_srli_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(offs) + 2 * i), 2), low5);
+    const __m128i b = _mm_and_si128(_mm_srli_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(offs) + 2 * i + 1), 2), low5);
+    q[i] = _mm_packs_epi32(a, b);   // (eight 16-bit banks)
+  }
+  const __m128i bank_lo = _mm_packus_epi16(q[0], q[1]), bank_hi = _mm_packus_epi16(q[2], q[3]);   // (lanes 0..15, 16..31)
+  for (; banks; banks &= banks - 1) {
+    const unsigned bank = static_cast<unsigned>(std::countr_zero(banks));
+    const __m128i b = _mm_set1_epi8(static_cast<char>(bank));
+    uint32_t lanes = (static_cast<uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(bank_lo, b))) |
+                      static_cast<uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(bank_hi, b))) << 16) & m;
+    uint32_t w[8];
+    unsigned k = 0;
+    for (; lanes; lanes &= lanes - 1) w[k++] = offs[std::countr_zero(lanes)] >> 2;
+    bool distinct = true;
+    for (unsigned i = 1; i < k; ++i)
+      for (unsigned j = 0; j < i; ++j) distinct &= w[i] != w[j];
+    if (distinct) {
+      out = most;
+      return true;
+    }
+  }
+  return false;
+#else
+  (void)offs, (void)m, (void)bytes, (void)out;
+  return false;
+#endif
+}
+}  // namespace detail
+
+// The offsets widened (an active lane's as it is, the others' zero) and counted as sass_bank_passes does: the closed forms of a stride first, then, for 1 to 16
+// bytes, the AVX2 kernel for words within 128 of one another (simd::bank_window_kernel), the four-word rows (detail::bank_passes_slots), and last the
+// table. (Every one of them is the same count; VGPU_FASTCOUNT=0 runs the reference alone.)
 [[gnu::noinline]] inline uint32_t sass_bank_passes_widened(const uint32_t* offs, uint32_t mask, uint32_t bytes) {
   uint64_t a[32];
-  for (unsigned l = 0; l < 32; ++l) a[l] = (mask >> l & 1) ? offs[l] : 0;
-  return sass_bank_passes(a, mask, 32, bytes);
+  const auto widen = [&] {
+    for (unsigned l = 0; l < 32; ++l) a[l] = (mask >> l & 1) ? offs[l] : 0;
+  };
+  if (!fast() || bytes == 0 || bytes > 64 || mask == 0) {
+    widen();
+    return sass_bank_passes(a, mask, 32, bytes);
+  }
+  uint32_t out;
+  // A warp on a stride (bank_passes_progression) is a run of lanes whose offsets are `stride` apart; the offsets are 32-bit numbers widened, so that is so
+  // modulo 2^32 too, and a warp that is not (the first and second lane's difference carried to the last lane) cannot be: only then are the offsets widened
+  // for the closed forms. One lane is one pass. Everything else goes to the kernels first, which read the 32-bit offsets as they are.
+  if ((mask & (mask - 1)) == 0) return 1;
+  const unsigned lo = static_cast<unsigned>(std::countr_zero(mask));
+  const uint32_t run = mask >> lo;
+  if ((run & (run + 1)) == 0) {
+    const unsigned n = 32 - static_cast<unsigned>(std::countl_zero(run));
+    const uint32_t s = offs[lo + 1] - offs[lo];
+    if (offs[lo + n - 1] == offs[lo] + (n - 1) * s) {
+      widen();
+      if (detail::bank_passes_progression<true>(a, mask, bytes, out)) return out;
+    }
+  }
+  if (bytes <= 16) {
+    if (const simd::BankWindowFn window = simd::bank_window_kernel(); window && window(offs, mask, bytes, out)) return out;
+    if (detail::bank_passes_max_lanes(offs, mask, bytes, out)) return out;
+    if (detail::bank_passes_slots(offs, mask, bytes, out)) return out;
+  }
+  widen();
+  return sass_bank_passes_table(a, mask, 32, bytes);
 }
 
 // While the table is being left alone (a kernel whose shapes do not repeat: a gather, a histogram of random data) the warp asked about last is

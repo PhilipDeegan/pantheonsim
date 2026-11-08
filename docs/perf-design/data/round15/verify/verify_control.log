@@ -1,0 +1,3 @@
+samples/jacobiCudaGraphs           thr=4 base:tier                  tier  DIFFERENT out:1d5f88eb23a9/1d5f88eb23a9 cnt:True dig:False rc:0/0
+samples/segmentationTreeThrust     thr=4 base:tier                  tier  DIFFERENT out:b58bc7be551a/b58bc7be551a cnt:False dig:True rc:0/0
+DIFFERENCES: 2

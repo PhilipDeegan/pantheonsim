@@ -89,6 +89,23 @@ using namespace jk::jk_kernels;
   }
 }
 
+// The scalar comparisons of the uniform datapath (exec_ops.inc's int_cmp and bool_op).
+[[gnu::always_inline]] inline bool icmp1(unsigned cmp, bool sgn, u32 a, u32 b) {
+  const bool lt = sgn ? static_cast<int32_t>(a) < static_cast<int32_t>(b) : a < b;
+  const bool gt = sgn ? static_cast<int32_t>(a) > static_cast<int32_t>(b) : a > b;
+  switch (cmp) {
+    case 0: return false;
+    case 1: return lt;
+    case 2: return a == b;
+    case 3: return !gt;
+    case 4: return gt;
+    case 5: return a != b;
+    case 6: return !lt;
+    default: return true;
+  }
+}
+[[gnu::always_inline]] inline bool bool_op1(unsigned op, bool a, bool b) { return op == 0 ? (a && b) : op == 1 ? (a || b) : (a != b); }
+
 inline u32 combine(unsigned bop, u32 r, u32 acc) { return bop == 0 ? (r & acc) : bop == 1 ? (r | acc) : (r ^ acc); }
 
 alignas(32) const u32 kZeros32[32] = {};
