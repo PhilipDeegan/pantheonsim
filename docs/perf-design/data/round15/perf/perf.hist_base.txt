@@ -1,0 +1,40 @@
+    19.45%  libcudart.so.13.0                    [.] bool vgpu::exec::memcount::detail::bank_passes_bitmap<unsigned long>(unsigned long const*, unsigned long, unsigned int, unsigned int&)
+    18.16%  libcudart.so.13.0                    [.] vgpu::sass::(anonymous namespace)::Runner::exec_mem(vgpu::sass::(anonymous namespace)::Block&, vgpu::sass::(anonymous namespace)::Warp&, vgpu::sass::Instr const&, unsigned int)
+    11.24%  libcudart.so.13.0                    [.] void vgpu::sass::(anonymous namespace)::h_shared<false>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+     7.28%  libcudart.so.13.0                    [.] void vgpu::sass::(anonymous namespace)::h_shared<true>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+     5.61%  libcudart.so.13.0                    [.] vgpu::sass::(anonymous namespace)::Runner::tier_run_jit(vgpu::sass::(anonymous namespace)::Block&, vgpu::sass::(anonymous namespace)::Warp&, unsigned int, unsigned long, vgpu::sass::Code const&, vgpu::sass::tier::Program const&)
+     5.52%  libcudart.so.13.0                    [.] void vgpu::exec::sassatom::detail::shared_lanes<unsigned int, vgpu::exec::sassatom::AddStep>(unsigned char*, unsigned int const*, unsigned int, unsigned long const*, unsigned long const*, unsigned long*, vgpu::exec::sassatom::AddStep) [clone .isra.0]
+     4.46%  libcudart.so.13.0                    [.] vgpu::exec::memcount::sass_bank_passes_widened(unsigned int const*, unsigned int, unsigned int)
+     2.31%  41d61e2e096e4bf9a046cc1163a98b84.so  [.] vgpu_jit_r0
+     2.13%  libcudart.so.13.0                    [.] vgpu::exec::memcount::sass_bank_passes_offsets_kept(vgpu::exec::memcount::BankMemo&, unsigned int const*, unsigned int, unsigned int)
+     1.81%  libcudart.so.13.0                    [.] vgpu::sass::(anonymous namespace)::Runner::break_spin_wait(std::vector<vgpu::sass::(anonymous namespace)::Block*, std::allocator<vgpu::sass::(anonymous namespace)::Block*> > const&) [clone .isra.0]
+     1.79%  libcudart.so.13.0                    [.] vgpu::sass::(anonymous namespace)::Runner::step_warp(vgpu::sass::(anonymous namespace)::Block&, vgpu::sass::(anonymous namespace)::Warp&)
+     1.67%  libcudart.so.13.0                    [.] vgpu::exec::memcount::sass_bank_passes_offsets(vgpu::exec::memcount::BankMemo&, unsigned int const*, unsigned long, unsigned int, unsigned char*)
+     1.59%  libcudart.so.13.0                    [.] vgpu::sass::(anonymous namespace)::Runner::exec_mem(vgpu::sass::(anonymous namespace)::Block&, vgpu::sass::(anonymous namespace)::Warp&, vgpu::sass::Instr const&, unsigned int)::{lambda(vgpu::sass::Operand const&, bool, bool, unsigned int, unsigned int, unsigned long*, unsigned int)#1}::operator()(vgpu::sass::Operand const&, bool, bool, unsigned int, unsigned int, unsigned long*, unsigned int) const [clone .isra.0]
+     1.58%  libc.so.6                            [.] random
+     1.28%  libcudart.so.13.0                    [.] vgpu::MemoryManager::load_run(unsigned long, void*, unsigned long, unsigned int, unsigned char*) const
+     1.22%  3e67f42e7c65f5ce28a90027e91d0ba2.so  [.] vgpu_jit_r0
+     1.17%  libcudart.so.13.0                    [.] vgpu::exec::memcount::sass_bank_passes_table(unsigned long const*, unsigned long, unsigned int, unsigned int)
+     1.17%  libcudart.so.13.0                    [.] void vgpu::sass::(anonymous namespace)::h_global<false>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+     0.95%  libcudart.so.13.0                    [.] vgpu::sass::(anonymous namespace)::jit_escape(vgpu::sass::jit::Ctx*, unsigned int, unsigned int)
+     0.68%  ld-linux-x86-64.so.2                 [.] __tls_get_addr
+     0.57%  libstdc++.so.6.0.33                  [.] operator new(unsigned long)
+     0.57%  libcudart.so.13.0                    [.] vgpu::sass::(anonymous namespace)::jit_run_region(vgpu::sass::(anonymous namespace)::JitFrame&, vgpu::sass::jit::Unit&, unsigned int, vgpu::sass::(anonymous namespace)::TCtx&, vgpu::sass::(anonymous namespace)::Warp&, vgpu::exec::LaunchStats&, vgpu::sass::tier::MOp const*, unsigned long, unsigned int, unsigned int, unsigned int, unsigned long, bool, vgpu::sass::tier::MOp const*&) [clone .constprop.0]
+     0.55%  libc.so.6                            [.] random_r
+     0.53%  libcudart.so.13.0                    [.] vgpu::sass::(anonymous namespace)::h_imad_wide(void*, vgpu::sass::tier::MOp const&, unsigned int)
+     0.43%  libcudart.so.13.0                    [.] vgpu::exec::sassatom::shared_batch(unsigned int, unsigned int, bool, unsigned char*, unsigned int const*, unsigned int, unsigned long const*, unsigned long const*, unsigned long*)
+     0.43%  libcudart.so.13.0                    [.] vgpu::sass::(anonymous namespace)::thread_bank_memo()
+     0.41%  libcudart.so.13.0                    [.] vgpu::sass::(anonymous namespace)::count_run(vgpu::exec::LaunchStats&, bool, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int)
+     0.41%  libcudart.so.13.0                    [.] vgpu::MemoryManager::run_allocation(unsigned long, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+     0.29%  libc.so.6                            [.] rand
+     0.22%  libcudart.so.13.0                    [.] void vgpu::simd::avx2_impl::imad_wide_avx2<false, false, false>(unsigned int*, unsigned int*, unsigned int const*, unsigned int const*, unsigned int const*, unsigned int const*, unsigned int, unsigned int*) [clone .isra.0]
+     0.22%  libcudart.so.13.0                    [.] vgpu::sass::(anonymous namespace)::h_iadd3(void*, vgpu::sass::tier::MOp const&, unsigned int)
+     0.22%  libcudart.so.13.0                    [.] vgpu::sass::(anonymous namespace)::h_mov(void*, vgpu::sass::tier::MOp const&, unsigned int)
+     0.22%  libcudart.so.13.0                    [.] vgpu::sass::(anonymous namespace)::Runner::block_round(vgpu::sass::(anonymous namespace)::Block&, int) [clone .constprop.0]
+     0.21%  41d61e2e096e4bf9a046cc1163a98b84.so  [.] vgpu_jit_r1
+     0.20%  histogram                            [.] main
+     0.19%  libcudart.so.13.0                    [.] vgpu::simd::avx2_impl::warp_run_k(unsigned int const*, unsigned int const*, unsigned int)
+     0.19%  libcudart.so.13.0                    [.] __tls_get_addr@plt
+     0.18%  libcudart.so.13.0                    [.] vgpu::sass::(anonymous namespace)::tier_dyn64(vgpu::sass::(anonymous namespace)::TCtx const&, vgpu::sass::tier::Src const&, unsigned int*, unsigned int*, bool)
+     0.17%  libc.so.6                            [.] malloc
+     0.16%  libc.so.6                            [.] 0x00000000001a1efa

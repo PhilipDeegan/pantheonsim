@@ -1,0 +1,5 @@
+=== shard loops 07:56:29
+ok   sm_86 jit_loops  (9 units (20 regions), 9 ready, 0 cache hits, 9 compiles (16622.3 ms), 0 failures, 0 damaged objects replaced; 103832 region calls ran 820854 warp instructions (783972 computed by generated code), 0 exceptions unwound through them; share rule: 0 declined, 0 accepted; 0 branches and register-only ops continued inside generated code)
+PASS
+=== shard loops rc=0 07:58:49
+=== all done

@@ -1,0 +1,7 @@
+test_jit_resid ctl_flag: rc=1 failed_tests=1 2/3 tests passed [ FAIL ] jit_graph_regions_equal_the_model_of_the_run_loop
+test_jit_resid none: rc=0 failed_tests=0 3/3 tests passed 
+test_jit_resid ctl_split: rc=1 failed_tests=1 2/3 tests passed [ FAIL ] jit_graph_regions_equal_the_model_of_the_run_loop
+test_jit_resid ctl_swap: rc=1 failed_tests=1 2/3 tests passed [ FAIL ] jit_graph_regions_equal_the_model_of_the_run_loop
+test_jit_resid ctl_nocount_bra: rc=1 failed_tests=1 2/3 tests passed [ FAIL ] jit_graph_regions_equal_the_model_of_the_run_loop
+test_jit_resid ctl_divcount: rc=1 failed_tests=1 2/3 tests passed [ FAIL ] jit_graph_regions_equal_the_model_of_the_run_loop
+test_jit_resid ctl_extra: rc=1 failed_tests=1 2/3 tests passed [ FAIL ] jit_graph_regions_equal_the_model_of_the_run_loop

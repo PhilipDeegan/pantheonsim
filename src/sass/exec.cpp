@@ -1271,6 +1271,7 @@ uint32_t Runner::sreg(const Block& blk, const Warp& w, unsigned idx, unsigned la
       const uint64_t blocks = uint64_t{cfg_.grid[0]} * cfg_.grid[1] * cfg_.grid[2];
       if (cfg_.cooperative || blocks <= sms) return static_cast<uint32_t>(linear % sms);
       const uint64_t size = clustered_ ? csize_ : 1;
+      memo::g_smid_by_worker.store(true, std::memory_order_relaxed);
       return static_cast<uint32_t>((uint64_t{blk.worker} * size + blk.rank) % sms);
     }
     case 0x8a: return 0;                                                // SR_CgaSize (bank 0's envregs at +0)

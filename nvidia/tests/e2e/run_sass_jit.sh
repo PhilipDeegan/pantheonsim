@@ -10,6 +10,8 @@
 #
 # More on sass_tier: four host threads with the JIT; the JIT again with the cache the first run filled (nothing compiles, same output);
 # the background compile (no synchronous mode: regions are used when they are ready, whenever that is); the chain off.
+# jit_loops (loops and branches: a uniform loop the generated code runs on its own, one every lane leaves at its own iteration, nested loops with an early exit, a store in
+# the body, a body longer than a region, the clock around a loop, barriers, guarded ops, uniform values that steer a loop) gets sass_tier's variants.
 # On sass_tier_steps (the store gate, the step limit, the 256-instruction run, faults deep in straight code): every fault program,
 # tier against JIT, with and without -fexceptions for the generated code.
 # And the failure modes (no compiler, a compiler that fails, a cache that cannot be written): output identical, the JIT never ran.
@@ -29,10 +31,10 @@
 # VGPU_JIT_MIN_PERCENT (default 10) percent of its warp instructions.
 set -uo pipefail
 shard="${VGPU_JIT_SHARD:-}"
-# Is stage $1 (tier, steps, steps_gather, steps_shared, programs, random, modes) in this run's shard?
+# Is stage $1 (tier, loops, steps, steps_gather, steps_shared, programs, random, modes) in this run's shard?
 want() { [[ -z $shard || ",$shard," == *",$1,"* ]]; }
 if [[ -n ${VGPU_JIT_LIST:-} ]]; then
-  if [[ ${1:-} == --full || -n ${VGPU_JIT_FULL:-} ]]; then stages="tier steps steps_gather steps_shared programs random modes"; else stages="tier steps steps_gather steps_shared random modes"; fi
+  if [[ ${1:-} == --full || -n ${VGPU_JIT_FULL:-} ]]; then stages="tier loops steps steps_gather steps_shared programs random modes"; else stages="tier loops steps steps_gather steps_shared random modes"; fi
   for st in $stages; do want "$st" && echo "$st"; done
   exit 0
 fi
@@ -59,12 +61,16 @@ full=0
 [[ ${1:-} == --full || -n ${VGPU_JIT_FULL:-} ]] && full=1
 prog_filter="${VGPU_JIT_PROGRAMS:-}"
 if (( ! full )) && [[ -z $prog_filter ]]; then   # the gate: two programs, built for one architecture
-  prog_filter="sass_tier.sm_86 sass_tier_steps.sm_86"
-  export VGPU_TIER_ARCHS="${VGPU_TIER_ARCHS:-sm_86}" VGPU_TIER_PROGRAMS="${VGPU_TIER_PROGRAMS:-sass_tier_steps:75}"
+  prog_filter="sass_tier.sm_86 sass_tier_steps.sm_86 jit_loops.sm_86"
+  export VGPU_TIER_ARCHS="${VGPU_TIER_ARCHS:-sm_86}" VGPU_TIER_PROGRAMS="${VGPU_TIER_PROGRAMS:-sass_tier_steps:75 jit_loops:75}"
 fi
 if [[ -n $shard ]]; then   # build only what this shard's stages run (sass_tier is also the failure modes' program)
   want tier || want modes || export VGPU_TIER_NO_SASS_TIER=1
-  want steps || want steps_gather || want steps_shared || want programs || export VGPU_TIER_PROGRAMS=-
+  if ! { want steps || want steps_gather || want steps_shared || want programs; }; then   # (only the loops shard: that program alone)
+    want loops && [[ -z ${VGPU_TIER_PROGRAMS:-} || $VGPU_TIER_PROGRAMS == *jit_loops* ]] && export VGPU_TIER_PROGRAMS=jit_loops:75 || export VGPU_TIER_PROGRAMS=-
+  elif ! want loops && [[ ${VGPU_TIER_PROGRAMS:-} == *jit_loops* ]]; then   # (the steps shards without the loops program)
+    export VGPU_TIER_PROGRAMS="${VGPU_TIER_PROGRAMS//jit_loops:75/}"
+  fi
   if [[ -n ${VGPU_TIER_NO_SASS_TIER:-} && ${VGPU_TIER_PROGRAMS:-} == - ]]; then built_nothing=1; fi
 fi
 if [[ -n ${built_nothing:-} ]]; then rc=0; build_log=""; else
@@ -111,7 +117,7 @@ check() {
   local na nb
   na="$(grep -h '^tier native:\|^tier: ' "$sa" 2>/dev/null)"; nb="$(grep -h '^tier native:\|^tier: ' "$sb" 2>/dev/null)"
   [[ "$na" == "$nb" ]] || why="${why:+$why; }the tier's statistics differ with the JIT on"
-  if [[ $ra != 0 && $p != sass_tier && $ra == "$rb" && "$a" == "$b" ]]; then
+  if [[ $ra != 0 && $p != sass_tier && $p != jit_loops && $ra == "$rb" && "$a" == "$b" ]]; then
     echo "ok   $arch $p  (fails identically in both, exit $ra: not compared further)"
     return
   fi
@@ -127,11 +133,11 @@ check() {
     if [[ "$t4" == "$a" ]]; then
       c4="$(runit "$bin" $arch "${jitenv[@]}" VGPU_THREADS=4)"
       [[ "$a" == "$c4" ]] || why="${why:+$why; }four threads with the JIT print differently from the tier's"
-    elif [[ $p == sass_tier ]]; then
-      why="${why:+$why; }the tier's four threads print differently from its one (sass_tier must not)"
+    elif [[ $p == sass_tier || $p == jit_loops ]]; then
+      why="${why:+$why; }the tier's four threads print differently from its one ($p must not)"
     fi
   fi
-  if [[ $p == sass_tier ]]; then
+  if [[ $p == sass_tier || $p == jit_loops ]]; then
     local ran total
     ran="$(sed -n 's/.*ran \([0-9]*\) warp instructions.*/\1/p' <<< "$jl")"
     total="$(sed -n 's/^tier: \([0-9]*\) of \([0-9]*\) warp.*/\2/p' "$sb" | head -1)"
@@ -142,6 +148,13 @@ check() {
     local c2 jl2
     c2="$(runit "$bin" $arch "${jitenv[@]}" VGPU_JIT_STATS=1 VGPU_JIT_STATS_FILE="$st")"
     jl2="$(jit_line "$st")"
+    # The loops program must have had loops run in generated code: branches and register-only ops that the generated code went on past (not with the tier's
+    # statistics on, which keep the run loop from going on past them: the first run above has them on, this one has not).
+    if [[ $p == jit_loops ]]; then
+      local cont
+      cont="$(sed -n 's/.*[ ,;]\([0-9][0-9]*\) branches and register-only ops.*/\1/p' <<< "$jl2" | tail -1)"
+      (( ${cont:-0} >= ${VGPU_JIT_MIN_CONTINUED:-1000} )) || why="${why:+$why; }only ${cont:-0} branches went on inside generated code"
+    fi
     [[ "$a" == "$c2" ]] || why="${why:+$why; }the JIT with a warm cache prints differently from the tier"
     [[ "$(jit_num "$jl2" 'compiles')" == 0 ]] || why="${why:+$why; }a run with a warm cache compiled again ($jl2)"
     # The background compile: whenever it finishes, the output is the same.
@@ -234,6 +247,7 @@ if [[ -z ${VGPU_JIT_ONLY_RANDOM:-} ]]; then
   for j in "${programs[@]}"; do
     case ${j%% *} in
       sass_tier) want tier && check $j ;;
+      jit_loops) want loops && check $j ;;
       sass_tier_steps) { want steps || want steps_gather || want steps_shared; } && check $j ;;   # check runs only the sections of the stages it has
       *) want programs && check $j ;;
     esac
@@ -245,12 +259,17 @@ fi
 # VGPU_JIT_RANDOM_KERNELS kernels each; default 3 of 16 with --full, 1 in the gate; VGPU_JIT_RANDOM_ARCH, default sm_86).
 if want random && command -v python3 >/dev/null 2>&1 && [[ -z ${VGPU_JIT_PROGRAMS:-} ]]; then
   rarch="${VGPU_JIT_RANDOM_ARCH:-sm_86}"
-  if grep -qx "$rarch" <<< "$("$nvcc_bin" --list-gpu-code 2>/dev/null)"; then
+  # (A rig without nvcc runs the programs built for it beforehand, jit_random.<seed>.<arch> in the work directory.)
+  if [[ -z $nvcc_bin ]] && compgen -G "$work/jit_random.*.$rarch" >/dev/null || grep -qx "$rarch" <<< "$("$nvcc_bin" --list-gpu-code 2>/dev/null)"; then
     for seed in $(seq 1 "${VGPU_JIT_RANDOM_SEEDS:-$(( full ? 3 : 1 ))}"); do
       src="$work/jit_random.$seed.cu"; bin="$work/jit_random.$seed.$rarch"
-      python3 "$root/nvidia/tests/e2e/jit_random.py" "$seed" "${VGPU_JIT_RANDOM_KERNELS:-16}" > "$src"
-      if ! "$nvcc_bin" -std=c++17 -arch="$rarch" -cudart shared -w -Wno-deprecated-gpu-targets -Xlinker --as-needed $san "$src" -o "$bin" -lcuda 2> "$bin.build"; then
-        echo "FAIL $rarch jit_random seed $seed: does not build"; tail -3 "$bin.build" | sed 's/^/    /'; fails=1; continue
+      if [[ -n $nvcc_bin ]]; then
+        python3 "$root/nvidia/tests/e2e/jit_random.py" "$seed" "${VGPU_JIT_RANDOM_KERNELS:-16}" > "$src"
+        if ! "$nvcc_bin" -std=c++17 -arch="$rarch" -cudart shared -w -Wno-deprecated-gpu-targets -Xlinker --as-needed $san "$src" -o "$bin" -lcuda 2> "$bin.build"; then
+          echo "FAIL $rarch jit_random seed $seed: does not build"; tail -3 "$bin.build" | sed 's/^/    /'; fails=1; continue
+        fi
+      elif [[ ! -x $bin ]]; then
+        continue
       fi
       ra="$(runit "$bin" $rarch VGPU_TIER=1)"; rb="$(runit "$bin" $rarch "${jitenv[@]}" VGPU_JIT_STATS=1 VGPU_JIT_STATS_FILE="$work/jr.$seed.stats")"
       rb="$(runit "$bin" $rarch "${jitenv[@]}")"; rc="$(runit "$bin" $rarch "${jitenv[@]}" VGPU_THREADS=4)"

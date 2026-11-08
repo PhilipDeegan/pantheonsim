@@ -249,6 +249,7 @@ add_library(vgpu STATIC
   src/core/profile.cpp
   src/core/registry.cpp
   src/core/memory.cpp
+  src/core/memo_hash.cpp
   src/core/memory_backing.cpp
   src/core/telemetry.cpp
   src/core/profiling.cpp
@@ -271,6 +272,7 @@ add_library(vgpu STATIC
   src/exec/devrt.cpp
   src/exec/worker_pool.cpp
   src/runtime/runtime.cpp
+  src/runtime/memo.cpp
   src/runtime/host_gpu.cpp
   src/runtime/shared_runtime.cpp
   src/runtime/visible_devices.cpp
@@ -1493,6 +1495,17 @@ set_tests_properties(test_memcount_forms_simd_base PROPERTIES ENVIRONMENT "VGPU_
 vgpu_unit_test(test_bank_memo)
 # The bitmap counting of the passes of 1 to 4 byte accesses (detail::bank_passes_bitmap), against the definition of the passes.
 vgpu_unit_test(test_bank_bitmap)
+# The kernels that count a warp's bank passes when the closed forms and the table of shapes do not (the AVX2 window of 128 words, the four-word rows of a bank, and
+# sass_bank_passes_widened / sass_bank_passes_offsets over them), against the definition of the passes; and the same without the AVX2 kernel.
+vgpu_unit_test(test_bank_kernels)
+add_test(NAME test_bank_kernels_simd_base COMMAND test_bank_kernels)
+set_tests_properties(test_bank_kernels_simd_base PROPERTIES ENVIRONMENT "VGPU_SIMD=base" TIMEOUT 1500)
+set_tests_properties(test_bank_kernels PROPERTIES TIMEOUT 1500)
+# The AVX2 count of a warp's sectors when its lanes' sectors rise (simd::sector_up_kernel), against the definition of the sectors, and the same without AVX2.
+vgpu_unit_test(test_sector_kernels)
+add_test(NAME test_sector_kernels_simd_base COMMAND test_sector_kernels)
+set_tests_properties(test_sector_kernels_simd_base PROPERTIES ENVIRONMENT "VGPU_SIMD=base" TIMEOUT 1500)
+set_tests_properties(test_sector_kernels PROPERTIES TIMEOUT 1500)
 # The single-lookup atomic read-modify-write and the one-lookup texel read, against the per-access code they replace.
 vgpu_unit_test(test_atom_rmw)
 # Module::code_at (a binary search over the code sections) against the scan it replaced.
@@ -1511,6 +1524,13 @@ add_test(NAME test_sass_store_gate_tier0 COMMAND test_sass_store_gate)
 set_tests_properties(test_sass_store_gate_tier0 PROPERTIES ENVIRONMENT "VGPU_TIER=0")
 # The run loop going on past S2R, ULDC, UMOV, USEL, PLOP3 and SEL where the chain would have started the next call there: same words, counters and clocks as the interpreter.
 vgpu_unit_test(test_sass_chain_cont)
+# The same three tests with tier 2 (the JIT) forced on at once (every region compiled, synchronously; a private cache): what the generated code does where the run loop goes on past
+# a branch or a cont op, the store gate and the clocks must be what the tier does. (No compiler on PATH: the JIT stays off and they are the tier's own run again.)
+foreach(_t test_sass_chain_cont test_sass_store_gate test_sass_alu_runs)
+  add_test(NAME ${_t}_jit COMMAND ${_t})
+  set_tests_properties(${_t}_jit PROPERTIES ENVIRONMENT
+    "VGPU_JIT=1;VGPU_JIT_THRESHOLD=1;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-${_t}")
+endforeach()
 vgpu_unit_test(test_sass_s2r_fill)
 # LDGSTS (cp.async): the tier's own handler against the rule and the interpreter, registers, shared memory and counters.
 vgpu_unit_test(test_sass_ldgsts)
@@ -1594,6 +1614,8 @@ vgpu_unit_test(test_barriers)
 vgpu_unit_test(test_dynpar)
 # What a device remembers between launches gives the answers a device that remembers nothing gives.
 vgpu_unit_test(test_launch_cache)
+# Launch-level result caching (VGPU_MEMO): the history chain, the poisoning table, exact replay, the disk store, the mutants.
+vgpu_unit_test(test_memo)
 # The AST builder: a kernel made with no PTX text, loaded and launched through the runtime facade (E9, E10); what it
 # lays out against what the parser lays out; no mul/add contraction.
 vgpu_unit_test(test_ast_builder)
@@ -3505,6 +3527,14 @@ if(TARGET vgpucublas)
     ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
     TIMEOUT 300)
 
+  # Launch-level result caching through the runtime API: off, cold, warm and verified runs of one program must agree.
+  add_test(NAME e2e_memo_api_matrix
+           COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_memo_api_matrix.sh)
+  set_tests_properties(e2e_memo_api_matrix PROPERTIES
+    DEPENDS vgpucudart
+    ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
+    TIMEOUT 600)
+
   add_test(NAME e2e_occupancy_rules
            COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_occupancy_rules.sh)
   set_tests_properties(e2e_occupancy_rules PROPERTIES
@@ -3878,11 +3908,11 @@ set_tests_properties(e2e_host_gpu_stub PROPERTIES
 
 # Tier 2 (src/sass/jit.hpp, VGPU_JIT=1) against the tier, on the same programs: results and every counter, with the JIT forced on at once, one
 # and four host threads, a warm cache, the faults of sass_tier_steps, and every way the JIT can fail (the output must not change).
-# Six shards (VGPU_JIT_SHARD, run_sass_jit.sh): sass_tier's variants, sass_tier_steps' faults and region caps, its two step-limit bisections
-# (gather, shared), the random kernels, and the failure modes. One process it took 1611 s in the unit job
+# Seven shards (VGPU_JIT_SHARD, run_sass_jit.sh): sass_tier's variants, jit_loops' (loops and branches in generated code), sass_tier_steps' faults and region caps, its two step-limit
+# bisections (gather, shared), the random kernels, and the failure modes. One process it took 1611 s in the unit job
 # (the steps stage alone 1089 s, most of it synchronous host-compiler runs); the shards are independent (each has its own cache
 # directories) and together are the stages of the whole run, once each (e2e_sass_jit_shards_partition proves it).
-vgpu_shard_tests(e2e_sass_jit ENV_VAR VGPU_JIT_SHARD LIST_ENV VGPU_JIT_LIST SPECS tier steps steps_gather steps_shared random modes
+vgpu_shard_tests(e2e_sass_jit ENV_VAR VGPU_JIT_SHARD LIST_ENV VGPU_JIT_LIST SPECS tier loops steps steps_gather steps_shared random modes
   COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_sass_jit.sh
   ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
   PROPERTIES DEPENDS vgpucudart SKIP_REGULAR_EXPRESSION "^SKIP:" TIMEOUT 3600)

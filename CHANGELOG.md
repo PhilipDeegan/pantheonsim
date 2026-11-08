@@ -11,6 +11,15 @@ release says what runs and what it produces, never how fast a real GPU would run
   `cudaGLSetGLDevice`, `cudaGLGetDevices`, ...). A program that only names one of them, such as COLMAP's SiftGPU, failed to start when linked with
   `-z now` ("undefined symbol: cudaGLRegisterBufferObject"). With no OpenGL context on a simulated GPU they answer what an RTX 3060 answers with none:
   `cudaErrorInvalidGraphicsContext` for register, unregister and `cudaGLGetDevices`, `cudaErrorInvalidValue` for map, unmap and the map flags.
+- `VGPU_MEMO=1` (opt-in, off by default and then unchanged): launch-level result caching. A launch whose kernel, grid, arguments,
+  environment and device-memory history have been seen before is not run; its stored write set, counters and kernel digest are applied
+  (`VGPU_MEMO_DIR` keeps entries between runs, so a second run of a deterministic program hits from its first launch;
+  `VGPU_MEMO_VERIFY` runs every hit for real as well and compares). The device's memory is named by a hash chain over what the
+  program did to it, not by its content, and anything the cache cannot describe (virtual memory management, IPC, pinned or managed
+  memory a kernel can reach, device malloc and printf, cooperative and cluster launches, textures, atomics on several threads, a
+  profiler, the race detector, an armed fault, ...) restarts the chain, so the cost on a miss is a budgeted before-and-after hash of
+  the allocations the launch can write and the answer is never a stale one. Knobs: [docs/cli.md](docs/cli.md); rules, tests, mutants
+  and measurements: [docs/performance.md](docs/performance.md#round-sp35-launch-level-result-caching-built-tested-measured-branch-sp35-memo-base-originmain-9f80d40e).
 - The container image builds again. `scripts/package-build.sh` left `shim/libcudss.so.1` pointing into `cudss1/`, a directory the image does not
   have, so the build stopped at "links that lead nowhere" from the cuDSS 1.0 change onward. A lint test (`lint_package_build`) now builds a small
   tree with the same layout.

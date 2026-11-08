@@ -59,6 +59,9 @@ bool src_ok(const SrcFacts& x) {
 bool src64_ok(const SrcFacts& x) { return is_row(x) || is_pool(x) || is_dyn(x, Dyn::Bank0) || is_dyn(x, Dyn::UReg); }
 // A predicate source (tier_pmask): a per-lane P<n> or a uniform UP<n>.
 bool pred_ok(const SrcFacts& x) { return is_dyn(x, Dyn::Reg) || is_dyn(x, Dyn::UReg); }
+// A source of the uniform datapath (tier_sc: read in the first executing lane, no modifier): a register row, a constant, a register, bank 0, a uniform register.
+bool usrc_ok(const SrcFacts& x) { return is_row(x) || is_pool(x) || is_dyn(x, Dyn::Reg) || is_dyn(x, Dyn::Bank0) || is_dyn(x, Dyn::UReg); }
+constexpr uint16_t kNoDst = 0xffff;   // tier::kNoReg
 
 // Declares `const u32* A<k>` for source k (tier_src<Flt>).
 void decl_src(W& w, const SrcFacts& x, int k, bool flt) {
@@ -91,6 +94,17 @@ void decl_src64(W& w, const SrcFacts& x, int k) {
   }
 }
 
+// The value of a uniform-datapath source in lane `l` (tier_sc), as an expression.
+std::string usrc(const SrcFacts& x) {
+  char buf[128];
+  if (is_row(x)) std::snprintf(buf, sizeof buf, "%s[l]", g_rc->row(x.off / 32u, false).c_str());
+  else if (is_pool(x)) std::snprintf(buf, sizeof buf, "0x%xu", x.val);
+  else if (is_dyn(x, Dyn::Reg)) std::snprintf(buf, sizeof buf, "%s[l]", g_rc->row(x.off, false).c_str());
+  else if (is_dyn(x, Dyn::Bank0)) std::snprintf(buf, sizeof buf, "b0w(c, %uu)", x.off);
+  else std::snprintf(buf, sizeof buf, "c->ur[%u]", x.off);   // a uniform register
+  return buf;
+}
+
 const char* pm(W& w, const SrcFacts& x, char* buf, size_t n) {
   const bool neg = x.mod & 1u;
   if (x.dyn == static_cast<uint8_t>(Dyn::UReg)) {   // a uniform predicate: never cached (only an escape writes it)
@@ -115,7 +129,10 @@ void store(W& w, uint16_t dst, const char* row) {
   }
   w.f("    store_row(%s, ex, %s);\n", target.c_str(), row);
 }
-void setp(W& w, uint16_t reg, const char* v) { w.s += g_rc->setp(reg, v); }
+void setp(W& w, uint16_t reg, const char* v) {
+  if (reg == kNoReg) return;
+  w.s += g_rc->setp(reg, v);
+}
 void setp2(W& w, const OpFacts& o, bool negate_second) {   // ISETP / FSETP: the two predicate outputs from r and acc
   char a[96], b[96];
   std::snprintf(a, sizeof a, "combine(%uu, r, acc)", o.b);
@@ -257,6 +274,18 @@ bool generates(const OpFacts& o) {
     case Form::Prmt: return o.a == 0 && src_ok(o.s[0]) && src_ok(o.s[1]) && src_ok(o.s[2]);
     case Form::Imnmx: return src_ok(o.s[0]) && src_ok(o.s[1]) && pred_ok(o.p);
     case Form::I2fp: return src_ok(o.s[0]);
+    case Form::Sel: return src_ok(o.s[0]) && src_ok(o.s[1]) && pred_ok(o.p);
+    case Form::Plop3: return pred_ok(o.s[0]) && pred_ok(o.s[1]) && pred_ok(o.s[2]);
+    case Form::S2r: return !(o.a == 0x01 || (o.a >= 0x50 && o.a <= 0x53));   // (the clocks read the warp's step count, which the generated code has not written yet: the handler's)
+    case Form::Cs2r: return o.a == 0xff;   // SRZ: zeros (another special register is the handler's)
+    case Form::Umov: return usrc_ok(o.s[0]);
+    case Form::Uldc: return o.a == 0;   // bank 0 only (the Ctx holds no other bank)
+    case Form::Uiadd3:
+      return usrc_ok(o.s[0]) && usrc_ok(o.s[1]) && usrc_ok(o.s[2]) && (!(o.aux & 1) || (pred_ok(o.p) && pred_ok(o.p2))) &&
+             (o.dst2 == kNoDst || (o.aux & 2)) && (o.a == kNoDst || (o.aux & 4));   // (a predicate result in a lane's own P is the handler's)
+    case Form::Ulop3: return usrc_ok(o.s[0]) && usrc_ok(o.s[1]) && usrc_ok(o.s[2]);
+    case Form::Usel: return usrc_ok(o.s[0]) && usrc_ok(o.s[1]) && pred_ok(o.p);
+    case Form::Uisetp: return usrc_ok(o.s[0]) && usrc_ok(o.s[1]) && pred_ok(o.p);
     default: return false;
   }
 }
@@ -449,6 +478,97 @@ std::string gen_op_body(const OpFacts& o, RowCtx& rc) {
       w.f("    u32 r[32]; i2f_k(%s, r, A0);\n", o.c ? "true" : "false");
       store(w, o.dst, "r");
       break;
+    case Form::Sel:   // h_sel: b where the predicate is clear, a where it holds
+      decl_src(w, o.s[0], 0, false);
+      decl_src(w, o.s[1], 1, false);
+      w.f("    u32 r[32]; for (unsigned l = 0; l < 32; ++l) r[l] = A1[l];\n    blend_m_k(r, A0, %s);\n", pm(w, o.p, pa, sizeof pa));
+      store(w, o.dst, "r");
+      break;
+    case Form::Plop3: {   // h_plop3: for each lane the table bit the three predicates select, into two predicates
+      char pc[96];
+      w.f("    const u32 pa = %s, pb = %s, pd = %s;\n    u32 r0 = 0, r1 = 0;\n", pm(w, o.s[0], pa, sizeof pa), pm(w, o.s[1], pb, sizeof pb), pm(w, o.s[2], pc, sizeof pc));
+      for (unsigned idx = 0; idx < 8; ++idx) {
+        char term[160];
+        std::snprintf(term, sizeof term, "%spa & %spb & %spd", (idx & 4) ? "" : "~", (idx & 2) ? "" : "~", (idx & 1) ? "" : "~");
+        if ((o.a >> idx) & 1) w.f("    r0 |= %s;\n", term);
+        if ((o.b >> idx) & 1) w.f("    r1 |= %s;\n", term);
+      }
+      if (mut(g_form_name)) w.f("    r0 ^= 8u;\n");
+      setp(w, o.dst, "r0");
+      setp(w, o.dst2, "r1");
+      break;
+    }
+    case Form::S2r:   // h_s2r: the host fills the executing lanes (it needs the block and the warp)
+      if (o.dst == kNoReg) break;
+      w.f("    u32 r[32] = {};\n    c->sreg(c, %uu, r, ex);\n", o.a);
+      store(w, o.dst, "r");   // (the form's mutant is in store())
+      break;
+    case Form::Cs2r:   // h_cs2r, SRZ: zero (and the register after it for a pair)
+      if (o.dst == kNoReg) break;
+      w.f("    u32 r[32]; splat(r, %uu);\n", mut(g_form_name) ? 1u : 0u);
+      store(w, o.dst, "r");
+      if (o.b && o.dst + 1u != kRZ) store(w, static_cast<uint16_t>(o.dst + 1), "r");
+      break;
+    case Form::Umov:   // h_umov: the first executing lane's value into a uniform register
+      w.f("    const unsigned l = static_cast<unsigned>(__builtin_ctz(ex));\n");
+      if (o.dst != kNoDst) w.f("    c->ur[%u] = %s%s;\n", unsigned{o.dst}, usrc(o.s[0]).c_str(), mut(g_form_name) ? " ^ 1u" : "");
+      break;
+    case Form::Uldc: {   // h_uldc, bank 0: a word, a narrow field, or two words
+      const unsigned size = o.b;
+      const uint64_t off = static_cast<uint64_t>(o.imm);
+      if (size == 5) {
+        if (o.dst != kNoDst) {
+          w.f("    c->ur[%u] = b0w(c, %lluu)%s;\n", unsigned{o.dst}, static_cast<unsigned long long>(off), mut(g_form_name) ? " ^ 1u" : "");
+          if (o.dst + 1u < o.c) w.f("    c->ur[%u] = b0w(c, %lluu);\n", o.dst + 1u, static_cast<unsigned long long>(off + 4));
+        }
+        break;
+      }
+      if (o.dst == kNoDst) break;
+      char v[200];
+      if (size < 4) std::snprintf(v, sizeof v, "b0w(c, %lluu) >> %uu", static_cast<unsigned long long>(off & ~uint64_t{3}), static_cast<unsigned>(8 * (off & 3)));
+      else std::snprintf(v, sizeof v, "b0w(c, %lluu)", static_cast<unsigned long long>(off));
+      const char* ext = size == 0 ? "(%s) & 0xffu" : size == 1 ? "static_cast<u32>(static_cast<int8_t>(%s))" : size == 2 ? "(%s) & 0xffffu" : size == 3 ? "static_cast<u32>(static_cast<int16_t>(%s))" : "%s";
+      char e[300];
+      std::snprintf(e, sizeof e, ext, v);
+      w.f("    c->ur[%u] = %s%s;\n", unsigned{o.dst}, e, mut(g_form_name) ? " ^ 1u" : "");
+      break;
+    }
+    case Form::Uiadd3: {   // h_uiadd3
+      w.f("    const unsigned l = static_cast<unsigned>(__builtin_ctz(ex));\n    u64 sum = 0;\n");
+      for (int k = 0; k < 3; ++k) {
+        if ((o.b >> (2 * k)) & 1) w.f("    sum += static_cast<u32>(~%s); sum += 1;\n", usrc(o.s[k]).c_str());
+        else if ((o.b >> (2 * k + 1)) & 1) w.f("    sum += static_cast<u32>(~%s);\n", usrc(o.s[k]).c_str());
+        else w.f("    sum += %s;\n", usrc(o.s[k]).c_str());
+      }
+      if (o.aux & 1) w.f("    sum += static_cast<u64>((%s >> l) & 1u) + static_cast<u64>((%s >> l) & 1u);\n", pm(w, o.p, pa, sizeof pa), pm(w, o.p2, pb, sizeof pb));
+      if (o.dst != kNoDst) w.f("    c->ur[%u] = static_cast<u32>(sum)%s;\n", unsigned{o.dst}, mut(g_form_name) ? " ^ 1u" : "");
+      w.f("    const u64 over = sum >> 32;\n");
+      if (o.dst2 != kNoDst && o.dst2 != 7) w.f("    c->up[%u] = over >= 1;\n", unsigned{o.dst2});
+      if (o.a != kNoDst && o.a != 7) w.f("    c->up[%u] = over >= 2;\n", o.a);
+      break;
+    }
+    case Form::Ulop3: {   // h_ulop3
+      w.f("    const unsigned l = static_cast<unsigned>(__builtin_ctz(ex));\n    const u32 ua = %s, ub = %s, uc = %s;\n    u32 r = 0;\n", usrc(o.s[0]).c_str(), usrc(o.s[1]).c_str(),
+          usrc(o.s[2]).c_str());
+      for (unsigned idx = 0; idx < 8; ++idx)
+        if ((o.a >> idx) & 1) w.f("    r |= %sua & %sub & %suc;\n", (idx & 4) ? "" : "~", (idx & 2) ? "" : "~", (idx & 1) ? "" : "~");
+      if (o.dst != kNoDst) w.f("    c->ur[%u] = r%s;\n", unsigned{o.dst}, mut(g_form_name) ? " ^ 1u" : "");
+      break;
+    }
+    case Form::Usel:   // h_usel
+      w.f("    const unsigned l = static_cast<unsigned>(__builtin_ctz(ex));\n");
+      if (o.dst != kNoDst)
+        w.f("    c->ur[%u] = (((%s >> l) & 1u) ? %s : %s)%s;\n", unsigned{o.dst}, pm(w, o.p, pa, sizeof pa), usrc(o.s[0]).c_str(), usrc(o.s[1]).c_str(),
+            mut(g_form_name) ? " ^ 1u" : "");
+      break;
+    case Form::Uisetp: {   // h_uisetp: two uniform predicates
+      w.f("    const unsigned l = static_cast<unsigned>(__builtin_ctz(ex));\n    const u32 ua = %s, ub = %s;\n    const bool acc = (%s >> l) & 1u;\n", usrc(o.s[0]).c_str(),
+          usrc(o.s[1]).c_str(), pm(w, o.p, pa, sizeof pa));
+      w.f("    const bool r = icmp1(%uu, %s, ua, ub);\n", o.a, o.c ? "true" : "false");
+      if (o.dst != kNoDst && o.dst != 7) w.f("    c->up[%u] = bool_op1(%uu, r, acc)%s;\n", unsigned{o.dst}, o.b, mut(g_form_name) ? " == false" : "");
+      if (o.dst2 != kNoDst && o.dst2 != 7) w.f("    c->up[%u] = bool_op1(%uu, !r, acc);\n", unsigned{o.dst2}, o.b);
+      break;
+    }
     default: break;
   }
   (void)flt;

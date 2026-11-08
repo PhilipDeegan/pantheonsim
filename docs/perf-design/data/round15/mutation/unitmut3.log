@@ -1,0 +1,9 @@
+test_jit_resid ctl_budget: rc=124 failed_tests=0  HANG (killed after 600 s)
+test_jit_resid ctl_budget_dec: rc=124 failed_tests=0  HANG (killed after 600 s)
+test_jit_resid ctl_n0: rc=1 failed_tests=1 2/3 tests passed [ FAIL ] jit_graph_regions_equal_the_model_of_the_run_loop
+test_jit_resid ctl_n0check: rc=1 failed_tests=1 2/3 tests passed [ FAIL ] jit_graph_regions_equal_the_model_of_the_run_loop
+test_jit_resid ctl_stepscheck: rc=1 failed_tests=1 2/3 tests passed [ FAIL ] jit_graph_regions_equal_the_model_of_the_run_loop
+test_jit_resid ctl_ps: rc=1 failed_tests=1 2/3 tests passed [ FAIL ] jit_graph_regions_equal_the_model_of_the_run_loop
+test_jit_resid ctl_cont_nogate: rc=124 failed_tests=0  HANG (killed after 600 s)
+test_jit_resid ctl_gate: rc=1 failed_tests=1 2/3 tests passed [ FAIL ] jit_graph_regions_equal_the_model_of_the_run_loop
+=== done 09:42:16
