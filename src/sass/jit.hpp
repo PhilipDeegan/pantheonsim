@@ -179,8 +179,8 @@ struct Config {
   std::string cxx;                  // "": c++, g++, clang++ on PATH
   std::string path;                 // PATH to search; "": the process's
   std::string extra_flags;          // appended to the compile command (and part of the key)
-  bool residence = true;            // keep register-file rows in locals within a region (VGPU_JIT_RESIDENCE=0: not)
-  bool specialize = true;           // also generate the body for a whole warp (all 32 lanes) apart from the one for any group (VGPU_JIT_SPECIALIZE=0: only the general one: half the code, a faster compile)
+  bool residence = true;            // keep register-file rows in locals within a region (from_env: off, VGPU_JIT_RESIDENCE=1: on)
+  bool specialize = true;           // also generate the body for a whole warp (all 32 lanes) apart from the one for any group (from_env: off, VGPU_JIT_SPECIALIZE=1: on; off is only the general one: half the code, a faster compile)
   unsigned timeout_s = 120;         // wall limit of one compile
   unsigned mem_mb = 4096;           // RLIMIT_AS of the compiler
   // For tests: replaces dlopen (returns null and fills the error on a failure), and the ISA level the key and flags use.
