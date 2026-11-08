@@ -1524,6 +1524,13 @@ add_test(NAME test_sass_store_gate_tier0 COMMAND test_sass_store_gate)
 set_tests_properties(test_sass_store_gate_tier0 PROPERTIES ENVIRONMENT "VGPU_TIER=0")
 # The run loop going on past S2R, ULDC, UMOV, USEL, PLOP3 and SEL where the chain would have started the next call there: same words, counters and clocks as the interpreter.
 vgpu_unit_test(test_sass_chain_cont)
+# The same three tests with tier 2 (the JIT) forced on at once (every region compiled, synchronously; a private cache): what the generated code does where the run loop goes on past
+# a branch or a cont op, the store gate and the clocks must be what the tier does. (No compiler on PATH: the JIT stays off and they are the tier's own run again.)
+foreach(_t test_sass_chain_cont test_sass_store_gate test_sass_alu_runs)
+  add_test(NAME ${_t}_jit COMMAND ${_t})
+  set_tests_properties(${_t}_jit PROPERTIES ENVIRONMENT
+    "VGPU_JIT=1;VGPU_JIT_THRESHOLD=1;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-${_t}")
+endforeach()
 vgpu_unit_test(test_sass_s2r_fill)
 # LDGSTS (cp.async): the tier's own handler against the rule and the interpreter, registers, shared memory and counters.
 vgpu_unit_test(test_sass_ldgsts)
@@ -3901,11 +3908,11 @@ set_tests_properties(e2e_host_gpu_stub PROPERTIES
 
 # Tier 2 (src/sass/jit.hpp, VGPU_JIT=1) against the tier, on the same programs: results and every counter, with the JIT forced on at once, one
 # and four host threads, a warm cache, the faults of sass_tier_steps, and every way the JIT can fail (the output must not change).
-# Six shards (VGPU_JIT_SHARD, run_sass_jit.sh): sass_tier's variants, sass_tier_steps' faults and region caps, its two step-limit bisections
-# (gather, shared), the random kernels, and the failure modes. One process it took 1611 s in the unit job
+# Seven shards (VGPU_JIT_SHARD, run_sass_jit.sh): sass_tier's variants, jit_loops' (loops and branches in generated code), sass_tier_steps' faults and region caps, its two step-limit
+# bisections (gather, shared), the random kernels, and the failure modes. One process it took 1611 s in the unit job
 # (the steps stage alone 1089 s, most of it synchronous host-compiler runs); the shards are independent (each has its own cache
 # directories) and together are the stages of the whole run, once each (e2e_sass_jit_shards_partition proves it).
-vgpu_shard_tests(e2e_sass_jit ENV_VAR VGPU_JIT_SHARD LIST_ENV VGPU_JIT_LIST SPECS tier steps steps_gather steps_shared random modes
+vgpu_shard_tests(e2e_sass_jit ENV_VAR VGPU_JIT_SHARD LIST_ENV VGPU_JIT_LIST SPECS tier loops steps steps_gather steps_shared random modes
   COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_sass_jit.sh
   ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
   PROPERTIES DEPENDS vgpucudart SKIP_REGULAR_EXPRESSION "^SKIP:" TIMEOUT 3600)

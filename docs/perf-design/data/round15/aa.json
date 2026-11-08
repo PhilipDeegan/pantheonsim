@@ -1,0 +1,1122 @@
+{
+ "hecbench/shmembench-cuda": {
+  "warm": {
+   "first": [
+    {
+     "wall": 5.079137266962789,
+     "rc": 0,
+     "timeout": false,
+     "hash": "2fa78b9ee9b1",
+     "load": 1.94775390625
+    },
+    {
+     "wall": 4.801994604058564,
+     "rc": 0,
+     "timeout": false,
+     "hash": "2fa78b9ee9b1",
+     "load": 2.0322265625
+    }
+   ],
+   "samples": [
+    [
+     {
+      "wall": 4.716136493952945,
+      "rc": 0,
+      "timeout": false,
+      "hash": "2fa78b9ee9b1",
+      "load": 1.94921875
+     },
+     {
+      "wall": 4.714985699043609,
+      "rc": 0,
+      "timeout": false,
+      "hash": "2fa78b9ee9b1",
+      "load": 1.8125
+     },
+     {
+      "wall": 4.744927300023846,
+      "rc": 0,
+      "timeout": false,
+      "hash": "2fa78b9ee9b1",
+      "load": 1.7470703125
+     },
+     {
+      "wall": 4.743503871955909,
+      "rc": 0,
+      "timeout": false,
+      "hash": "2fa78b9ee9b1",
+      "load": 1.5810546875
+     },
+     {
+      "wall": 4.727706192992628,
+      "rc": 0,
+      "timeout": false,
+      "hash": "2fa78b9ee9b1",
+      "load": 1.5341796875
+     }
+    ],
+    [
+     {
+      "wall": 4.679314744891599,
+      "rc": 0,
+      "timeout": false,
+      "hash": "2fa78b9ee9b1",
+      "load": 1.873046875
+     },
+     {
+      "wall": 4.723450472927652,
+      "rc": 0,
+      "timeout": false,
+      "hash": "2fa78b9ee9b1",
+      "load": 1.88330078125
+     },
+     {
+      "wall": 4.841937521006912,
+      "rc": 0,
+      "timeout": false,
+      "hash": "2fa78b9ee9b1",
+      "load": 1.68701171875
+     },
+     {
+      "wall": 4.732616308960132,
+      "rc": 0,
+      "timeout": false,
+      "hash": "2fa78b9ee9b1",
+      "load": 1.6318359375
+     },
+     {
+      "wall": 4.682232188992202,
+      "rc": 0,
+      "timeout": false,
+      "hash": "2fa78b9ee9b1",
+      "load": 1.4912109375
+     }
+    ]
+   ],
+   "med": [
+    4.727706192992628,
+    4.723450472927652
+   ],
+   "spread": [
+    0.00633321948487754,
+    0.03442880941535893
+   ],
+   "hashes": [
+    [
+     "2fa78b9ee9b1"
+    ],
+    [
+     "2fa78b9ee9b1"
+    ]
+   ]
+  }
+ },
+ "rodinia/gaussian": {
+  "warm": {
+   "first": [
+    {
+     "wall": 3.798423195956275,
+     "rc": 0,
+     "timeout": false,
+     "hash": "48bd2c5aca76",
+     "load": 1.45556640625
+    },
+    {
+     "wall": 3.6455037629930303,
+     "rc": 0,
+     "timeout": false,
+     "hash": "48bd2c5aca76",
+     "load": 1.4189453125
+    }
+   ],
+   "samples": [
+    [
+     {
+      "wall": 3.6422509169206023,
+      "rc": 0,
+      "timeout": false,
+      "hash": "48bd2c5aca76",
+      "load": 1.4189453125
+     },
+     {
+      "wall": 3.680059868027456,
+      "rc": 0,
+      "timeout": false,
+      "hash": "48bd2c5aca76",
+      "load": 1.3251953125
+     },
+     {
+      "wall": 3.7735874800710008,
+      "rc": 0,
+      "timeout": false,
+      "hash": "48bd2c5aca76",
+      "load": 1.3251953125
+     },
+     {
+      "wall": 3.668119059992023,
+      "rc": 0,
+      "timeout": false,
+      "hash": "48bd2c5aca76",
+      "load": 1.33251953125
+     },
+     {
+      "wall": 3.640485613956116,
+      "rc": 0,
+      "timeout": false,
+      "hash": "48bd2c5aca76",
+      "load": 1.33251953125
+     }
+    ],
+    [
+     {
+      "wall": 3.7043285550316796,
+      "rc": 0,
+      "timeout": false,
+      "hash": "48bd2c5aca76",
+      "load": 1.38525390625
+     },
+     {
+      "wall": 3.6607262559700757,
+      "rc": 0,
+      "timeout": false,
+      "hash": "48bd2c5aca76",
+      "load": 1.35400390625
+     },
+     {
+      "wall": 3.659176596906036,
+      "rc": 0,
+      "timeout": false,
+      "hash": "48bd2c5aca76",
+      "load": 1.298828125
+     },
+     {
+      "wall": 3.6722314109792933,
+      "rc": 0,
+      "timeout": false,
+      "hash": "48bd2c5aca76",
+      "load": 1.2744140625
+     },
+     {
+      "wall": 3.716103003011085,
+      "rc": 0,
+      "timeout": false,
+      "hash": "48bd2c5aca76",
+      "load": 1.38623046875
+     }
+    ]
+   ],
+   "med": [
+    3.668119059992023,
+    3.6722314109792933
+   ],
+   "spread": [
+    0.036286135738236934,
+    0.015501856973078963
+   ],
+   "hashes": [
+    [
+     "48bd2c5aca76"
+    ],
+    [
+     "48bd2c5aca76"
+    ]
+   ]
+  }
+ },
+ "hecbench/atomicAggregate-cuda": {
+  "warm": {
+   "first": [
+    {
+     "wall": 4.870414001052268,
+     "rc": 0,
+     "timeout": false,
+     "hash": "b8d757fe82db",
+     "load": 1.56689453125
+    },
+    {
+     "wall": 4.710466763004661,
+     "rc": 0,
+     "timeout": false,
+     "hash": "b8d757fe82db",
+     "load": 1.60205078125
+    }
+   ],
+   "samples": [
+    [
+     {
+      "wall": 4.733355444041081,
+      "rc": 0,
+      "timeout": false,
+      "hash": "b8d757fe82db",
+      "load": 1.5537109375
+     },
+     {
+      "wall": 4.747186897089705,
+      "rc": 0,
+      "timeout": false,
+      "hash": "b8d757fe82db",
+      "load": 1.57275390625
+     },
+     {
+      "wall": 4.725712131941691,
+      "rc": 0,
+      "timeout": false,
+      "hash": "b8d757fe82db",
+      "load": 1.52685546875
+     },
+     {
+      "wall": 4.764958831015974,
+      "rc": 0,
+      "timeout": false,
+      "hash": "b8d757fe82db",
+      "load": 1.72412109375
+     },
+     {
+      "wall": 4.720414625946432,
+      "rc": 0,
+      "timeout": false,
+      "hash": "b8d757fe82db",
+      "load": 1.74658203125
+     }
+    ],
+    [
+     {
+      "wall": 4.711917496053502,
+      "rc": 0,
+      "timeout": false,
+      "hash": "b8d757fe82db",
+      "load": 1.58984375
+     },
+     {
+      "wall": 4.727537318016402,
+      "rc": 0,
+      "timeout": false,
+      "hash": "b8d757fe82db",
+      "load": 1.623046875
+     },
+     {
+      "wall": 4.7789771649986506,
+      "rc": 0,
+      "timeout": false,
+      "hash": "b8d757fe82db",
+      "load": 1.484375
+     },
+     {
+      "wall": 4.7318941639969125,
+      "rc": 0,
+      "timeout": false,
+      "hash": "b8d757fe82db",
+      "load": 1.52587890625
+     },
+     {
+      "wall": 4.711327256984077,
+      "rc": 0,
+      "timeout": false,
+      "hash": "b8d757fe82db",
+      "load": 1.6865234375
+     }
+    ]
+   ],
+   "med": [
+    4.733355444041081,
+    4.727537318016402
+   ],
+   "spread": [
+    0.009410703589906724,
+    0.014309756531537642
+   ],
+   "hashes": [
+    [
+     "b8d757fe82db"
+    ],
+    [
+     "b8d757fe82db"
+    ]
+   ]
+  }
+ },
+ "samples/reduction": {
+  "warm": {
+   "first": [
+    {
+     "wall": 9.58467407990247,
+     "rc": 0,
+     "timeout": false,
+     "hash": "c02d7cf33582",
+     "load": 1.9345703125
+    },
+    {
+     "wall": 9.464622152037919,
+     "rc": 0,
+     "timeout": false,
+     "hash": "c02d7cf33582",
+     "load": 1.79052734375
+    }
+   ],
+   "samples": [
+    [
+     {
+      "wall": 9.523867427953519,
+      "rc": 0,
+      "timeout": false,
+      "hash": "c02d7cf33582",
+      "load": 1.8291015625
+     },
+     {
+      "wall": 9.59398773801513,
+      "rc": 0,
+      "timeout": false,
+      "hash": "c02d7cf33582",
+      "load": 1.61376953125
+     },
+     {
+      "wall": 9.623519827029668,
+      "rc": 0,
+      "timeout": false,
+      "hash": "c02d7cf33582",
+      "load": 1.51904296875
+     },
+     {
+      "wall": 9.505554319941439,
+      "rc": 0,
+      "timeout": false,
+      "hash": "c02d7cf33582",
+      "load": 1.4970703125
+     },
+     {
+      "wall": 9.823097437038086,
+      "rc": 0,
+      "timeout": false,
+      "hash": "c02d7cf33582",
+      "load": 1.5810546875
+     }
+    ],
+    [
+     {
+      "wall": 9.595272848964669,
+      "rc": 0,
+      "timeout": false,
+      "hash": "c02d7cf33582",
+      "load": 1.701171875
+     },
+     {
+      "wall": 9.540647504036315,
+      "rc": 0,
+      "timeout": false,
+      "hash": "c02d7cf33582",
+      "load": 1.7255859375
+     },
+     {
+      "wall": 9.494731657905504,
+      "rc": 0,
+      "timeout": false,
+      "hash": "c02d7cf33582",
+      "load": 1.5126953125
+     },
+     {
+      "wall": 9.481085242936388,
+      "rc": 0,
+      "timeout": false,
+      "hash": "c02d7cf33582",
+      "load": 1.587890625
+     },
+     {
+      "wall": 9.494242346961983,
+      "rc": 0,
+      "timeout": false,
+      "hash": "c02d7cf33582",
+      "load": 1.4912109375
+     }
+    ]
+   ],
+   "med": [
+    9.59398773801513,
+    9.494731657905504
+   ],
+   "spread": [
+    0.033098136642224135,
+    0.012026417400981128
+   ],
+   "hashes": [
+    [
+     "c02d7cf33582"
+    ],
+    [
+     "c02d7cf33582"
+    ]
+   ]
+  }
+ },
+ "samples/transpose": {
+  "warm": {
+   "first": [
+    {
+     "wall": 7.9827815040480345,
+     "rc": 0,
+     "timeout": false,
+     "hash": "f38ba51305e7",
+     "load": 1.4072265625
+    },
+    {
+     "wall": 8.354837954044342,
+     "rc": 0,
+     "timeout": false,
+     "hash": "f38ba51305e7",
+     "load": 1.41845703125
+    }
+   ],
+   "samples": [
+    [
+     {
+      "wall": 7.918556721066125,
+      "rc": 0,
+      "timeout": false,
+      "hash": "f38ba51305e7",
+      "load": 1.353515625
+     },
+     {
+      "wall": 8.256249196012504,
+      "rc": 0,
+      "timeout": false,
+      "hash": "f38ba51305e7",
+      "load": 1.251953125
+     },
+     {
+      "wall": 8.051691681030206,
+      "rc": 0,
+      "timeout": false,
+      "hash": "f38ba51305e7",
+      "load": 1.29345703125
+     },
+     {
+      "wall": 7.992580124060623,
+      "rc": 0,
+      "timeout": false,
+      "hash": "f38ba51305e7",
+      "load": 1.19189453125
+     },
+     {
+      "wall": 8.023283701972105,
+      "rc": 0,
+      "timeout": false,
+      "hash": "f38ba51305e7",
+      "load": 1.17626953125
+     }
+    ],
+    [
+     {
+      "wall": 8.074809640995227,
+      "rc": 0,
+      "timeout": false,
+      "hash": "f38ba51305e7",
+      "load": 1.3251953125
+     },
+     {
+      "wall": 7.925794019945897,
+      "rc": 0,
+      "timeout": false,
+      "hash": "f38ba51305e7",
+      "load": 1.2744140625
+     },
+     {
+      "wall": 7.973235760931857,
+      "rc": 0,
+      "timeout": false,
+      "hash": "f38ba51305e7",
+      "load": 1.24755859375
+     },
+     {
+      "wall": 8.209491251967847,
+      "rc": 0,
+      "timeout": false,
+      "hash": "f38ba51305e7",
+      "load": 1.2275390625
+     },
+     {
+      "wall": 8.04035289294552,
+      "rc": 0,
+      "timeout": false,
+      "hash": "f38ba51305e7",
+      "load": 1.14892578125
+     }
+    ]
+   ],
+   "med": [
+    8.023283701972105,
+    8.04035289294552
+   ],
+   "spread": [
+    0.042089060725021554,
+    0.0352841766772279
+   ],
+   "hashes": [
+    [
+     "f38ba51305e7"
+    ],
+    [
+     "f38ba51305e7"
+    ]
+   ]
+  }
+ },
+ "samples/histogram": {
+  "warm": {
+   "first": [
+    {
+     "wall": 13.687126095988788,
+     "rc": 0,
+     "timeout": false,
+     "hash": "086d44759ca7",
+     "load": 1.2177734375
+    },
+    {
+     "wall": 13.73964548308868,
+     "rc": 0,
+     "timeout": false,
+     "hash": "086d44759ca7",
+     "load": 1.1689453125
+    }
+   ],
+   "samples": [
+    [
+     {
+      "wall": 13.723190239048563,
+      "rc": 0,
+      "timeout": false,
+      "hash": "086d44759ca7",
+      "load": 1.22314453125
+     },
+     {
+      "wall": 13.7020116050262,
+      "rc": 0,
+      "timeout": false,
+      "hash": "086d44759ca7",
+      "load": 1.24755859375
+     },
+     {
+      "wall": 13.622398023027927,
+      "rc": 0,
+      "timeout": false,
+      "hash": "086d44759ca7",
+      "load": 1.208984375
+     },
+     {
+      "wall": 13.626752877025865,
+      "rc": 0,
+      "timeout": false,
+      "hash": "086d44759ca7",
+      "load": 1.400390625
+     },
+     {
+      "wall": 13.673656719969586,
+      "rc": 0,
+      "timeout": false,
+      "hash": "086d44759ca7",
+      "load": 1.41259765625
+     }
+    ],
+    [
+     {
+      "wall": 13.988803351065144,
+      "rc": 0,
+      "timeout": false,
+      "hash": "086d44759ca7",
+      "load": 1.3154296875
+     },
+     {
+      "wall": 13.630211454001255,
+      "rc": 0,
+      "timeout": false,
+      "hash": "086d44759ca7",
+      "load": 1.3193359375
+     },
+     {
+      "wall": 13.579394041909836,
+      "rc": 0,
+      "timeout": false,
+      "hash": "086d44759ca7",
+      "load": 1.162109375
+     },
+     {
+      "wall": 13.719919033930637,
+      "rc": 0,
+      "timeout": false,
+      "hash": "086d44759ca7",
+      "load": 1.2060546875
+     },
+     {
+      "wall": 13.627942320075817,
+      "rc": 0,
+      "timeout": false,
+      "hash": "086d44759ca7",
+      "load": 1.3203125
+     }
+    ]
+   ],
+   "med": [
+    13.673656719969586,
+    13.630211454001255
+   ],
+   "spread": [
+    0.007371270032941156,
+    0.030036900787413858
+   ],
+   "hashes": [
+    [
+     "086d44759ca7"
+    ],
+    [
+     "086d44759ca7"
+    ]
+   ]
+  }
+ },
+ "samples/simpleHyperQ": {
+  "warm": {
+   "first": [
+    {
+     "wall": 11.971563791041262,
+     "rc": 0,
+     "timeout": false,
+     "hash": "9a25aab570e1",
+     "load": 1.423828125
+    },
+    {
+     "wall": 11.9276600680314,
+     "rc": 0,
+     "timeout": false,
+     "hash": "9a25aab570e1",
+     "load": 1.32958984375
+    }
+   ],
+   "samples": [
+    [
+     {
+      "wall": 11.893206503009424,
+      "rc": 0,
+      "timeout": false,
+      "hash": "9a25aab570e1",
+      "load": 1.2783203125
+     },
+     {
+      "wall": 12.000360482023098,
+      "rc": 0,
+      "timeout": false,
+      "hash": "9a25aab570e1",
+      "load": 1.216796875
+     },
+     {
+      "wall": 11.905734108993784,
+      "rc": 0,
+      "timeout": false,
+      "hash": "9a25aab570e1",
+      "load": 1.32861328125
+     },
+     {
+      "wall": 11.908243744052015,
+      "rc": 0,
+      "timeout": false,
+      "hash": "9a25aab570e1",
+      "load": 1.23095703125
+     },
+     {
+      "wall": 12.188570569036528,
+      "rc": 0,
+      "timeout": false,
+      "hash": "9a25aab570e1",
+      "load": 1.1953125
+     }
+    ],
+    [
+     {
+      "wall": 12.072669669985771,
+      "rc": 0,
+      "timeout": false,
+      "hash": "9a25aab570e1",
+      "load": 1.2353515625
+     },
+     {
+      "wall": 11.889737981953658,
+      "rc": 0,
+      "timeout": false,
+      "hash": "9a25aab570e1",
+      "load": 1.2568359375
+     },
+     {
+      "wall": 11.871528679970652,
+      "rc": 0,
+      "timeout": false,
+      "hash": "9a25aab570e1",
+      "load": 1.35205078125
+     },
+     {
+      "wall": 12.121425773017108,
+      "rc": 0,
+      "timeout": false,
+      "hash": "9a25aab570e1",
+      "load": 1.29736328125
+     },
+     {
+      "wall": 11.950019996031187,
+      "rc": 0,
+      "timeout": false,
+      "hash": "9a25aab570e1",
+      "load": 1.1513671875
+     }
+    ]
+   ],
+   "med": [
+    11.908243744052015,
+    11.950019996031187
+   ],
+   "spread": [
+    0.02480332720554487,
+    0.02091185563952628
+   ],
+   "hashes": [
+    [
+     "9a25aab570e1"
+    ],
+    [
+     "9a25aab570e1"
+    ]
+   ]
+  }
+ },
+ "samples/jacobiCudaGraphs": {
+  "warm": {
+   "first": [
+    {
+     "wall": 18.906989434966817,
+     "rc": 0,
+     "timeout": false,
+     "hash": "1d5f88eb23a9",
+     "load": 1.17578125
+    },
+    {
+     "wall": 18.90025163802784,
+     "rc": 0,
+     "timeout": false,
+     "hash": "1d5f88eb23a9",
+     "load": 1.34033203125
+    }
+   ],
+   "samples": [
+    [
+     {
+      "wall": 18.959637110005133,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1d5f88eb23a9",
+      "load": 1.607421875
+     },
+     {
+      "wall": 18.93683418398723,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1d5f88eb23a9",
+      "load": 1.51416015625
+     },
+     {
+      "wall": 18.843952785944566,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1d5f88eb23a9",
+      "load": 1.56005859375
+     },
+     {
+      "wall": 18.87911368603818,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1d5f88eb23a9",
+      "load": 1.5419921875
+     },
+     {
+      "wall": 18.967300407006405,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1d5f88eb23a9",
+      "load": 1.64990234375
+     }
+    ],
+    [
+     {
+      "wall": 18.927757686004043,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1d5f88eb23a9",
+      "load": 1.5703125
+     },
+     {
+      "wall": 19.12850949796848,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1d5f88eb23a9",
+      "load": 1.4072265625
+     },
+     {
+      "wall": 18.93621847394388,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1d5f88eb23a9",
+      "load": 1.53125
+     },
+     {
+      "wall": 18.99394311697688,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1d5f88eb23a9",
+      "load": 1.5341796875
+     },
+     {
+      "wall": 18.798351987963542,
+      "rc": 0,
+      "timeout": false,
+      "hash": "1d5f88eb23a9",
+      "load": 1.46435546875
+     }
+    ]
+   ],
+   "med": [
+    18.93683418398723,
+    18.93621847394388
+   ],
+   "spread": [
+    0.006513634742925536,
+    0.01743523980034516
+   ],
+   "hashes": [
+    [
+     "1d5f88eb23a9"
+    ],
+    [
+     "1d5f88eb23a9"
+    ]
+   ]
+  }
+ },
+ "samples/interval": {
+  "warm": {
+   "first": [
+    {
+     "wall": 16.321080017951317,
+     "rc": 0,
+     "timeout": false,
+     "hash": "3ef38141a25b",
+     "load": 1.76513671875
+    },
+    {
+     "wall": 15.901177812018432,
+     "rc": 0,
+     "timeout": false,
+     "hash": "3ef38141a25b",
+     "load": 1.5947265625
+    }
+   ],
+   "samples": [
+    [
+     {
+      "wall": 15.75115469598677,
+      "rc": 0,
+      "timeout": false,
+      "hash": "3ef38141a25b",
+      "load": 1.46240234375
+     },
+     {
+      "wall": 15.823782662046142,
+      "rc": 0,
+      "timeout": false,
+      "hash": "3ef38141a25b",
+      "load": 1.35302734375
+     },
+     {
+      "wall": 15.698173908982426,
+      "rc": 0,
+      "timeout": false,
+      "hash": "3ef38141a25b",
+      "load": 1.41015625
+     },
+     {
+      "wall": 16.144588997005485,
+      "rc": 0,
+      "timeout": false,
+      "hash": "3ef38141a25b",
+      "load": 1.24951171875
+     },
+     {
+      "wall": 15.749333941959776,
+      "rc": 0,
+      "timeout": false,
+      "hash": "3ef38141a25b",
+      "load": 1.3203125
+     }
+    ],
+    [
+     {
+      "wall": 16.232302199001424,
+      "rc": 0,
+      "timeout": false,
+      "hash": "3ef38141a25b",
+      "load": 1.501953125
+     },
+     {
+      "wall": 15.88225670508109,
+      "rc": 0,
+      "timeout": false,
+      "hash": "3ef38141a25b",
+      "load": 1.35888671875
+     },
+     {
+      "wall": 15.864743734011427,
+      "rc": 0,
+      "timeout": false,
+      "hash": "3ef38141a25b",
+      "load": 1.31884765625
+     },
+     {
+      "wall": 15.852723836083896,
+      "rc": 0,
+      "timeout": false,
+      "hash": "3ef38141a25b",
+      "load": 1.3212890625
+     },
+     {
+      "wall": 15.921899741981179,
+      "rc": 0,
+      "timeout": false,
+      "hash": "3ef38141a25b",
+      "load": 1.3291015625
+     }
+    ]
+   ],
+   "med": [
+    15.75115469598677,
+    15.88225670508109
+   ],
+   "spread": [
+    0.02834173726557336,
+    0.023899523220531495
+   ],
+   "hashes": [
+    [
+     "3ef38141a25b"
+    ],
+    [
+     "3ef38141a25b"
+    ]
+   ]
+  }
+ },
+ "samples/cudaTensorCoreGemm": {
+  "warm": {
+   "first": [
+    {
+     "wall": 13.385256191017106,
+     "rc": 0,
+     "timeout": false,
+     "hash": "d8476edd791f",
+     "load": 1.255859375
+    },
+    {
+     "wall": 13.526077387970872,
+     "rc": 0,
+     "timeout": false,
+     "hash": "d8476edd791f",
+     "load": 1.21630859375
+    }
+   ],
+   "samples": [
+    [
+     {
+      "wall": 13.439124242053367,
+      "rc": 0,
+      "timeout": false,
+      "hash": "d8476edd791f",
+      "load": 1.16796875
+     },
+     {
+      "wall": 13.622985571972094,
+      "rc": 0,
+      "timeout": false,
+      "hash": "d8476edd791f",
+      "load": 1.21826171875
+     },
+     {
+      "wall": 13.441476673004217,
+      "rc": 0,
+      "timeout": false,
+      "hash": "d8476edd791f",
+      "load": 1.3173828125
+     },
+     {
+      "wall": 13.74119694205001,
+      "rc": 0,
+      "timeout": false,
+      "hash": "d8476edd791f",
+      "load": 1.3330078125
+     },
+     {
+      "wall": 13.738314706017263,
+      "rc": 0,
+      "timeout": false,
+      "hash": "d8476edd791f",
+      "load": 1.3388671875
+     }
+    ],
+    [
+     {
+      "wall": 14.350787603994831,
+      "rc": 0,
+      "timeout": false,
+      "hash": "d8476edd791f",
+      "load": 1.21044921875
+     },
+     {
+      "wall": 13.449308798997663,
+      "rc": 0,
+      "timeout": false,
+      "hash": "d8476edd791f",
+      "load": 1.1630859375
+     },
+     {
+      "wall": 13.456270894035697,
+      "rc": 0,
+      "timeout": false,
+      "hash": "d8476edd791f",
+      "load": 1.39453125
+     },
+     {
+      "wall": 13.537523854989558,
+      "rc": 0,
+      "timeout": false,
+      "hash": "d8476edd791f",
+      "load": 1.306640625
+     },
+     {
+      "wall": 13.478575373999774,
+      "rc": 0,
+      "timeout": false,
+      "hash": "d8476edd791f",
+      "load": 1.423828125
+     }
+    ]
+   ],
+   "med": [
+    13.622985571972094,
+    13.478575373999774
+   ],
+   "spread": [
+    0.022173751737513882,
+    0.0668823506923532
+   ],
+   "hashes": [
+    [
+     "d8476edd791f"
+    ],
+    [
+     "d8476edd791f"
+    ]
+   ]
+  }
+ }
+}

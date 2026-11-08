@@ -1,0 +1,6 @@
+hecbench/fpdc-cuda                 thr=1 v4:tier                    tier  same
+hecbench/fpdc-cuda                 thr=1 v4:jit                     cold  same
+hecbench/fpdc-cuda                 thr=1 v4:jit                     warm  same
+hecbench/fpdc-cuda                 thr=4 v4:tier                    tier  same
+hecbench/fpdc-cuda                 thr=4 v4:jit                     cold  same
+hecbench/fpdc-cuda                 thr=4 v4:jit                     warm  same

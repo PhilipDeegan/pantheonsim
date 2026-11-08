@@ -1,0 +1,12 @@
+jit_loops.sm_86 cs2r: SURVIVED (output identical to the tier)
+jit_loops.sm_86 none: SURVIVED (output identical to the tier)
+jit_loops.sm_86 s2r: caught (117 lines differ)
+jit_loops.sm_86 uldc: SURVIVED (output identical to the tier)
+jit_loops.sm_86 uiadd3: caught (5 lines differ)
+jit_loops.sm_86 ulop3: SURVIVED (output identical to the tier)
+jit_loops.sm_86 usel: SURVIVED (output identical to the tier)
+jit_loops.sm_86 uisetp: SURVIVED (output identical to the tier)
+jit_loops.sm_86 umov: caught (5 lines differ)
+jit_loops.sm_86 sel: caught (4 lines differ)
+jit_loops.sm_86 plop3: caught (1 lines differ)
+=== done 11:19:27

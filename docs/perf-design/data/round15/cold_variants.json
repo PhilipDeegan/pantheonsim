@@ -1,0 +1,432 @@
+{
+ "polybench/SYRK": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 9.491746221086942,
+     "rc": 0,
+     "timeout": false,
+     "hash": "975bb9f20d39",
+     "load": 1.9140625,
+     "jit": {
+      "compiles": 1,
+      "compile_ms": 4629.6,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 98239,
+      "region_insts": 194178695,
+      "generated": 91276043,
+      "units": 1,
+      "regions": 4,
+      "declined": 0,
+      "accepted": 1
+     }
+    },
+    {
+     "wall": 8.631420679972507,
+     "rc": 0,
+     "timeout": false,
+     "hash": "975bb9f20d39",
+     "load": 1.7734375,
+     "jit": {
+      "compiles": 1,
+      "compile_ms": 3828.7,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 98239,
+      "region_insts": 194178695,
+      "generated": 91276043,
+      "units": 1,
+      "regions": 4,
+      "declined": 0,
+      "accepted": 1
+     }
+    },
+    {
+     "wall": 8.340811250032857,
+     "rc": 0,
+     "timeout": false,
+     "hash": "975bb9f20d39",
+     "load": 1.71142578125,
+     "jit": {
+      "compiles": 1,
+      "compile_ms": 3104.6,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 98239,
+      "region_insts": 194178695,
+      "generated": 91276043,
+      "units": 1,
+      "regions": 4,
+      "declined": 0,
+      "accepted": 1
+     }
+    },
+    {
+     "wall": 7.648060859995894,
+     "rc": 0,
+     "timeout": false,
+     "hash": "975bb9f20d39",
+     "load": 1.67578125,
+     "jit": {
+      "compiles": 1,
+      "compile_ms": 2396.8,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 98239,
+      "region_insts": 194178695,
+      "generated": 91276043,
+      "units": 1,
+      "regions": 4,
+      "declined": 0,
+      "accepted": 1
+     }
+    }
+   ]
+  }
+ },
+ "polybench/LU": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 28.39005415106658,
+     "rc": 0,
+     "timeout": false,
+     "hash": "975bb9f20d39",
+     "load": 1.76611328125,
+     "jit": {
+      "compiles": 2,
+      "compile_ms": 2804.0,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 136622223,
+      "region_insts": 1594076261,
+      "generated": 1456381153,
+      "units": 2,
+      "regions": 8,
+      "declined": 0,
+      "accepted": 2
+     }
+    },
+    {
+     "wall": 26.912291524000466,
+     "rc": 0,
+     "timeout": false,
+     "hash": "975bb9f20d39",
+     "load": 1.7548828125,
+     "jit": {
+      "compiles": 2,
+      "compile_ms": 2285.4,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 136622223,
+      "region_insts": 1594076261,
+      "generated": 1456381153,
+      "units": 2,
+      "regions": 8,
+      "declined": 0,
+      "accepted": 2
+     }
+    },
+    {
+     "wall": 30.030553917982616,
+     "rc": 0,
+     "timeout": false,
+     "hash": "975bb9f20d39",
+     "load": 1.88623046875,
+     "jit": {
+      "compiles": 2,
+      "compile_ms": 2384.0,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 136622223,
+      "region_insts": 1594076261,
+      "generated": 1456381153,
+      "units": 2,
+      "regions": 8,
+      "declined": 0,
+      "accepted": 2
+     }
+    },
+    {
+     "wall": 27.076483909972012,
+     "rc": 0,
+     "timeout": false,
+     "hash": "975bb9f20d39",
+     "load": 2.0283203125,
+     "jit": {
+      "compiles": 2,
+      "compile_ms": 2075.5,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 136622223,
+      "region_insts": 1594076261,
+      "generated": 1456381153,
+      "units": 2,
+      "regions": 8,
+      "declined": 0,
+      "accepted": 2
+     }
+    }
+   ]
+  }
+ },
+ "samples/reduction": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 9.45136606192682,
+     "rc": 0,
+     "timeout": false,
+     "hash": "c02d7cf33582",
+     "load": 2.32373046875,
+     "jit": {
+      "compiles": 2,
+      "compile_ms": 1717.1,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 149183,
+      "region_insts": 346525889,
+      "generated": 266592460,
+      "units": 3,
+      "regions": 9,
+      "declined": 0,
+      "accepted": 2
+     }
+    },
+    {
+     "wall": 9.206873178016394,
+     "rc": 0,
+     "timeout": false,
+     "hash": "c02d7cf33582",
+     "load": 2.21728515625,
+     "jit": {
+      "compiles": 2,
+      "compile_ms": 1559.5,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 149183,
+      "region_insts": 346525889,
+      "generated": 266592460,
+      "units": 3,
+      "regions": 9,
+      "declined": 0,
+      "accepted": 2
+     }
+    },
+    {
+     "wall": 9.448466332978569,
+     "rc": 0,
+     "timeout": false,
+     "hash": "c02d7cf33582",
+     "load": 2.26416015625,
+     "jit": {
+      "compiles": 2,
+      "compile_ms": 1607.5,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 149183,
+      "region_insts": 346525889,
+      "generated": 266592460,
+      "units": 3,
+      "regions": 9,
+      "declined": 0,
+      "accepted": 2
+     }
+    },
+    {
+     "wall": 9.02028303698171,
+     "rc": 0,
+     "timeout": false,
+     "hash": "c02d7cf33582",
+     "load": 2.22998046875,
+     "jit": {
+      "compiles": 2,
+      "compile_ms": 1314.9,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 149183,
+      "region_insts": 346525889,
+      "generated": 266592460,
+      "units": 3,
+      "regions": 9,
+      "declined": 0,
+      "accepted": 2
+     }
+    }
+   ]
+  }
+ },
+ "samples/transpose": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 15.13197582506109,
+     "rc": 0,
+     "timeout": false,
+     "hash": "f38ba51305e7",
+     "load": 2.26708984375,
+     "jit": {
+      "compiles": 8,
+      "compile_ms": 7867.6,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 13208967,
+      "region_insts": 341844975,
+      "generated": 292295813,
+      "units": 8,
+      "regions": 14,
+      "declined": 0,
+      "accepted": 8
+     }
+    },
+    {
+     "wall": 14.080740513047203,
+     "rc": 0,
+     "timeout": false,
+     "hash": "f38ba51305e7",
+     "load": 2.0537109375,
+     "jit": {
+      "compiles": 8,
+      "compile_ms": 7116.8,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 13208967,
+      "region_insts": 341844975,
+      "generated": 292295813,
+      "units": 8,
+      "regions": 14,
+      "declined": 0,
+      "accepted": 8
+     }
+    },
+    {
+     "wall": 14.28930915298406,
+     "rc": 0,
+     "timeout": false,
+     "hash": "f38ba51305e7",
+     "load": 1.974609375,
+     "jit": {
+      "compiles": 8,
+      "compile_ms": 6791.5,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 13208967,
+      "region_insts": 341844975,
+      "generated": 292295813,
+      "units": 8,
+      "regions": 14,
+      "declined": 0,
+      "accepted": 8
+     }
+    },
+    {
+     "wall": 13.270913520012982,
+     "rc": 0,
+     "timeout": false,
+     "hash": "f38ba51305e7",
+     "load": 1.90478515625,
+     "jit": {
+      "compiles": 8,
+      "compile_ms": 6152.2,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 13208967,
+      "region_insts": 341844975,
+      "generated": 292295813,
+      "units": 8,
+      "regions": 14,
+      "declined": 0,
+      "accepted": 8
+     }
+    }
+   ]
+  }
+ },
+ "samples/mergeSort": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 15.570527088013478,
+     "rc": 0,
+     "timeout": false,
+     "hash": "1c148cfe019c",
+     "load": 2.44287109375,
+     "jit": {
+      "compiles": 4,
+      "compile_ms": 7797.4,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 20391974,
+      "region_insts": 260176880,
+      "generated": 186905066,
+      "units": 4,
+      "regions": 26,
+      "declined": 0,
+      "accepted": 4
+     }
+    },
+    {
+     "wall": 14.537078337976709,
+     "rc": 0,
+     "timeout": false,
+     "hash": "1c148cfe019c",
+     "load": 2.42431640625,
+     "jit": {
+      "compiles": 4,
+      "compile_ms": 6984.9,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 20391974,
+      "region_insts": 260176880,
+      "generated": 186905066,
+      "units": 4,
+      "regions": 26,
+      "declined": 0,
+      "accepted": 4
+     }
+    },
+    {
+     "wall": 14.354555825935677,
+     "rc": 0,
+     "timeout": false,
+     "hash": "1c148cfe019c",
+     "load": 2.490234375,
+     "jit": {
+      "compiles": 4,
+      "compile_ms": 6376.9,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 20391974,
+      "region_insts": 260176880,
+      "generated": 186905066,
+      "units": 4,
+      "regions": 26,
+      "declined": 0,
+      "accepted": 4
+     }
+    },
+    {
+     "wall": 13.418988209916279,
+     "rc": 0,
+     "timeout": false,
+     "hash": "1c148cfe019c",
+     "load": 2.2607421875,
+     "jit": {
+      "compiles": 4,
+      "compile_ms": 5680.6,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 20391974,
+      "region_insts": 260176880,
+      "generated": 186905066,
+      "units": 4,
+      "regions": 26,
+      "declined": 0,
+      "accepted": 4
+     }
+    }
+   ]
+  }
+ }
+}

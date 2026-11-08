@@ -1,0 +1,19 @@
+Test project /tmp/sp33-jit/v3/build
+    Start  52: test_sass_alu_runs
+1/7 Test  #52: test_sass_alu_runs ...............   Passed    0.13 sec
+    Start  55: test_sass_store_gate
+2/7 Test  #55: test_sass_store_gate .............   Passed    0.00 sec
+    Start  57: test_sass_chain_cont
+3/7 Test  #57: test_sass_chain_cont .............   Passed    0.07 sec
+    Start  58: test_sass_chain_cont_jit
+4/7 Test  #58: test_sass_chain_cont_jit .........   Passed   13.70 sec
+    Start  59: test_sass_store_gate_jit
+5/7 Test  #59: test_sass_store_gate_jit .........   Passed   15.51 sec
+    Start  60: test_sass_alu_runs_jit
+6/7 Test  #60: test_sass_alu_runs_jit ...........   Passed  428.57 sec
+    Start 159: test_tier
+7/7 Test #159: test_tier ........................   Passed    0.03 sec
+
+100% tests passed, 0 tests failed out of 7
+
+Total Test time (real) = 458.03 sec

@@ -94,7 +94,11 @@ six jobs each compiled the same library. Two changes, neither of which removes a
 |---|---|---|
 | `test_amd_gcn_tier_same_bits` (679 s plain, about 3,400 s under ASan) | `test_amd_gcn_tier_same_bits_shard_0of8` ... `_7of8` | every eighth corpus shape with a handler (`VGPU_TIER_SHARD=k/n`); a shape keeps its seed and flavours, so the eight run exactly the runs of the whole |
 | `test_amd_gcn_tier_same_bits_simd_base` (688 s) | `..._simd_base_shard_0of8` ... `_7of8` | the same, with `VGPU_SIMD=base` |
-| `e2e_sass_jit` (1,611 s) | `e2e_sass_jit_shard_tier`, `_steps`, `_steps_gather`, `_steps_shared`, `_random`, `_modes` | `VGPU_JIT_SHARD`: sass_tier's variants, sass_tier_steps' faults and region caps, its two step-limit bisections, the random kernels, the failure modes; each shard builds only the programs it runs |
+| `e2e_sass_jit` (1,611 s before `loops`) | `e2e_sass_jit_shard_tier`, `_loops`, `_steps`, `_steps_gather`, `_steps_shared`, `_random`, `_modes` | `VGPU_JIT_SHARD`: sass_tier's variants, jit_loops' (loops and branches that run inside generated code: uniform and divergent exits, nested loops, a store in the body, a body past the region cap, the clock around a loop, barriers, guarded ops, uniform values; sass_tier's variants), sass_tier_steps' faults and region caps, its two step-limit bisections, the random kernels, the failure modes; each shard builds only the programs it runs |
+
+The JIT also has unit legs: `test_jit_resid` (random graph regions against a model of the run loop, with and without register residence, new forms included), and `test_sass_chain_cont_jit`, `test_sass_store_gate_jit` and `test_sass_alu_runs_jit`, which
+run those hand-written SASS tests with every region compiled at once (a private cache under the build directory; with no compiler on `PATH` the JIT stays off and they repeat the tier's run). `-DVGPU_JIT_MUTANTS=ON` builds the JIT's mutation switches
+(`VGPU_JIT_MUTANT=<name>`); which test catches which is in [perf-design/round15-jit.md](perf-design/round15-jit.md#mutation-checks--dvgpu_jit_mutantson-vgpu_jit_mutantname-logs-in-dataround15).
 
 Each family also has a `_shards_partition` test (`tests/lint/check_shard_partition.sh`). The test or script lists the items a run would
 take (`VGPU_TIER_LIST=1`: corpus and line of each shape; `VGPU_JIT_LIST=1`: stage names) without running anything, and the check
