@@ -1311,6 +1311,20 @@ bool caught(const std::string& m, bool mutate = true) {
     remove_dir(dir);
     return warm.log != truth.log || warm.stats.hits != 0;
   }
+  if (m == "dormant_keeps_history") {   // a cache that went quiet still hashes the host writes it is told about
+    memo::Config cfg = budget_config("", 1000000000ull);
+    cfg.dormant_after = 4;
+    cfg.dormant_fixed_share = 0.0;
+    cfg.mutant = mut;
+    Rig r(&cfg);
+    const uint64_t y = r.alloc(4096), x = r.alloc(4096);
+    r.write_words(x, {1, 2, 3, 4});
+    for (uint32_t i = 0; i < 8; ++i) r.launch("axpy", 1, 4, {arg_u64(y), arg_u64(x), arg_u32(i + 2)});
+    if (r.stats().dormant_launches == 0) return false;   // (the scenario did not make it quiet: not a catch)
+    const memo::Hash128 s0 = r.memo()->state();
+    r.write_words(x, {9, 9, 9, 9});
+    return r.memo()->state() != s0;   // moved: the write was hashed into a history nobody will read
+  }
   // The poisoning rows: with the rule off, a launch that must not be cached is, and the second run hits after it.
   struct Row {
     const char* mutant;
@@ -1500,6 +1514,32 @@ VTEST(the_hashing_of_host_writes_stops_at_its_credit) {
   VCHECK(s.events_skipped + 1 <= 700u);
 }
 
+VTEST(a_dormant_cache_keeps_no_history_and_the_answers_are_the_same) {
+  memo::Config cfg = budget_config("", 1000000000ull);
+  cfg.dormant_after = 4;            // quiet after 4 launches that did not hit, whatever they cost
+  cfg.dormant_fixed_share = 0.0;
+  const Program prog = [](Rig& r, std::vector<std::string>& log) {
+    const uint64_t y = r.alloc(4096), x = r.alloc(4096);
+    r.write_words(x, {1, 2, 3, 4});
+    for (uint32_t i = 0; i < 8; ++i) r.launch("axpy", 1, 4, {arg_u64(y), arg_u64(x), arg_u32(i + 2)});   // every launch changes y: no hit
+    log.push_back("before " + r.everything());
+    const memo::Hash128 s0 = r.memo() ? r.memo()->state() : memo::Hash128{};
+    r.write_words(x, {9, 9, 9, 9});    // a host write after the cache went quiet
+    const memo::Hash128 s1 = r.memo() ? r.memo()->state() : memo::Hash128{};
+    log.push_back(std::string("history ") + (s0 == s1 ? "kept still" : "moved"));
+    r.launch("axpy", 1, 4, {arg_u64(y), arg_u64(x), arg_u32(3)});
+    log.push_back("after " + r.everything());
+  };
+  const Outcome off = run_program(prog, nullptr);
+  const Outcome on = run_program(prog, &cfg);
+  VCHECK(on.stats.dormant_launches >= 1);
+  VCHECK(on.log.size() == off.log.size());
+  for (size_t i = 0; i < on.log.size() && i < off.log.size(); ++i) {
+    if (off.log[i].rfind("history", 0) == 0) VCHECK_EQ(on.log[i], std::string("history kept still"));   // (without a cache there is nothing to compare)
+    else VCHECK_EQ(on.log[i], off.log[i]);
+  }
+}
+
 VTEST(every_mutant_is_caught) {
   ::unsetenv("VGPU_THREADS");
   const char* mutants[] = {"drop_byte",        "key_no_grid",         "key_no_args",         "key_no_code",       "key_no_profile",
@@ -1507,7 +1547,7 @@ VTEST(every_mutant_is_caught) {
                            "no_copy_event",    "no_free_event",       "no_alloc_event",      "commutative_chain", "state_never_advances",
                            "no_cache_invalidation", "ptrs_never",     "skip_module_globals", "hit_zero_counters", "no_poison_vmm",
                            "no_poison_atomics", "no_poison_device_calls", "no_poison_smid",   "no_poison_textures", "no_poison_host_maps",
-                           "no_poison_taint",  "no_poison_concurrent", "no_poison_faults",  "event_budget_no_poison"};
+                           "no_poison_taint",  "no_poison_concurrent", "no_poison_faults",  "event_budget_no_poison", "dormant_keeps_history"};
   int missed = 0;
   for (const char* m : mutants) {
     const bool c = caught(m);
@@ -1530,7 +1570,7 @@ VTEST(the_unmutated_cache_passes_the_same_scenarios) {
                          "no_copy_event",    "no_free_event",       "no_alloc_event",      "commutative_chain", "state_never_advances",
                          "no_cache_invalidation", "ptrs_never",     "skip_module_globals", "hit_zero_counters", "no_poison_vmm",
                          "no_poison_atomics", "no_poison_device_calls", "no_poison_smid",   "no_poison_textures", "no_poison_host_maps",
-                         "no_poison_taint",  "no_poison_concurrent", "no_poison_faults",  "event_budget_no_poison"};
+                         "no_poison_taint",  "no_poison_concurrent", "no_poison_faults",  "event_budget_no_poison", "dormant_keeps_history"};
   int broken = 0;
   for (const char* m : names)
     if (caught(m, false)) {

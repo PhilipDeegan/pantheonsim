@@ -37,6 +37,8 @@ struct Config {
   bool force_record = false;          // VGPU_MEMO_BUDGET=inf: capture every miss whatever it costs (measurement, tests)
   int verify = 0;                     // VGPU_MEMO_VERIFY=1: run every hit for real and compare (abort on a difference); 2: count
   uint64_t credit_ns = 150000;        // recording is free until it has cost this much
+  uint64_t dormant_after = 256;       // a cache whose launches have not hit once in this many, and whose fixed cost is above the share below, goes quiet
+  double dormant_fixed_share = 0.05;  // (of the kernel time; both are for the tests, which make it happen at once)
   uint64_t event_credit_ns = 8000000;    // VGPU_MEMO_EVENT_CREDIT_MS: hashing the bytes of host writes is free until it has cost this much
                                          // (past it, it eats the pool above: a program's uploads before its first launch are not poison)
   std::string mutant;                 // VGPU_MEMO_TEST_MUTANT: a deliberately wrong rule, for the tests that must catch it

@@ -648,7 +648,7 @@ bool DeviceMemo::event_budget_allows(uint64_t len) {
 void DeviceMemo::on_write(uint64_t dst, const void* src, uint64_t len) {
   if (t_scope == kReplay) return;
   if (t_scope == kEngine) return;   // a kernel's store: the launch's diff has it
-  if (dormant_.load(std::memory_order_relaxed)) return;   // the cache is off for good: no history is kept
+  if (dormant_.load(std::memory_order_relaxed) && !mut("dormant_keeps_history")) return;   // the cache is off for good: no history is kept
   if (mut("no_write_event")) return;
   constexpr uint64_t kTimed = 1u << 16;   // (smaller writes are charged by estimate: a clock read costs a tenth of one)
   const uint64_t t0 = len >= kTimed ? now_ns() : 0;
@@ -1353,7 +1353,7 @@ void DeviceMemo::end(Ticket& t, const exec::LaunchStats& stats, uint64_t exec_ns
     }
     // Adaptive tiers: a device whose launches are too small for the fixed cost to pay goes quiet (the state is poisoned so
     // nothing later can match across the gap).
-    if (executed_ >= 256 && stats_.hits == 0 && static_cast<double>(stats_.fixed_ns) > 0.05 * static_cast<double>(stats_.exec_ns) &&
+    if (executed_ >= cfg_.dormant_after && stats_.hits == 0 && static_cast<double>(stats_.fixed_ns) > cfg_.dormant_fixed_share * static_cast<double>(stats_.exec_ns) &&
         !cfg_.force_record && !cfg_.verify) {
       dormant_.store(true, std::memory_order_relaxed);
       poison_locked("dormant-fixed-cost");

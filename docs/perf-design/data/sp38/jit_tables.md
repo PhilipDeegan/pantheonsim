@@ -1,4 +1,4 @@
-| program | runs | tier s (spread) | JIT, cheap form (default) s | JIT, full form s | A/A (tier/tier) | **tier / cheap** | tier / full | cheap / full | cold cheap s (compile ms) | cold full s (compile ms) | compile cheap / full |
+| program | runs | tier s (spread) | JIT, cheap form (default) s | JIT, full form s | A/A (tier/tier) | **tier / cheap** | tier / full | full / cheap (time; above 1: cheap is faster) | cold cheap s (compile ms) | cold full s (compile ms) | compile cheap / full |
 |---|---:|---|---|---|---:|---:|---:|---:|---|---|---:|
 | polybench/SYRK | 5 | 4.13 (0%) | 3.76 (1%) | 3.71 (7%) | 1.003 | **1.100** | 1.113 | 0.988 | 5.16 (1, 1451) | 6.18 (1, 2599) | 0.56 |
 | polybench/SYR2K | 5 | 7.80 (1%) | 7.09 (0%) | 6.97 (1%) | 1.003 | **1.099** | 1.118 | 0.983 | 7.88 (1, 952) | 8.20 (1, 1434) | 0.66 |
