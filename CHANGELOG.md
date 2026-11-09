@@ -7,6 +7,18 @@ release says what runs and what it produces, never how fast a real GPU would run
 
 ## Unreleased
 
+- PTX engine, `wmma`: a fragment holds its matrix elements where a card puts them, for every shape and type (f16, bf16, tf32, s8/u8,
+  s4/u4, b1, f64 operands; f16, f32, s32 and f64 accumulators). It used a layout of its own, so code that reads or writes
+  fragment elements one by one (`acc.x[i] *= (a.x[i] > 0)`, how tiny-cuda-nn masks a ReLU's gradient, and the epilogues of CUTLASS and
+  hand-written kernels) met the wrong element: tiny-cuda-nn's `FullyFusedMLP` double-backward test gave mean relative errors of 0.6
+  to 0.8 for three of its five rows on the default SASS engine too, because a module holding one SASS instruction the engine does not decode (the packed half
+  maximum, `HMNMX2`) runs on the PTX engine wholesale. The three code paths that held old layouts (f16 and bf16 `m16n16k16` with an f32 accumulator, tf32, and the generic
+  one) are one now, and the tile route takes tf32 and the f16/bf16 `m16n16k16` forms with f16 accumulators too. The layout is the
+  Turing-and-later one, measured on an RTX 3060 (a Volta card, which was not measured, may differ)
+  (pantheonsim #550, new test `e2e_wmma_fragment_layout`).
+- PTX engine: a `wmma.load` whose registers nothing reads is dead code and does nothing, as on a card where ptxas removes it. tiny-cuda-nn's
+  fused backward pass loads a fragment of its last layer from a null pointer and uses none of it, which stopped the program with an
+  invalid-pointer error at address 0 on the simulator only (pantheonsim #550, in `test_exec3`).
 - CUDA runtime and driver: a zero-byte `cudaMalloc`, `cudaMallocManaged`, `cudaMallocHost`, `cudaHostAlloc` or `cudaMallocAsync` succeeds
   and gives a NULL pointer, as on a GPU, where it gave a distinct non-NULL one (Gpufit tests its unused buffers against NULL); the
   driver's `cuMemHostAlloc`/`cuMemAllocHost` of 0 bytes do the same, and `cuMemAlloc(0)` is `CUDA_ERROR_INVALID_VALUE` with the
