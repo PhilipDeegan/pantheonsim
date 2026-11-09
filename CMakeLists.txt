@@ -3018,7 +3018,7 @@ if(TARGET vgpucublas)
                           "cutensornet_paths:cutensornet" "cutensornet_state_paths:cutensornet" "cutensornet_state_gradient:cutensornet" "cutensornet_decomp_paths:cutensornet"
                           "solver_metis_paths:cusolver:cusparse"
                           "blas_u8gemm_paths:cublas" "blas_emulation_paths:cublas" "sparse_color_paths:cusparse"
-                          "lt_emulation_paths:cublasLt:cublas")
+                          "lt_emulation_paths:cublasLt:cublas" "fft_inplace_real:cufft")
     string(REPLACE ":" ";" _parts "${_check}")
     list(POP_FRONT _parts _name)
     add_test(NAME e2e_${_name}
