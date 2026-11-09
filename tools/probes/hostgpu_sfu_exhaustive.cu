@@ -1,5 +1,5 @@
 // Card run for deciding whether an SFU instruction may join the host-GPU exact set (docs/perf-design/09-host-gpu-spike.md section 6 step 4; plan in
-// docs/performance.md "Round sp15"). Every one of the 2^32 float bit patterns goes through the card's instruction and the bits are compared with the
+// docs/perf-design/rounds/08-rounds-sp11-sp15.md "Round sp15"). Every one of the 2^32 float bit patterns goes through the card's instruction and the bits are compared with the
 // simulator's (include/vgpu/host_gpu_ref.hpp, which tests/unit/test_host_gpu_ref.cpp pins to the simulator's own kernels).
 //
 //   usage: hostgpu_sfu_exhaustive <op> [stride]

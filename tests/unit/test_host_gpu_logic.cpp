@@ -229,7 +229,7 @@ VTEST(a_launch_that_lost_to_the_estimate_ends_offloading) {
 
 constexpr uint64_t kMiB = 1ull << 20;
 
-VTEST(traffic_ban_constants_are_the_replayed_ones) {   // chosen on the 64 saved traces (docs/performance.md, Round sp14); changing one needs a new replay
+VTEST(traffic_ban_constants_are_the_replayed_ones) {   // chosen on the 64 saved traces (docs/perf-design/rounds/08-rounds-sp11-sp15.md, Round sp14); changing one needs a new replay
   VCHECK(kTrafficLaunches == 2 && kTrafficSharePercent == 25 && kTrafficMinBytes == 12 * kMiB && kTrafficSlowShare == 0.5);
 }
 

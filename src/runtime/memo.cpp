@@ -1,4 +1,4 @@
-// Launch-level result caching (vgpu/memo.hpp, vgpu/runtime/memo.hpp). See docs/performance.md, "Round sp35".
+// Launch-level result caching (vgpu/memo.hpp, vgpu/runtime/memo.hpp). See docs/perf-design/rounds/10-rounds-sp19-sp27.md, "Round sp35".
 #include "vgpu/runtime/memo.hpp"
 
 #include <dirent.h>

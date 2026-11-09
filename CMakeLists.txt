@@ -293,7 +293,7 @@ add_library(vgpu STATIC
 # The hot translation units (the SASS engine, the PTX interpreter, the memory manager, the SIMD kernels) are built outside link-time optimization,
 # with functions on 64-byte and loops on 32-byte boundaries: inside the LTO library any unrelated edit re-ordered the code and re-rolled the
 # inlining of their hot paths, which moved rows that run unchanged code by 3 to 14 % on a Zen 5 host at equal instruction counts, and outside it
-# a unit's layout depends on its own source only (docs/performance.md, Round sp14; tests/lint/check_hot_unit_layout.py holds the flags).
+# a unit's layout depends on its own source only (docs/perf-design/rounds/08-rounds-sp11-sp15.md, Round sp14; tests/lint/check_hot_unit_layout.py holds the flags).
 set(VGPU_HOT_UNIT_FLAGS "-fno-lto;-falign-functions=64;-falign-loops=32")
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   set_source_files_properties(src/exec/interpreter.cpp PROPERTIES COMPILE_OPTIONS "-Werror=psabi;${VGPU_HOT_UNIT_FLAGS}")
@@ -302,7 +302,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   # ladders became switches (s_trunc_f32 of a signaling NaN, amd/tests/unit/test_gcn_same_bits.cpp).
   # -falign-loops=32: the matrix tile kernels' loops (mfma_math.hpp) were 4 to 11 % slower on a Zen 5 host (bf16 and f16 mfma) in the layout
   # that came with unrelated code ahead of them in the library, at equal instruction counts; with their loops on a fixed alignment the layout stops
-  # mattering (docs/performance.md, Round sp12 AMD).
+  # mattering (docs/perf-design/rounds/08-rounds-sp11-sp15.md, Round sp12 AMD).
   set_source_files_properties(amd/src/gcn_exec.cpp PROPERTIES COMPILE_OPTIONS "-fno-fp-int-builtin-inexact;-falign-loops=32")
 endif()
 target_include_directories(vgpu PUBLIC include nvidia/include amd/include "${_gen_dir}")
@@ -320,7 +320,7 @@ option(VGPU_TEST_FAST_LINK "Link unit tests without LTO (the vgpu archive carrie
 set_source_files_properties(amd/src/gcn_tier_ds.cpp PROPERTIES COMPILE_OPTIONS "-fno-lto")
 set_source_files_properties(amd/src/gcn_tier.cpp PROPERTIES COMPILE_OPTIONS "${VGPU_HOT_UNIT_FLAGS}")
 # The AMD matrix tile kernels and wide decoders, outside link-time optimization, with functions on 64-byte and loops on 32-byte boundaries: their speed
-# depended on where their few-instruction loops landed in a code line, which every unrelated edit of the library changed (docs/performance.md, Round sp13).
+# depended on where their few-instruction loops landed in a code line, which every unrelated edit of the library changed (docs/perf-design/rounds/08-rounds-sp11-sp15.md, Round sp13).
 set_source_files_properties(amd/src/gcn_matrix_kernels.cpp PROPERTIES COMPILE_OPTIONS "-fno-lto;-falign-functions=64;-falign-loops=32")
 # The memory manager's hot paths: outside link-time optimization too, so the executors' code is laid out as it was without them.
 # The SASS engine and the SIMD kernels with it (the PTX interpreter's options are set with its -Werror=psabi above, for GNU).
@@ -1364,7 +1364,7 @@ function(vgpu_unit_test name)
   endif()
 endfunction()
 
-# Long tests are split so that ctest -j can run the parts side by side (docs/performance.md, "CI time"). The test picks its part from the
+# Long tests are split so that ctest -j can run the parts side by side (docs/ci.md, "Shards and the compile cache"). The test picks its part from the
 # environment variable ENV_VAR, whose value is one of SPECS; the part named by no value is the whole test.
 #   vgpu_shard_tests(<base> ENV_VAR <var> LIST_ENV <var> SPECS <spec>... COMMAND <cmd>... [ENVIRONMENT <v=x>...] [PROPERTIES <p v>...])
 # registers <base>_shard_<spec> for each spec ("/" in a spec reads "of": test_x_shard_3of8; the properties and the environment of the whole test, plus ENV_VAR=<spec>), and
@@ -4083,6 +4083,9 @@ if(Python3_Interpreter_FOUND)
   # manifest and a tiny C program: seconds, no simulator build. Skipped (77) where gcc or gcov-tool is missing.
   add_test(NAME lint_pgo_pipeline COMMAND bash ${CMAKE_SOURCE_DIR}/tests/lint/check_pgo_pipeline.sh)
   set_tests_properties(lint_pgo_pipeline PROPERTIES SKIP_RETURN_CODE 77)
+  # Relative links, anchors and docs/*.md references in the Markdown files resolve (seconds, no build).
+  add_test(NAME lint_doc_links
+           COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tests/lint/check_doc_links.py ${CMAKE_SOURCE_DIR})
   # A key repeated in a workflow file makes GitHub refuse the whole file (it then runs on every push as a
   # failure with no jobs, and its schedule stops): the check reads every workflow for one.
   add_test(NAME lint_workflow_yaml

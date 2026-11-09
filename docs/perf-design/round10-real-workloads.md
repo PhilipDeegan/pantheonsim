@@ -24,7 +24,7 @@ Warp instructions per device-CPU second, in millions; "x" is tier on over tier o
 | divergent | 16.28 | 30.86 | 1.89 |
 | warp | 19.35 | 64.59 | 3.34 |
 
-These agree with the numbers in docs/performance.md for the tier, with one difference: `wmma` and `mma_ptx` gain 1.1x here, not 1.4 to 1.6x.
+These agree with the numbers in docs/perf-design/rounds/02-sass-tier-rounds-8-9.md for the tier, with one difference: `wmma` and `mma_ptx` gain 1.1x here, not 1.4 to 1.6x.
 
 ## 2. The PyTorch sweep (quick tier, 169 checks, 13 processes, `nvidia/rtx5090`)
 

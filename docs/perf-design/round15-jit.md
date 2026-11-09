@@ -21,7 +21,7 @@ programs at 1.034 (server2). The corpus total goes from 664 s to 628 s (1.057x):
   instruction form touches. Making every ALU op free would give 1.2x at most; 1.125 is what 2 ns an op gives. Getting from 1.10 to 1.15 needs the memory ops and shared memory inside generated code with their exact counters (the study's extensions (a) and (c)), which is a different design problem.
 * **What it costs.** A unit that is compiled for the first time costs 2.3 s on average (67 units, 155 s for the 22 programs; base: 37 units, 62 s), because regions are bigger and each loop is one function: the cold run is 1.22x the tier's wall on geometric mean (base 1.14x),
   SYRK 1.75x, segmentationTreeThrust 3.2x (22 units). All of the cold penalty is the compile: without it the same runs are 0.92x of the tier, as the warm ones (0.91x). `VGPU_JIT_RESIDENCE=0 VGPU_JIT_SPECIALIZE=0` cuts the compile by 22 to 48 % and
-  loses nothing at run time (2 % faster in geometric mean over 7 programs, 3 runs each); it was found too late to become the default of this round (every correctness result below is for the full form), and **became the default in round sp38**, whose matrix (the seven `e2e_sass_jit` shards, `test_jit*`, the 22-program same-bits comparison at 1 and 4 threads, the warm and cold tables with an A/A) was run again for it: [docs/performance.md](../performance.md), "Round sp38 (follow-ups)", `data/sp38/`. Everything below that says "default" about the generated code's form is the full form, now `VGPU_JIT_RESIDENCE=1 VGPU_JIT_SPECIALIZE=1`.
+  loses nothing at run time (2 % faster in geometric mean over 7 programs, 3 runs each); it was found too late to become the default of this round (every correctness result below is for the full form), and **became the default in round sp38**, whose matrix (the seven `e2e_sass_jit` shards, `test_jit*`, the 22-program same-bits comparison at 1 and 4 threads, the warm and cold tables with an A/A) was run again for it: [Round sp38 (follow-ups)](rounds/11-rounds-sp36-sp41.md), `data/sp38/`. Everything below that says "default" about the generated code's form is the full form, now `VGPU_JIT_RESIDENCE=1 VGPU_JIT_SPECIALIZE=1`.
 * **Same bits.** Results, every counter and `VGPU_KERNEL_DIGEST` equal to the tier-only run and to `origin/main` on all 22 programs at one thread (cold and warm cache) and four threads, except where the tier-only run of `origin/main` already differs from itself (radixSortThrust at one and four threads,
   jacobiCudaGraphs and segmentationTreeThrust at four: controls below).
 
@@ -39,7 +39,7 @@ was 2.6 ns dearer than in the tier's loop. That is what this round removes.
 
 ### 1. A region is a run of ops the run loop goes on past, cut into stretches
 
-The tier's run loop already has a rule for going on past an op without leaving (the "cont path", `docs/performance.md`, branch `sp14-step`): when the chain would have started the
+The tier's run loop already has a rule for going on past an op without leaving (the "cont path", `docs/perf-design/rounds/09-rounds-sp14-sp21.md`, branch `sp14-step`): when the chain would have started the
 next call exactly where the loop is, the loop does what the chain does -- `--w.budget; ++w.extra`, the 256-op bound starts afresh -- and carries on. It does it for a BRA that the
 whole group takes, or none of it, and for S2R, ULDC, UMOV, USEL, PLOP3 and SEL. The generated code now does exactly that, inside one function:
 

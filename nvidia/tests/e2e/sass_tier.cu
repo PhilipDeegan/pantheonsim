@@ -644,7 +644,7 @@ __global__ void k_direct(const u32* A, const u32* Bv, u32* out, u32* bins, unsig
     __syncwarp(m);
   }
   // an IEEE division: FCHK, then the slow path through a CALL when the check says so (the interpreter says so always); FCHK itself is the
-  // interpreter's (a handler for it measured +1.2% and +1.8%, docs/performance.md)
+  // interpreter's (a handler for it measured +1.2% and +1.8%, docs/perf-design/rounds/README.md)
   r[k++] = B(F(a) / F(b));
   r[k++] = B(F(b ^ 0x3f800000u) / F(a | 0x00800000u));
   while (k < kDir) r[k++] = lane;

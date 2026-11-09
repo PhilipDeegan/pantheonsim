@@ -1,5 +1,5 @@
 // Launch-level result caching ("memoisation"), opt-in: VGPU_MEMO=1. docs/perf-design/03-result-memoisation.md is the
-// study; docs/performance.md "Round sp35" says what was built and measured. This header holds the parts the memory
+// study; docs/perf-design/rounds/10-rounds-sp19-sp27.md "Round sp35" says what was built and measured. This header holds the parts the memory
 // manager needs to know about: the hash, the thread scope that tells a host call from a kernel's, and the event sink
 // the manager reports host-side changes to. The cache itself is src/runtime/memo.cpp.
 //

@@ -123,8 +123,8 @@ jobs:
         # The ML tests are the ml job's: on the runner whose image has PyTorch
         # and rocBLAS they would run here too, and take an hour.
         # Up to four at a time (fewer where under 24 GiB are free, ci/jobs.sh; it was two): the long
-        # tests are split into shards (vgpu_shard_tests in CMakeLists.txt; docs/performance.md,
-        # "CI time"), which only help when there are slots to run them side by side.
+        # tests are split into shards (vgpu_shard_tests in CMakeLists.txt; docs/ci.md,
+        # "Shards and the compile cache"), which only help when there are slots to run them side by side.
         # The two CUTLASS tests were 2200 s of this step's 3200 s (run 38424481981,
         # before the binary cache above) and
         # use one core for their nvcc compiles, so the other tests run beside

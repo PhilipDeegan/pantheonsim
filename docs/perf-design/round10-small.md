@@ -57,7 +57,7 @@ per-fetch cache in `texel_channel_bits` (the first channel read of a texel with 
 clears it). Two tests with mutants that failed as expected. Measured:
 
 * First version (all texels): harness `texture` **0.916x sass, 0.922x ptx** (slower: the harness `texture` workload reads one-channel
-  float textures, so the lookup bought nothing and the cache cost). The `docs/performance.md` note "one `load_scalar` per
+  float textures, so the lookup bought nothing and the cache cost). The `docs/perf-design/rounds/` note "one `load_scalar` per
   channel" only holds for textures of several channels.
 * Restricted to texels with a second channel: harness `texture` 1.007x sass, 1.005x ptx (same, as it should be).
 * A new micro-workload with `float4` point, `float4` linear and `uchar4` normalised linear fetches

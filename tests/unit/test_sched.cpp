@@ -163,7 +163,7 @@ VTEST(many_small_launches_reuse_the_pools_threads) {
 // A loop of small launches (the launch64 shape: few blocks, a few microseconds of
 // work each) must give the same bytes and the same counters at every thread
 // count, and once the cost of the kernel is known must stay off the pool: a
-// worker's hand-off costs more than the blocks do (docs/performance.md, Round sp12).
+// worker's hand-off costs more than the blocks do (docs/perf-design/rounds/08-rounds-sp11-sp15.md, Round sp12).
 VTEST(small_launches_in_a_loop_stay_off_the_pool_and_give_the_same_results) {
   const auto m = ptx::parse(std::string(kHeader) + kFill);
   const DeviceProfile prof = load_gpu("nvidia/h100");

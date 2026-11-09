@@ -453,7 +453,7 @@ inline bool first_launch_offload(const FirstLaunch& f, const Costs& c) {
 // than the simulator was expected to need ends the offloading of that kernel. One bad launch is the most it can cost.
 inline bool offload_paid_off(double card_total_s, double sim_estimate_s) { return card_total_s <= sim_estimate_s; }
 
-// A second safety net, by traffic (docs/perf-design/09-host-gpu-spike.md 7.3; docs/performance.md "Round sp14"). With a persistent card copy, a kernel that
+// A second safety net, by traffic (docs/perf-design/09-host-gpu-spike.md 7.3; docs/perf-design/rounds/08-rounds-sp11-sp15.md "Round sp14"). With a persistent card copy, a kernel that
 // alternates with simulator launches on the same buffers gives the copy up and gets it pushed again every time. A kernel is banned when kTrafficLaunches
 // offloaded launches IN A ROW each pushed more than kTrafficSharePercent percent of the live bytes AND more than kTrafficMinBytes, and each one's card path
 // took more than kTrafficSlowShare of the simulator's estimate. All three conditions are needed: replayed over the 64 saved traces (residency_model.py), the share
