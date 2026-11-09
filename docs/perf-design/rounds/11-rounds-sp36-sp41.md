@@ -366,3 +366,103 @@ Nothing in the PTX counting sorts: `distinct_sectors` keeps a list and searches 
 
 ### Result
 No source change is kept: the branch carries only this section. No timings against a control copy were taken because nothing was built (so there is no A/A figure to report; the IBS runs are single profiles, one per program, not repeated). Mutation tests and a differential test are therefore not added. Cleanup: the scratch directories of this round on server2 were removed by exact path.
+
+
+## Round sp42 (host-GPU measured on A10G)
+
+Question: what does `VGPU_HOST_GPU=exact` (PR #529 hooks, main d462bc2f) buy on a real card at today's main, program by program, and what does it refuse or lose? Earlier rounds measured six programs (sp14/sp15: FDTD-2D, babelstream, base64e, aligned-types, LU, GRAMSCHM) and replayed 64 traces; this round runs a wider set in one session, with the native card as a third column. Nothing in the source changed; the mode, its constants and its gates are the ones of d462bc2f.
+
+Setup: AWS g5.xlarge (A10G, 4 vCPU, driver 595.112.07, Ubuntu 24.04), simulator built from a clean worktree of d462bc2f, `RelWithDebInfo`, no LTO, g++ 13. The programs are the cached sm_86 binaries from `~/.cache` (PolyBench/GPU, Rodinia with the round-12 arguments, HeCBench, `cudart` shared, CUDA 13.0) plus one synthetic program, `data/sp42/sens.cu` (integer-only kernels, so every kernel is in the exact set). Three modes per program, same binary, one process each: **native** (real `libcudart` 13.0, the card), **sim** (`VGPU_GPU=nvidia/a10g VGPU_THREADS=4 VGPU_QUIET=1`, shim `libcudart`), **host-GPU** (the same plus `VGPU_HOST_GPU=exact VGPU_HOST_GPU_LOG=1`). Wall seconds of the whole process (`measure.sh`, `batch.sh`, `batch2.sh`, `results.tsv` and the host-GPU logs are in `docs/perf-design/data/sp42/`). One run per cell, no repeats: differences under about 0.05 s on the short rows are noise, and the 600 s cap cut the simulator short on aligned-types (`+` in the table; the 2,682 s of an earlier round is the uncapped figure). Speedup = sim / host-GPU wall.
+
+How to read the PolyBench rows: those programs also run a CPU reference computation, so the process wall hides the device phase (2MM: native 187 s, of which the card is 0.05 s). The "device phase" column is the number the program itself prints as `GPU Time in seconds` (sim, host-GPU; native is 0.0004 to 2.6 s and is in the raw outputs, not tabled: its timer covers the asynchronous enqueue).
+
+"stdout host vs sim" compares standard output with every line that carries a time, rate or bandwidth removed. "verify" is `VGPU_HOST_GPU_VERIFY=1` (every launch the mode would offload runs on the card and then in the simulator, memory compared): run on the Rodinia and HeCBench rows only, 150 s cap. It was not run on the PolyBench rows because it did not finish (see finding 6).
+
+| program | native s | sim s | host-GPU s | sim / host | device phase sim / host s | launches card / sim | stdout host vs sim | verify (in-set launches same / diff) |
+|---|---:|---:|---:|---:|---:|---:|---|---|
+| poly/2DCONV | 0.82 | 0.97 | 0.89 | 1.09x | 0.39 / 0.18 | 1 / 0 | same | not run |
+| poly/3DCONV | 0.49 | 0.77 | 0.91 | 0.85x | 0.50 / 0.56 | 0 / 254 | same | not run |
+| poly/3MM | 1.50 | 2.45 | 1.48 | 1.66x | 1.19 / 0.15 | 3 / 0 | same | not run |
+| poly/GEMM | 0.58 | 0.82 | 0.67 | 1.22x | 0.44 / 0.14 | 1 / 0 | same | not run |
+| poly/ATAX | 0.33 | 1.09 | 1.22 | 0.89x | 0.99 / 1.03 | 0 / 2 | same | not run |
+| poly/MVT | 0.48 | 1.23 | 1.37 | 0.90x | 0.99 / 1.03 | 0 / 2 | same | not run |
+| poly/GESUMMV | 0.42 | 0.39 | 0.54 | 0.72x | 0.19 / 0.24 | 0 / 1 | same | not run |
+| poly/JACOBI2D | 0.29 | 0.64 | 0.36 | 1.78x | 0.59 / 0.21 | 36 / 4 | same | not run |
+| poly/COVAR | 63.20 | 67.21 | 71.26 | 0.94x | 27.01 / 27.12 | 0 / 3 | same | not run |
+| poly/CORR | 42.25 | 67.42 | 67.17 | 1.00x | 27.08 / 27.16 | 0 / 4 | same | not run |
+| poly/ADI | 0.33 | 0.41 | 0.41 | 1.00x | 0.33 / 0.34 | 0 / 2049 | same | not run |
+| poly/GEMVER | 0.47 | 0.67 | 0.68 | 0.99x | 0.43 / 0.34 | 1 / 2 | same | not run |
+| poly/BICG | 0.36 | 0.27 | 0.40 | 0.68x | 0.13 / 0.16 | 0 / 2 | same | not run |
+| poly/JACOBI1D | 0.45 | 2.48 | 2.76 | 0.90x | 2.43 / 2.62 | 0 / 20000 | same | not run |
+| rod/backprop | 0.25 | 0.05 | 0.27 | 0.19x | - | 1 / 1 | same | 1 / 0 |
+| rod/gaussian | 0.24 | 0.02 | 0.24 | 0.08x | - | 61 / 65 | same | 63 / 0 |
+| rod/lud | 0.24 | 0.05 | 0.27 | 0.19x | - | 10 / 36 | same | 15 / 0 |
+| rod/needle | 0.23 | 0.02 | 0.26 | 0.08x | - | 14 / 17 | same | 31 / 0 |
+| rod/pathfinder | 0.24 | 0.01 | 0.24 | 0.04x | - | 1 / 2 | same | 3 / 0 |
+| rod/hotspot | 0.24 | 0.03 | 0.03 | 1.00x | - | 0 / 10 | same | 0 / 0 |
+| rod/bfs | 0.24 | 0.02 | 0.25 | 0.08x | - | 0 / 26 | same | 26 / 0 |
+| rod/srad_v2 | 0.24 | 0.01 | 0.01 | 1.00x | - | 0 / 1 | same | 0 / 0 |
+| hec/matrixT-cuda | 0.24 | 0.06 | 0.27 | 0.22x | - | 8 / 1 | same | 8 / 0 |
+| hec/mandelbrot-cuda | 0.53 | 1.20 | 1.20 | 1.00x | - | 0 / 2 | same | 0 / 0 |
+| hec/md5hash-cuda | 0.29 | 153.93 | 153.88 | 1.00x | - | 0 / 4 | same | not run |
+| hec/memcpy-cuda | 0.37 | 0.04 | 0.04 | 1.00x | - | no kernel | same | not run |
+| hec/mask-cuda | 0.39 | 0.14 | 0.15 | 0.93x | - | 0 / 6 | same | 0 / 0 |
+| hec/maxpool3d-cuda | 0.25 | 0.01 | 0.24 | 0.04x | - | 0 / 1 | same | 1 / 0 |
+| hec/merge-cuda | 0.25 | 0.07 | 0.24 | 0.29x | - | 0 / 16 | same | 8 / 0 |
+| hec/lud-cuda | 0.24 | 0.05 | 0.26 | 0.19x | - | 10 / 36 | same | 15 / 0 |
+| hec/matrix-rotate-cuda | 0.23 | 0.01 | 0.01 | 1.00x | - | 0 / 1 | same | 1 / 0 |
+| hec/lombscargle-cuda | 1.53 | 3.04 | 3.04 | 1.00x | - | 0 / 1 | same | 0 / 0 |
+| poly/SYRK | 1.27 | 5.17 | 1.28 | 4.04x | 4.13 / 0.16 | 1 / 0 | same | not run |
+| poly/SYR2K | 2.30 | 9.80 | 2.32 | 4.22x | 7.75 / 0.17 | 1 / 0 | same | not run |
+| poly/LU | 1.12 | 31.41 | 11.42 | 2.75x | 30.59 / 10.49 | 1407 / 2689 | same | not run |
+| poly/2MM | 187.08 | 183.18 | 122.60 | 1.49x | 59.40 / 0.23 | 2 / 0 | same | not run |
+| poly/FDTD-2D | 4.26 | 110.28 | 4.75 | 23.22x | 106.41 / 0.82 | 1494 / 6 | same | not run |
+| hec/base64e-cuda | 3.18 | 320.91 | 8.95 | 35.86x | - | 514 / 2 | timing/bandwidth lines only | not run |
+| hec/babelstream-cuda | 3.13 | 405.24 | 13.66 | 29.67x | - | 1188 / 26 | timing/bandwidth lines only | not run |
+| hec/aligned-types-cuda | 3.79 | 600.02+ | 8.61 | >70x | - | 12974 / 26 | (sim hit 600 s cap) host == native | not run |
+| poly/GRAMSCHM | 230.62 | 272.54 | 277.58 | 0.98x | 49.75 / 44.44 | 2046 / 4098 | same | not run |
+| hec/adam-cuda | 4.92 | 26.25 | 26.23 | 1.00x | - | 0 / 100 | same | 0 / 0 |
+| hec/axpby-cuda | 31.04 | 202.19 | 219.66 | 0.92x | - | 0 / 12770 | same | not run |
+
+| synthetic (integer kernel) | launches | elements | native s | sim s | host-GPU s | sim / host | launches card / sim | final-memory checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| compute | 1000 | 4,096 | 0.25 | 2.03 | 0.26 | 7.81x | 998 / 2 | same |
+| compute | 100 | 65,536 | 0.23 | 3.14 | 0.26 | 12.08x | 98 / 2 | same |
+| compute | 10 | 1,048,576 | 0.25 | 4.99 | 1.26 | 3.96x | 8 / 2 | same |
+| compute | 4 | 4,194,304 | 0.26 | 8.00 | 2.30 | 3.48x | 3 / 1 | same |
+| compute | 1 | 1,048,576 | 0.24 | 0.51 | 0.26 | 1.96x | 1 / 0 | same |
+| compute | 1 | 4,096 | 0.23 | 0.01 | 0.25 | 0.04x | 0 / 1 | same |
+| mem | 2000 | 4,096 | 0.24 | 0.23 | 0.32 | 0.72x | 0 / 2000 | same |
+| mem | 200 | 262,144 | 0.24 | 0.57 | 0.25 | 2.28x | 198 / 2 | same |
+| mem | 50 | 4,194,304 | 0.26 | 2.24 | 0.41 | 5.46x | 48 / 2 | same |
+| mem | 20 | 16,777,216 | 0.32 | 3.63 | 0.83 | 4.37x | 18 / 2 | same |
+| mem | 1 | 16,777,216 | 0.32 | 0.28 | 0.41 | 0.68x | 1 / 0 | same |
+| mem | 4 | 4,194,304 | 0.26 | 0.21 | 0.39 | 0.54x | 2 / 2 | same |
+
+### Results
+
+1. **Gains need a large kernel in the exact set, and they are large when they exist.** FDTD-2D 23x (110.3 s to 4.75 s; the native card takes 4.26 s, so the mode is within 12% of the card), base64e 36x, babelstream 30x, aligned-types over 70x (sim stopped at 600 s; 8.6 s on the card, native 3.8 s), SYRK 4.0x, SYR2K 4.2x (1.28 s and 2.32 s against native 1.27 s and 2.30 s: the card path costs the 0.2 s start-up and nothing else). On the device phase alone: 2MM 59.4 s to 0.23 s, FDTD-2D 106 s to 0.82 s, SYR2K 7.75 s to 0.17 s. LU 2.75x (31.4 s to 11.4 s), JACOBI2D 1.78x, 3MM 1.66x, 2MM 1.49x on the process wall.
+2. **Everything that matched did match.** Stdout equals the simulator's in all 42 rows where the simulator finished, apart from bandwidth and elapsed-time lines in base64e and babelstream (PASS in all three modes). Final memory: the 12 synthetic runs print a checksum of the final device buffer and it is equal in all three modes. `VGPU_HOST_GPU_VERIFY=1` compared 172 in-set launches on the Rodinia and HeCBench programs (all kernels that ran on the card or would have): 0 differ. PolyBench's own CPU-vs-GPU check reports 0 mismatches in every row. Nothing was run outside the exact set (`VERIFY=all` not used).
+3. **The first card launch costs about 0.23 s, and a program that finishes in less than that loses.** The native process of a trivial program also takes 0.24 s (driver start), the simulator's 0.01 to 0.05 s. All eight Rodinia programs and several HeCBench ones sit there: host-GPU is 0.24 to 0.27 s against 0.01 to 0.07 s simulated (0.04x to 0.29x), whether or not the launch ended on the card (bfs, maxpool3d, merge and the synthetic one-launch 4,096-element row kept every launch in the simulator and still paid it; matrix-rotate did not: the cause of the difference is not investigated). The size rule compares one launch against its simulator time and does not charge the one-off start-up. That is the only systematic slowdown found: under 0.3 s of simulated time, leave the mode off. No row of a program that runs longer than 0.5 s in the simulator got slower than 0.68x, and the 0.68x to 0.72x cases (BICG, GESUMMV, synthetic mem single-launch and tiny-launch rows) are 0.1 to 0.2 s absolute.
+4. **Size and launch-count sensitivity** (synthetic table above; the kernels are integer-only; compute = 256-iteration xorshift/IMAD loop per thread, mem = grid-stride read-multiply-write):
+   * Many small launches win once a kernel has a history: 1,000 launches of 16 blocks, 7.8x; 100 launches of 256 blocks, 12.1x. The first two launches of a kernel run in the simulator (history rule), the rest (998 and 98) go to the card.
+   * One launch is not enough: compute 1 x 1M threads is 1.96x (first-launch static rule offloaded it), compute 1 x 4,096 threads and mem 1 x 16M words stay at or below 1x (0.04x and 0.68x: start-up plus a 128 MiB push for a 0.28 s simulator launch).
+   * Big buffers and few launches give a smaller gain: mem 50 x 4M words 5.5x, mem 20 x 16M words 4.4x (256 MiB pushed, 192 MiB pulled back), compute 10 x 1M threads 4.0x and 4 x 4M threads 3.5x. The launches a kernel runs in the simulator before it has a history (2 of 10, 1 of 4 here) are simulated at full price, which bounds the gain when a big kernel is launched only a few times.
+   * Tiny memory kernels never leave the simulator (mem 2,000 launches of 4,096 words: sim estimate below the card path), and that costs 0.09 s of start-up (0.72x).
+   * The program that shows both ends: LU. 1,407 launches on the card and 2,689 in the simulator, 22.5 GiB pushed and pulled in each direction; one kernel (`lu_kernel2`) was banned by the traffic rule after two launches that pushed 16 MiB of 16 MiB live; 639 launches too small, 2,048 refused (MUFU). 2.75x here against native 1.12 s.
+5. **What was refused, and why** (`VGPU_HOST_GPU_LOG=1` refusal lines; the per-program logs were trimmed from the repo and the results are in `data/sp42/results.tsv`):
+   * `MUFU.RCP` / `MUFU.RSQ` outside the division idiom: Rodinia backprop, lud, hotspot, srad_v2; PolyBench ADI, LU kernel 1, GRAMSCHM (RSQ for `sqrt`, RCP), CORR `reduce_kernel`; HeCBench adam, mask, md5hash, mandelbrot, matrixT (`transposeDiagonal`), lud. By far the most common reason in this corpus. The IEEE-division recognizer (`VGPU_HOST_GPU_DIV=1`) is not on by default and was not measured this round.
+   * `CALL.REL.NOINC` (the slow path of division or `sqrt`, not recognised without the flag): COVAR and CORR `mean_kernel` / `std_kernel`, HeCBench merge `workloadDiagonals`.
+   * "too small" (size rule says the card path costs more than the simulator): axpby (12,768 of 12,770 launches: 5 ms of simulator time against a 520 ms card path because 5.9 GiB are live), a part of LU (639), Rodinia lud (3). md5hash simulates in 154 s and is refused for MUFU, so the 154 s are not reducible by this mode.
+   * Not seen this round: texture/surface, cluster, cooperative, non-32 warp, VMM/IPC/heap launches (`card_blocker`), float atomics, tensor-core MMA (no program here exercised them; unit and e2e tests cover the refusal).
+6. **Finding, not fixed (verify mode only):** `VGPU_HOST_GPU_VERIFY=1` on PolyBench 2DCONV (128 MiB live) ran for more than 8 CPU-minutes (killed; plain simulation: 0.97 s). `perf` on the stuck process: 35% in `vgpu::hostgpu::Runtime::Impl::before_access` (a `std::count_if` over the chunk `Where` vector, per access) and 43% in kernel `_raw_spin_unlock_irqrestore`: the simulator's accesses to card-valid memory ask the gate per access and the gate scans linearly. It does not affect the normal mode (the simulator runs after `before_simulated` has pulled the card copy back), only verify runs with a large resident allocation, which is why `verify_ban.sh` of sp14 used a 150 s cap. The PolyBench verify rows are therefore missing; the 172 verified launches are the small-memory programs.
+
+### What the mode does and does not preserve (from 08, 09, 10 and the code; the measurements above agree)
+
+Preserved for a program that runs in this mode: the bits of every result of the kernels it offloads, defined by the exact set (integer arithmetic, IEEE `FADD/FMUL/FFMA/FSETP`, conversions with defined rounding, plain loads and stores, integer reductions with no return value, barriers, plain control flow; no MUFU, no float or compare-and-swap atomics, no tensor-core MMA), checked by the simulator's own bits on 172 launches here and on 21,804 + 23,248 in earlier rounds; memory contents at the simulator's device addresses (the card holds a copy at the same addresses and gives chunks back before any simulator access: every access path of `MemoryManager` asks the gate, 10 section 2); the API semantics (allocation, copies, events, graphs, libraries stay the simulator's; offloaded launches are synchronous like the simulator's); stdout, exit codes and files. The simulated profile must be the host card (`nvidia/a10g` on an A10G) and the module must carry SASS for it.
+
+Not preserved, for the launches that run on the card (08 section 5, 10 section 3): performance counters and profiles, per-instruction traces and SASS trace, kernel digests, CUPTI activity and callback records of those kernels, the race detector, strict mode, fault injection, the deterministic scheduler's interleaving, out-of-bounds and use-after-free diagnostics, `VGPU_MAX_STEPS`, the debugger. The mode refuses to start when counters, trace, race, strict, faults, a non-default scheduler or digests are switched on (it says so, also under `VGPU_QUIET`), so these are not silently dropped; the debugger and CUPTI subscribers have no switch it can test. Not detectable statically and therefore a stated limit: data races, reads of uninitialised memory and out-of-bounds reads the card tolerates (Rodinia `srad_v2` is the example: native and simulator differ in this session's run, the mode refused its kernel and so equals the simulator); a pointer stored in device memory that points into pinned or managed host memory; another host thread launching simulator kernels while an offloaded launch ends. Launches are refused while a VMM mapping, an IPC import or a kernel-heap block exists. Everything the exact set leaves out runs in the simulator, so a program's result is the simulator's whichever kernels went to the card.
+
+### Verdict
+
+On an A10G the mode reaches the native card's time on kernels it can run (FDTD-2D within 12%, SYRK/SYR2K within 1%), gives 4x to over 70x on programs whose simulator time is dominated by an eligible kernel, matches the simulator's output everywhere it was compared, and costs nothing when no kernel is eligible. It loses, by about 0.23 s, on programs shorter than that, and gains nothing on the most common kernel shape of this corpus, anything with a division or square root (the `MUFU` family), which `VGPU_HOST_GPU_DIV=1` would admit for the division case only. Candidate follow-ups, not done: charge the start-up in the size rule (or start the driver on first offload only), measure `VGPU_HOST_GPU_DIV=1` on the division-bound programs listed above, and make the gate's scan constant-time so verify mode is usable on large allocations.
