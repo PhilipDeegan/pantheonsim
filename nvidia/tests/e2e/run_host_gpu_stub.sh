@@ -15,7 +15,9 @@
 #      be a candidate never calls the driver, and its output is the mode-off output;
 #   8. ... and buys it once the program has spent as much simulating as the start costs (the ski-rental account): with a start cost of half the first launch's
 #      time, no single launch can repay it (the estimate is at most the first launch's time, the rule needs it above the cost plus the card path, twice over) but the
-#      time already spent can, so the driver starts at the first launch that has an estimate.
+#      time already spent can, so the driver starts at the first launch that has an estimate;
+#   9. VGPU_QUIET=1 silences the end-of-run summary only when nobody asked for it: with VGPU_HOST_GPU_VERIFY or VGPU_HOST_GPU_LOG set the summary lines
+#      ("host_gpu: N launches ran on the card", "host_gpu_verify: in_set_identical=...") still reach stderr, and with neither set nothing is printed.
 set -uo pipefail
 root="$(cd "$(dirname "$0")/../../.." && pwd)"
 . "$root/tests/shim_guard.sh"
@@ -115,5 +117,14 @@ if [[ -n "$first_cost" ]] && (( first_cost >= 8 )); then
 else
   echo "FAIL: the first launch of acct took ${first_cost:-?} ms: too short to halve (the program does 32 times the work of big)"; fails=1
 fi
+# 9. the summary under VGPU_QUIET=1.
+run q_none big VGPU_QUIET=1 VGPU_HOST_GPU=exact VGPU_HOST_GPU_NO_FIRST_LAUNCH=1 VGPU_HOST_GPU_START_COST=0 || { echo "FAIL: the quiet run failed"; fails=1; }
+grep -q 'launches ran on the card\|host_gpu_verify:' "$work/q_none.err" && { echo "FAIL: VGPU_QUIET=1 alone printed the summary"; fails=1; }
+run q_log big VGPU_QUIET=1 VGPU_HOST_GPU=exact VGPU_HOST_GPU_LOG=1 VGPU_HOST_GPU_NO_FIRST_LAUNCH=1 VGPU_HOST_GPU_START_COST=0 || { echo "FAIL: the quiet run with VGPU_HOST_GPU_LOG failed"; fails=1; }
+grep -Eq '^host_gpu: [0-9]+ launches ran on the card' "$work/q_log.err" || { echo "FAIL: VGPU_QUIET=1 with VGPU_HOST_GPU_LOG=1 printed no 'launches ran on the card' line"; fails=1; }
+run q_ver big VGPU_QUIET=1 VGPU_HOST_GPU=exact VGPU_HOST_GPU_VERIFY=1 STUB_CARD_OK=1 VGPU_HOST_GPU_NO_FIRST_LAUNCH=1 VGPU_HOST_GPU_START_COST=0 || { echo "FAIL: the quiet verify run failed"; fails=1; }
+grep -Eq '^host_gpu_verify: in_set_identical=[0-9]+ in_set_different=[0-9]+ other_identical=[0-9]+ other_different=[0-9]+$' "$work/q_ver.err" || { echo "FAIL: VGPU_QUIET=1 with VGPU_HOST_GPU_VERIFY=1 printed no host_gpu_verify summary line"; fails=1; }
+grep -Eq '^host_gpu: [0-9]+ launches ran on the card' "$work/q_ver.err" || { echo "FAIL: VGPU_QUIET=1 with VGPU_HOST_GPU_VERIFY=1 printed no 'launches ran on the card' line"; fails=1; }
+diff -q "$work/off_big.out" "$work/q_ver.out" > /dev/null || { echo "FAIL: verify under VGPU_QUIET changes the output"; fails=1; }
 (( fails == 0 )) && { echo "PASS: first launch $first ms against a driver start of $init_ms ms; driver calls in the big run: $(calls on_big)"; exit 0; }
 exit 1

@@ -527,7 +527,9 @@ Runtime::~Runtime() { delete impl_; }
 
 namespace {
 void print_summary(Runtime::Impl* im) {
-  if (quiet() || !im || im->start_failed) return;   // (a driver that could not be used already said "mode off")
+  if (!im || im->start_failed) return;   // (a driver that could not be used already said "mode off")
+  // VGPU_QUIET silences the prose, not a report that was asked for: VGPU_HOST_GPU_VERIFY and VGPU_HOST_GPU_LOG each exist to be read at the end of the run.
+  if (quiet() && !im->verify && !logging()) return;
   const Stats& s = im->stats;
   std::fprintf(stderr,
                "host_gpu: %llu launches ran on the card, %llu in the simulator (%llu kernels not in the exact set, %llu too small, %llu unsupported launch shapes, %llu failed on the card)\n",
