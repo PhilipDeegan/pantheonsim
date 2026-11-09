@@ -117,8 +117,8 @@ its own barrier and distributed shared memory; and, on sm_120f, the packed integ
 `VIADD`/`VIMNMX` forms (a lane at a time: 8- and 16-bit lanes, `.SAT`, negated A,
 `.RELU`; derived from ptxas output for the PTX forms, compared with a host loop,
 not checked against a card). `executes()` lists the opcodes the
-executor runs; a decoded opcode outside it (`HMNMX2`, `F2IP`, `JMP`, `LDGMC` --
-the first three no decoder produces) takes the kernel to its PTX, and the "not
+executor runs; a decoded opcode outside it (`F2IP`, `JMP`, `LDGMC` --
+no decoder produces the first two) takes the kernel to its PTX, and the "not
 implemented yet" faults at the foot of the instruction groups are unreachable for
 the ones it lists.
 

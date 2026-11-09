@@ -20,6 +20,14 @@ release says what runs and what it produces, never how fast a real GPU would run
   sm_100 that ptxas emits (it was an unsupported-PTX error). `max.s32.relu`, `__viaddmax_s32_relu` and the other `.relu` forms of
   pantheonsim #547 already ran since #451; new e2e test `e2e_minmax_forms` sweeps every sibling form (the relu and DPX ones are in
   `e2e_dpx_intrinsics`).
+- SASS engine, packed half arithmetic: with `HMNMX2` decoded, modules such as one holding `min.f16` no longer fall back to the PTX engine
+  wholesale, which exposed `HADD2`, `HMUL2` and `HFMA2` forms the SASS engine got wrong against an RTX 3060 (51 of 380 forms of
+  `e2e_ptx_half_forms`, and 4 of `e2e_ptx_forms`): `.FTZ` on an f16 result (subnormal inputs and result to a signed zero), `.SAT` (a -0 result is +0), `.RELU`
+  (a negative or -0 result is +0), `F2FP` with a directed rounding mode (`cvt.rz`, `.rm`, `.rp` to f16 and bf16) and its one-conversion
+  `MERGE_C` form (`cvt.rn.relu.bf16.f32`, which was read as an f16 pair) and `.SATFINITE` (`cvt.rn.satfinite.f16x2.f32`, whose
+  flag was read as part of the type). They now give the card's bits, on the interpreter and
+  the tier (the tier leaves those forms to the interpreter). `e2e_ptx_half_forms` runs on the SASS interpreter, the tier and the PTX engine
+  and fails if the SASS did not run.
 - cuFFT: an in-place real transform (`cufftExecR2C`, `D2Z`, `C2R`, `Z2D` on one buffer, no advanced layout) reads and writes the
   padded real array cuFFT documents (each row of the fastest axis is `2 * (n / 2 + 1)` reals, a batch is the complex distance
   apart). It read the array as dense, so 2D and 3D results were wrong and so was a 1D batch (pantheonsim #548).
@@ -32,8 +40,8 @@ release says what runs and what it produces, never how fast a real GPU would run
   s4/u4, b1, f64 operands; f16, f32, s32 and f64 accumulators). It used a layout of its own, so code that reads or writes
   fragment elements one by one (`acc.x[i] *= (a.x[i] > 0)`, how tiny-cuda-nn masks a ReLU's gradient, and the epilogues of CUTLASS and
   hand-written kernels) met the wrong element: tiny-cuda-nn's `FullyFusedMLP` double-backward test gave mean relative errors of 0.6
-  to 0.8 for three of its five rows on the default SASS engine too, because a module holding one SASS instruction the engine does not decode (the packed half
-  maximum, `HMNMX2`) runs on the PTX engine wholesale. The three code paths that held old layouts (f16 and bf16 `m16n16k16` with an f32 accumulator, tf32, and the generic
+  to 0.8 for three of its five rows on the default SASS engine too, because a module holding one SASS instruction the engine did not decode (the packed half
+  maximum, `HMNMX2`, until pantheonsim #547) ran on the PTX engine wholesale. The three code paths that held old layouts (f16 and bf16 `m16n16k16` with an f32 accumulator, tf32, and the generic
   one) are one now, and the tile route takes tf32 and the f16/bf16 `m16n16k16` forms with f16 accumulators too. The layout is the
   Turing-and-later one, measured on an RTX 3060 (a Volta card, which was not measured, may differ)
   (pantheonsim #550, new test `e2e_wmma_fragment_layout`).

@@ -1081,7 +1081,7 @@ agent) prints a hash and the first values of 37 sections, among them every NaN p
 `run_round9_probe.sh` requires both engines at every SIMD level to equal `nvidia/tests/data/round9_probe.rtx3060.txt`, apart from the
 hashes of `f32_lg2` and `f32_sin` (the SFU approximations), and requires `VGPU_TC_EXACT=0` to change only the three wmma lines.
 
-**Not done, and why.** F2F, FRND, F2I from f64/f16, I2F from 64 bits, HSETP2/HSET2/HMNMX2, bf16 arithmetic, the f32-result forms of
+**Not done, and why.** F2F, FRND, F2I from f64/f16, I2F from 64 bits, HSETP2/HSET2 (HMNMX2 has been decoded since pantheonsim #547), bf16 arithmetic, the f32-result forms of
 HMUL2/HFMA2 (ptxas of CUDA 13.0.88 emits only HADD2.F32 for sm_86), MUFU.RCP64H, vector and shared atomics: still the general path. The
 sector and bank counting (`memcount::distinct_sectors`, `sass_bank_passes`) is 10-17% of the memory-bound programs and is r7-memory's
 file. The per-instruction overhead left (`step_warp`, `execute`, operand decoding, `exec_control`'s per-lane BSYNC bookkeeping: 30-45% of an
@@ -1208,7 +1208,7 @@ barrier the card's warp order was the same on every repeat but not a function of
 2, 3, 0, 1; 256: 4 to 7, then 0 to 3), which neither engine reproduces. Not deterministic on the card across configurations, so not fixed: a program
 that depends on it is racing.
 
-**Not done, and why.** F2F, FRND, F2I from f64/f16, I2F from 64 bits, HSETP2/HSET2/HMNMX2, bf16 arithmetic, the f32-result forms of
+**Not done, and why.** F2F, FRND, F2I from f64/f16, I2F from 64 bits, HSETP2/HSET2 (HMNMX2 has been decoded since pantheonsim #547), bf16 arithmetic, the f32-result forms of
 HMUL2/HFMA2 (ptxas of CUDA 13.0.88 emits only HADD2.F32 for sm_86), MUFU.RCP64H, vector and shared atomics: still the general path. The
 sector and bank counting (`memcount::distinct_sectors`, `sass_bank_passes`) is 10-17% of the memory-bound programs and is r7-memory's
 file. The per-instruction overhead left (`step_warp`, `execute`, operand decoding, `exec_control`'s per-lane BSYNC bookkeeping: 30-45% of an
@@ -1370,8 +1370,8 @@ both sums are held to the interpreter's. Mutation checks (scratch copy, `TMUT=n`
 the direct HMMA kernel call without the tensor-core sum, TANH flushed, a NaN half as 0x7e00, HADD2.F32's NaN, the multiplier and addend of HFMA2
 exchanged, FSETP ignoring `-x`, IMNMX, I2F without its rounding mode, FMNMX's flags, F2I's rounding, FFMA's `.SAT`, FADD's and DADD's rounding mode, PRMT's mode, a
 bf16 HFMA2 on the f16 kernel, a constant's modifiers folded twice, ...) are all caught by `sass_tier` except one: DSETP's second predicate for a
-comparison (the complement), which ptxas never uses (only MIN/MAX's second predicate, which is covered). HMNMX2 (`min.f16x2`, `max.bf16x2`) is not in the
-SASS decoder (opcode 0x240: "unknown opcode", the program falls back to PTX), so `sass_tier` leaves it out; that is not the tier's.
+comparison (the complement), which ptxas never uses (only MIN/MAX's second predicate, which is covered). HMNMX2 (`min.f16x2`, `max.bf16x2`) was not in the
+SASS decoder when this was measured (opcode 0x240: "unknown opcode", the program fell back to PTX), so `sass_tier` left it out; it is decoded and executed now (pantheonsim #547), by the interpreter, not the tier.
 
 **Measured on the merged tree** (a quiet machine, the same method as above; counters identical in every comparison). The tier on against off in this build:
 `int_alu` 2.74x, `f32_fma` 2.72x, `f64_fma` 1.58x, `f64_subnormal` 1.08x, `mem` 1.47x, `shared` 1.49x, `atomics` 1.34x, `texture` 1.09x, `local` 1.87x,

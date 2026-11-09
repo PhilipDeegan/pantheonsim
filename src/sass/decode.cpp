@@ -1476,7 +1476,16 @@ void dec_f2fp(Instr& ins, const Word& w) {
   // 6 UE8M0) and dt which of it. Unpacking, 82-83 say the source's family
   // (0 FP8, 1 FP6/FP4, 2 UE8M0) and st which of it.
   const unsigned fam = static_cast<unsigned>(w.field(85, 3)), ufam = static_cast<unsigned>(w.field(82, 2));
-  const unsigned mode = w.bit(89) ? 4 : fam ? 1 : 0;
+  // Mode 2: the one-conversion f16/bf16 form `F2FP.{RELU}{.BF16}.MERGE_C{.rnd} Rd, Rb, Rc` (bit 78 set with the family clear and a
+  // type of 4 or 5): Rb converts into the low half and Rc is the merged-in register (ptxas always gives RZ). The type's low bit
+  // says bf16, as in the two-operand form.
+  const bool merge16 = !w.bit(89) && fam == 0 && (dt == 4 || dt == 5);
+  if (merge16) dt -= 4;
+  // The two-operand f16/bf16 form's .SATFINITE is bit 77 (a type of 2 or 3: the type's bit 76 still says bf16), where the FP8 forms
+  // of sm_89 put the type's own bit; bit 90 is the sm_100 forms'. Overflow gives the largest finite value, not infinity.
+  const bool sat16 = !w.bit(89) && fam == 0 && (dt == 2 || dt == 3);
+  if (sat16) dt -= 2;
+  const unsigned mode = w.bit(89) ? 4 : fam ? 1 : merge16 ? 2 : 0;
   const char* dname = dts[dt];
   const char* sname = sts[st];
   unsigned narrow = 0;
@@ -1494,7 +1503,7 @@ void dec_f2fp(Instr& ins, const Word& w) {
     static const char* const nn[] = {"E4M3", "E5M2", "E3M2", "E2M3", "E2M1", "E8"};
     if (narrow) sname = nn[narrow - kNarrowE4M3];
   }
-  if (w.bit(90)) ins.mods.push_back("SATFINITE");
+  if (w.bit(90) || sat16) ins.mods.push_back("SATFINITE");
   if (w.bit(75)) ins.mods.push_back("RELU");   // negatives become zero
   if (ins.sm >= 89) {
     ins.mods.push_back(dname);
@@ -1503,7 +1512,7 @@ void dec_f2fp(Instr& ins, const Word& w) {
     ins.mods.push_back(dname);
   }
   // Form 4 is one operand: b packed from F32 (PACK_B: tf32), else unpacked.
-  ins.mods.push_back(mode == 4 ? (st == 0 ? "PACK_B" : "UNPACK_B") : mode == 1 ? "PACK_AB_MERGE_C" : "PACK_AB");
+  ins.mods.push_back(mode == 4 ? (st == 0 ? "PACK_B" : "UNPACK_B") : mode == 2 ? "MERGE_C" : mode == 1 ? "PACK_AB_MERGE_C" : "PACK_AB");
   const unsigned rnd = static_cast<unsigned>(w.field(79, 2));
   if (rnd) ins.mods.push_back(kRnd[rnd]);
   ins.f[0] = dt == 1;
@@ -1512,7 +1521,7 @@ void dec_f2fp(Instr& ins, const Word& w) {
   ins.f[3] = mode == 1 && narrow ? narrow : dt;
   ins.f[4] = mode == 4 && narrow ? narrow : st;
   ins.f[5] = mode;
-  ins.f[6] = w.bit(90);
+  ins.f[6] = w.bit(90) || sat16;
   ins.dst.push_back(dst_reg(w, false, ins.sm));
   if (mode == 4) {
     one_src(ins, w, kUnsigned, false);
@@ -1520,7 +1529,8 @@ void dec_f2fp(Instr& ins, const Word& w) {
     ins.f[7] = w.bit(88);
   } else {
     alu2(ins, w, kFloat);
-    if (mode == 1) ins.src.push_back(R(static_cast<unsigned>(w.field(64, 8))));
+    if (mode == 2) ins.src.erase(ins.src.begin());   // the converted source is the second field; the first is unused
+    if (mode == 1 || mode == 2) ins.src.push_back(R(static_cast<unsigned>(w.field(64, 8))));
   }
 }
 

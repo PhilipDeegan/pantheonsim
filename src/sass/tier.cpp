@@ -1414,7 +1414,7 @@ void analyze(const Instr& ins, int sm, Program& prog, MOp& op) {
       return;
     }
     case Op::F2FP: {   // two f32 into f16 or bf16 halves
-      if (ins.guard_uniform || ins.src.size() < 2 || ins.f[5] == 4 || ins.f[3] >= 6 || !plain_kind(ins.src[0]) ||
+      if (ins.guard_uniform || ins.src.size() < 2 || ins.f[5] == 4 || ins.f[5] == 2 || ins.f[1] != 0 || ins.f[6] != 0 || ins.f[3] >= 6 || !plain_kind(ins.src[0]) ||
           !plain_kind(ins.src[1]) || ins.src[0].bnot || ins.src[1].bnot)
         return;
       if (!src32(b, ins.src[0], Dom::Flt, m.s[0], maxreg) || !src32(b, ins.src[1], Dom::Flt, m.s[1], maxreg)) return;
@@ -1444,7 +1444,8 @@ void analyze(const Instr& ins, int sm, Program& prog, MOp& op) {
       const unsigned need = ins.op == Op::HFMA2 ? 3u : 2u;
       // (the f32 result is HADD2 without .FTZ only: the half to float conversion ptxas emits)
       const bool f32out = ins.f[1];
-      if (ins.guard_uniform || ins.f[0] || ins.f[3] || (f32out && (ins.op != Op::HADD2 || ins.f[2])) || ins.src.size() < need) return;
+      // (.FTZ on an f16 result and .RELU are the interpreter's, which flushes and clamps the halves.)
+      if (ins.guard_uniform || ins.f[0] || ins.f[3] || ins.f[5] || (ins.f[2] && !f32out) || (f32out && (ins.op != Op::HADD2 || ins.f[2])) || ins.src.size() < need) return;
       // packed(): an immediate pair/single, or a register, uniform register, bank-0 word, with a half swizzle and |.|, -.
       const auto packed = [&](const Operand& o, Src& out, uint32_t& opbits) -> bool {
         opbits = 0;
