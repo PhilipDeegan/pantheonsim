@@ -1,3 +1,8 @@
+// The wavefront executor behind vgpu/amd_exec.hpp: runs the decoded
+// instructions of a kernel, work-groups of wavefronts over scalar and vector
+// registers, EXEC masking, LDS and the memory instructions, counters.
+// CDNA and the RDNA targets share it where the ISAs agree.
+
 #include "vgpu/amd_exec.hpp"
 #include "vgpu/amd_image.hpp"
 

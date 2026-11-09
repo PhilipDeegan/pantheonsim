@@ -72,8 +72,6 @@ void run(const amd::CodeObject& o, const char* name, MemoryManager& mem, const s
   amd::execute(d, mem);
 }
 
-const int kN = 64;
-
 [[maybe_unused]] uint64_t bits(float f) {
   uint32_t u = 0;
   std::memcpy(&u, &f, 4);

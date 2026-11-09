@@ -1,5 +1,5 @@
 // Where a lane's local-memory bytes live in a warp's array (the PTX interpreter's; the SASS executor keeps one frame per lane,
-// see "Local memory layout" in docs/performance.md for why).
+// see "Local memory layout" in docs/perf-design/rounds/04-speedup-branches-tier2-amd-tier.md for why).
 //
 // A warp's local memory is one array for all its lanes, laid out the way the hardware lays it out: by 4-byte words, so the
 // word `w` of lane `l` is at `(w * lanes + l) * 4`. Byte `o` of lane `l` is then at

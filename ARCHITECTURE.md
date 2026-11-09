@@ -111,7 +111,7 @@ Divergence: a branch that splits the active mask pushes the not-taken
 retires (`ret`), the next parked path pops. Reconvergence is min-PC: paths at
 the same pc merge and the lowest pc runs next, so `bar.sync` after a divergent
 region works. Full IPDOM reconvergence and irreducible control flow remain open
-(TODO.md, "Partially implemented").
+(docs/gap-register.md, "Partially implemented").
 
 The interpreter favours plain, checkable code over speed. Correctness,
 determinism, and diagnosability outrank speed, and the project keeps zero
@@ -316,7 +316,7 @@ and their virtual profiles, diffs observable results, and turns every
 divergence into a regression test + a profile fix (`nvidia/tests/conformance/`,
 `nvidia/tools/`). Its reach is still partial: the verified profiles and the
 vendor libraries are covered, the rest of the profiles and a conformance
-database are open (docs/status.md, Roadmap):
+database are open (TODO.md):
 
 ```
 generated CUDA/PTX micro-test -> real H100 ---+

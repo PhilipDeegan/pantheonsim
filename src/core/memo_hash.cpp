@@ -1,7 +1,7 @@
 // The hash behind launch-level result caching (vgpu/memo.hpp). Four lanes of 64 bits, 32 bytes per step: each lane
 // takes one word with a multiply (a bijection of the lane) and a shift-xor, so a changed word always changes its
 // lane's state; the lanes are folded at the end with the length. 14 GB/s on one Zen 5 core, 4 KiB pages or megabytes alike
-// (docs/performance.md, Round sp35), which is what a page costs.
+// (docs/perf-design/rounds/10-rounds-sp19-sp27.md, Round sp35), which is what a page costs.
 #include "vgpu/memo.hpp"
 
 #include <cstring>

@@ -163,7 +163,7 @@ __global__ void k_mfma(const _Float16* A, const _Float16* B, float* D, uint32_t 
 }
 
 
-// The other matrix forms (docs/performance.md, "The matrix instructions"): each computes D = n * (A x B) for a 16x16 tile of small
+// The other matrix forms (docs/perf-design/rounds/04-speedup-branches-tier2-amd-tier.md, "The matrix instructions"): each computes D = n * (A x B) for a 16x16 tile of small
 // integers, which every form represents and sums exactly, and compares with the host's. MI300X: integer, 8-bit float, bfloat16,
 // double and sparse MFMA. RX 7900 XTX and RX 9070 XT: WMMA (binary16 into float, and 8-bit integers). Lane layouts as in k_mfma:
 // A row l % 16 and B column l % 16, the lane's run of K after (l / 16) * (K / 4); D rows 4 * (l / 16) .. +3 of column l % 16 (the

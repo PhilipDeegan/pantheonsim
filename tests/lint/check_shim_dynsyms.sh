@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The shims must not export, or relocate by name, the std::variant dispatch tables (_ZNSt8__detail9__variant...): their
 # mangled names are 1,000 to 2,000 characters long, the loader hashes every name it looks up at every process start, and
-# exported they were a quarter of a small program's user cycles (docs/performance.md, "Round sp5"). The version scripts in
+# exported they were a quarter of a small program's user cycles (docs/perf-design/rounds/07-rounds-sp4-sp10.md, "Round sp5"). The version scripts in
 # CMakeLists.txt (VGPU_LOCAL_STD_TABLES) make them local. Usage: check_shim_dynsyms.sh <build dir> [lib ...]
 set -u
 build="${1:-${VGPU_BUILD_DIR:-}}"

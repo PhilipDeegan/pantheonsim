@@ -5,7 +5,7 @@ The SASS engine (src/sass/exec.cpp), the PTX interpreter (src/exec/interpreter.c
 kernels (src/simd/simd.cpp, lanes.cpp) and the AMD pre-decoded tier (amd/src/gcn_tier.cpp) are built outside link-time optimization with -falign-functions=64 -falign-loops=32 (CMakeLists.txt,
 VGPU_HOT_UNIT_FLAGS). Inside the link-time-optimized library every unrelated edit re-ordered the code and re-rolled the inlining of the engines'
 hot paths, and with it the speed of rows that run unchanged code at equal instruction counts, by up to 14 % on a Zen 5 host (the tensor kernels)
-and 3 to 5 % on the memory, launch and atomics rows (docs/performance.md, Round sp14). Outside LTO a unit's code depends on its own source only,
+and 3 to 5 % on the memory, launch and atomics rows (docs/perf-design/rounds/08-rounds-sp11-sp15.md, Round sp14). Outside LTO a unit's code depends on its own source only,
 and on a fixed alignment its layout does not move when something linked ahead of it does.
 
 This reads the unit's object file (ELF section headers; the standard library only) and fails when

@@ -279,7 +279,7 @@ inline bool mfma_have_avx2() { return mfma_avx2_switch(); }
 typedef double mfma_v4d __attribute__((vector_size(32), aligned(8)));
 // Returns whether any output is a NaN (the sums' own check, while they are still in registers).
 // Out of line, in gcn_matrix_kernels.cpp (a translation unit of its own, compiled without link-time optimization, with the loops on a fixed
-// alignment): the layout of the tile kernels then does not depend on what is linked ahead of them (docs/performance.md, Round sp13).
+// alignment): the layout of the tile kernels then does not depend on what is linked ahead of them (docs/perf-design/rounds/08-rounds-sp11-sp15.md, Round sp13).
 bool mfma_tile_f_avx2(uint32_t m, uint32_t n, uint32_t k, const double* a, const double* bk, const double* c, double* out);
 #endif
 inline void mfma_tile_f_sse(uint32_t m, uint32_t n, uint32_t k, const double* a, const double* bk, const double* c, double* out) {

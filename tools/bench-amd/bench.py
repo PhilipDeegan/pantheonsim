@@ -25,7 +25,7 @@ What "wave-instruction" means here.  The interpreter's own total
 is the sum of the SQ_INSTS_{SALU,SMEM,VALU,VMEM,LDS,BRANCH,SENDMSG} counters:
 every instruction the interpreter classifies, which leaves out the SOPP
 instructions that are none of those (s_waitcnt, s_nop, s_endpgm, s_barrier ...).
-docs/performance.md ("The AMD engine") says by how much that undercounts.
+docs/perf-design/rounds/03-amd-engine-baseline.md ("The AMD engine") says by how much that undercounts.
 On a simulated Radeon card, which offers only the counters a real one lists, the count is the interpreter's own
 instruction total as the two by-wave-size counters (SQ_WAVE32_INSTS + SQ_WAVE64_INSTS).
 """

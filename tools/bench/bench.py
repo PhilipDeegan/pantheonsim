@@ -1068,7 +1068,7 @@ def profile_one(perf, binary, workload, engine, build, args, workdir):
 def profile_mode(args, names, engines, builds, binary):
     perf = perf_binary(args)
     if not perf:
-        die("profile needs perf (--perf PATH or $PERF); see docs/performance.md for how it was obtained", 1)
+        die("profile needs perf (--perf PATH or $PERF); see docs/perf-design/rounds/01-harness-baseline-profiles.md for how it was obtained", 1)
     build = builds["A"]["dir"]
     groups = {}
     for w in names:

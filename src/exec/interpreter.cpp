@@ -1,5 +1,5 @@
 asm(".pushsection .text,\"ax\",@progbits\n.p2align 12\n.skip 2816\n.popsection");
-// (The line above puts this unit's code on a 4096-byte boundary, then 2816 bytes in (the offset that measured best for the PTX interpreter's rows): where it starts modulo a page no longer depends on the units linked ahead of it. docs/performance.md, Round sp14, combined.)
+// (The line above puts this unit's code on a 4096-byte boundary, then 2816 bytes in (the offset that measured best for the PTX interpreter's rows): where it starts modulo a page no longer depends on the units linked ahead of it. docs/perf-design/rounds/08-rounds-sp11-sp15.md, Round sp14, combined.)
 // The SIMT warp interpreter — VirtualGPU's CPU execution engine.
 //
 // Execution model (see ARCHITECTURE.md):
@@ -17,11 +17,11 @@ asm(".pushsection .text,\"ax\",@progbits\n.p2align 12\n.skip 2816\n.popsection")
 //    per-thread .local frames live in a reserved window (kLocalVaBase) that
 //    generic loads/stores route to the executing lane's private buffer —
 //    which is exactly PTX .local semantics. cvta is identity everywhere.
-//  - Atomics are read-modify-write in fixed lane order — trivially atomic
-//    and deterministic in this sequential engine.
+//  - Atomics are read-modify-write in fixed lane order within a warp.
 //  - Warps in a block run under a pluggable Scheduler; a warp yields only at
-//    barriers or retirement. Blocks run sequentially in a fixed order.
-//    Everything is deterministic by construction.
+//    barriers or retirement. Blocks run on VGPU_THREADS host threads (default:
+//    every core); VGPU_THREADS=1 runs them in a fixed order, which is the
+//    deterministic schedule (ARCHITECTURE.md).
 #include <algorithm>
 #if defined(__x86_64__)
 #include <immintrin.h>

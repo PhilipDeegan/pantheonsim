@@ -143,10 +143,6 @@ inline Npp8u sat8u(double v) {
   const double r = (c + 6755399441055744.0) - 6755399441055744.0;
   return static_cast<Npp8u>(r < 0 ? 0 : (r > 255 ? 255 : r));
 }
-inline Npp16u sat16u(double v) {
-  const double r = std::nearbyint(v);
-  return static_cast<Npp16u>(r < 0 ? 0 : (r > 65535 ? 65535 : r));
-}
 
 bool bad_roi(NppiSize roi) { return roi.width <= 0 || roi.height <= 0; }
 

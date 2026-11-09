@@ -76,6 +76,6 @@ Each setting is described in [docs/config.md](docs/config.md). It also runs [in 
 
 ## More
 
-[Getting started](docs/getting-started.md), [the machine](docs/machine-simulator.md), [commands](docs/cli.md), [status and limits](docs/status.md), [architecture](ARCHITECTURE.md), [contributing](CONTRIBUTING.md), [governance](GOVERNANCE.md), [security](SECURITY.md), [code of conduct](CODE_OF_CONDUCT.md). Questions go in [Discussions](https://github.com/pantheongpu/pantheonsim/discussions), bugs in [issues](https://github.com/pantheongpu/pantheonsim/issues).
+[All docs](docs/README.md), [Getting started](docs/getting-started.md), [the machine](docs/machine-simulator.md), [commands](docs/cli.md), [status and limits](docs/status.md), [architecture](ARCHITECTURE.md), [contributing](CONTRIBUTING.md), [governance](GOVERNANCE.md), [security](SECURITY.md), [code of conduct](CODE_OF_CONDUCT.md). Questions go in [Discussions](https://github.com/pantheongpu/pantheonsim/discussions), bugs in [issues](https://github.com/pantheongpu/pantheonsim/issues).
 
 Apache-2.0. CUDA is a trademark of NVIDIA. This project is not affiliated with NVIDIA or AMD.

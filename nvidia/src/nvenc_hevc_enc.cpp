@@ -24,11 +24,6 @@ constexpr int kMaxTrDepth = 3;           // max_transform_hierarchy_depth_intra 
 
 inline int clip3(int lo, int hi, int v) { return v < lo ? lo : (v > hi ? hi : v); }
 inline uint8_t clip8(int v) { return static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v)); }
-inline int ilog2(int n) {
-  int l = 0;
-  while ((1 << (l + 1)) <= n) ++l;
-  return l;
-}
 
 // ---- transforms ---------------------------------------------------------------------------------------------------------------
 
