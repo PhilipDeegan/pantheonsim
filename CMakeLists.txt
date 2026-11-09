@@ -3021,7 +3021,7 @@ if(TARGET vgpucublas)
                           "cutensornet_paths:cutensornet" "cutensornet_state_paths:cutensornet" "cutensornet_state_gradient:cutensornet" "cutensornet_decomp_paths:cutensornet"
                           "solver_metis_paths:cusolver:cusparse"
                           "blas_u8gemm_paths:cublas" "blas_emulation_paths:cublas" "sparse_color_paths:cusparse"
-                          "lt_emulation_paths:cublasLt:cublas")
+                          "lt_emulation_paths:cublasLt:cublas" "fft_inplace_real:cufft" "blas_tf32_rounding:cublas:cublasLt")
     string(REPLACE ":" ";" _parts "${_check}")
     list(POP_FRONT _parts _name)
     add_test(NAME e2e_${_name}
@@ -3040,6 +3040,14 @@ if(TARGET vgpucublas)
       SKIP_REGULAR_EXPRESSION "^SKIP:"
       TIMEOUT 300)
   endforeach()
+
+  # The same TF32 program with NVIDIA_TF32_OVERRIDE=0: TF32 is off everywhere, explicit FAST_TF32 included.
+  add_test(NAME e2e_blas_tf32_override
+           COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_lib_check.sh blas_tf32_rounding cublas cublasLt)
+  set_tests_properties(e2e_blas_tf32_override PROPERTIES
+    ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR};NVIDIA_TF32_OVERRIDE=0"
+    SKIP_REGULAR_EXPRESSION "^SKIP:"
+    TIMEOUT 300)
 
   # cuSOLVER's Jacobi solvers (syevd, syevj, gesvd, gesvdj), each result checked by its defining property and, on the
   # simulator, bit for bit against what the plain loops gave before their sweeps were put on vector lanes.
@@ -3882,6 +3890,17 @@ if(TARGET vgpucudart)
   set_tests_properties(e2e_dpx_intrinsics PROPERTIES
     DEPENDS vgpucudart
     ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR};VGPU_SASS_PROGRAMS=dpx_intrinsics:75;VGPU_SASS_ARCHS=sm_80 sm_89 sm_90 sm_120"
+    SKIP_REGULAR_EXPRESSION "^SKIP:"
+    TIMEOUT 1800)
+endif()
+
+# min and max in every PTX form (f32, f16, f16x2, bf16, bf16x2 with .ftz, .NaN and .xorsign.abs; the sm_100 three-input f32 forms), against a
+# model of the ISA, on sm_80 and up, SASS (interpreter and tier) and PTX (pantheonsim #547 and its siblings).
+if(TARGET vgpucudart)
+  add_test(NAME e2e_minmax_forms COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_sass_archs.sh)
+  set_tests_properties(e2e_minmax_forms PROPERTIES
+    DEPENDS vgpucudart
+    ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR};VGPU_SASS_PROGRAMS=minmax_forms:80;VGPU_SASS_ARCHS=sm_80 sm_86 sm_89 sm_90 sm_100 sm_120"
     SKIP_REGULAR_EXPRESSION "^SKIP:"
     TIMEOUT 1800)
 endif()
@@ -4773,7 +4792,7 @@ endif()
 foreach(_t e2e_cutlass_gemm e2e_cutlass_sm120 e2e_cutlass_sm100 e2e_cutlass_hopper e2e_cutlass_sm103
            e2e_cutlass_sm100_conv e2e_cutlass_fmha e2e_tma_gemm_cute e2e_wgmma_cute
            e2e_tma_reduce_cute e2e_tensormap_replace_cute e2e_sass_archs e2e_device_runtime
-           e2e_sync_masks e2e_dpx_intrinsics e2e_packed_f32x2)
+           e2e_sync_masks e2e_dpx_intrinsics e2e_minmax_forms e2e_packed_f32x2)
   if(TEST ${_t})
     set_property(TEST ${_t} APPEND PROPERTY RESOURCE_LOCK nvcc_memory)
   endif()

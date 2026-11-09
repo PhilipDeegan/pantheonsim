@@ -1161,6 +1161,26 @@ void dec_hfma2(Instr& ins, const Word& w) {
   split_half_imm(ins, w.bit(85));
 }
 
+// HMNMX2 d, a, b, p: the min (p) or max of two packed f16 (or bf16) pairs, lane by lane. .NAN returns a NaN if either input
+// is one, .XORSIGN the smaller or larger magnitude with the XOR of the inputs' signs (the operands carry |.|).
+void dec_hmnmx2(Instr& ins, const Word& w) {
+  ins.op = Op::HMNMX2;
+  ins.mnemonic = "HMNMX2";
+  if (w.bit(85)) ins.mods.push_back("BF16_V2");
+  if (w.bit(80)) ins.mods.push_back("FTZ");
+  if (w.bit(81)) ins.mods.push_back("NAN");
+  if (w.bit(82)) ins.mods.push_back("XORSIGN");
+  ins.f[0] = w.bit(85);
+  ins.f[1] = w.bit(80);
+  ins.f[2] = w.bit(81);
+  ins.f[3] = w.bit(82);
+  ins.dst.push_back(dst_reg(w, false, ins.sm));
+  alu2(ins, w, kUnsigned);
+  half_src_mods(ins, w);
+  split_half_imm(ins, w.bit(85));
+  ins.src.push_back(pred_src(w, 87, 90));
+}
+
 const char* const kFloatCmp[] = {"F",  "LT",  "EQ",  "LE",  "GT",  "NE",  "GE",  "NUM",
                                  "NAN", "LTU", "EQU", "LEU", "GTU", "NEU", "GEU", "T"};
 
@@ -1939,8 +1959,10 @@ void dec_fmnmx(Instr& ins, const Word& w) {
   ins.mnemonic = "FMNMX";
   if (w.bit(80)) ins.mods.push_back("FTZ");
   if (w.bit(81)) ins.mods.push_back("NAN");   // a NaN operand gives NaN
+  if (w.bit(82)) ins.mods.push_back("XORSIGN");   // min/max.xorsign.abs: the magnitude of the operands (they carry |.|), signed by the XOR of theirs
   ins.f[0] = w.bit(80);
   ins.f[1] = w.bit(81);
+  ins.f[2] = w.bit(82);
   ins.dst.push_back(dst_reg(w, false, ins.sm));
   alu2(ins, w, kFloat);
   float_srcs(ins, w);
@@ -3721,6 +3743,7 @@ const std::unordered_map<unsigned, Dec>& float_table() {
          i.mods.insert(i.mods.begin(), "MMA");
        }},
       {0x32, dec_hmul2},
+      {0x40, dec_hmnmx2},
       {0x33, [](Instr& i, const Word& w) { dec_hset2(i, w, false); }},
       {0x34, [](Instr& i, const Word& w) { dec_hset2(i, w, true); }},
       {0x28, [](Instr& i, const Word& w) { dec_dop(i, w, Op::DMUL, "DMUL", 2); }},

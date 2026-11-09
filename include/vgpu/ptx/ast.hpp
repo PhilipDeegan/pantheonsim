@@ -787,6 +787,9 @@ struct OpFma { Type ty; Reg dst; Operand a, b, c; FRound round = FRound::Nearest
   // f64 only (mark_nan_order): `a` is the later-defined multiplicand, so it is the one ptxas puts first in the card's NaN order (b, c, a) of
   // the engines' rule; the engines read the multiplicands exchanged.
   bool nan_swap_ab = false; };
+// min / max of three f32 (PTX ISA 8.8, sm_100): d = min(a, b, c) or max(a, b, c), with .ftz flushing subnormal inputs, .abs taking
+// every input's magnitude first, and .NaN giving the canonical NaN when any input is one (without it a NaN input loses).
+struct OpFloatMinMax3 { bool is_min = false, nan_propagate = false, ftz = false, abs = false; Reg dst; Operand a, b, c; };
 // Packed half2 SIMD: one 32-bit register holds two f16 lanes.
 // Half-precision arithmetic. One node covers four shapes, because they differ
 // only in how many 16-bit values a 32-bit register holds and how those bits
@@ -1308,7 +1311,7 @@ struct OpCoopMma {
 
 using Op = std::variant<OpLd, OpSt, OpMov, OpMovPack, OpMovUnpack, OpCvta, OpCvt, OpNot, OpNeg, OpAbs, OpMath, OpBfe, OpBfi,
                         OpBrev, OpPopcClz, OpShfl, OpVote, OpPrmt, OpLop3, OpSlct, OpTestp, OpSad, OpMatch, OpMul24, OpSzext, OpFns, OpMbarrier, OpBfind, OpElect, OpIsSpacep, OpCvtFp8, OpVideo, OpCopysign, OpDp4a, OpBmsk, OpTrap, OpTex, OpTxq, OpSuld, OpSust, OpBarRed, OpMovPred, OpRedux, OpCvtF16x2, OpCvtTf32, OpCvtPack, OpLdMatrix, OpStMatrix, OpMma, OpWgmma, OpTcgen05, OpClc, OpClusterBarrier, OpBulkCopy, OpBulkGroup, OpIntBin, OpMadLo, OpMulWide, OpMadWide, OpMulHi, OpMadHi, OpShf, OpIsTypep, OpStBulk, OpStack,
-                        OpFloatBin, OpFma, OpF16x2Bin, OpF16x2Fma, OpF16x2Neg, OpF32x2, OpWmmaMma, OpWmmaLoad, OpWmmaStore, OpSetp, OpSet, OpSelp, OpPredBin, OpNotPred, OpAtom, OpBra, OpBrx, OpBar,
+                        OpFloatBin, OpFloatMinMax3, OpFma, OpF16x2Bin, OpF16x2Fma, OpF16x2Neg, OpF32x2, OpWmmaMma, OpWmmaLoad, OpWmmaStore, OpSetp, OpSet, OpSelp, OpPredBin, OpNotPred, OpAtom, OpBra, OpBrx, OpBar,
                         OpRet, OpDeclSlot, OpStSlot, OpLdSlot, OpCall, OpCpAsync, OpCpAsyncGroup, OpMovMatrix, OpNop, OpFence, OpActiveMask, OpMapa, OpGetCtaRank, OpStAsync, OpTensormapReplace, OpTensormapCopy, OpSpCompress, OpSpDecompress, OpPackedInt, OpF8x4Arith, OpLibm, OpWgCollective, OpCoopMma>;
 
 // An instruction of the commonest, simplest forms, decoded once at parse time

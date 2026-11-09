@@ -13,6 +13,21 @@ release says what runs and what it produces, never how fast a real GPU would run
   run is slower on one kernel than another (pantheonsim #551).
 - CI: the workloads summary and the "Pantheon workloads failing on main" issue name the machines whose job wrote no results (a hosted
   runner lost mid-build leaves no report, and the count alone did not say which) (pantheonsim #545).
+- PTX and SASS `min`/`max`: the SASS tier could not decode `HMNMX2`, the instruction behind `min`/`max` on `f16`, `f16x2`, `bf16` and
+  `bf16x2` (`__hmin2`, `__hmax2`, `min.NaN.f16`, ...), so a kernel using one stopped with an illegal-memory-access error; it now runs
+  them, with `.ftz`, `.NaN` and `.xorsign.abs` as the PTX engine and an RTX 3060 give. `FMNMX.XORSIGN` (`min.xorsign.abs.f32`) ignored
+  its sign rule on SASS and returned an unsigned magnitude. The PTX engine accepts the three-input `min`/`max{.ftz}{.NaN}{.abs}.f32` of
+  sm_100 that ptxas emits (it was an unsupported-PTX error). `max.s32.relu`, `__viaddmax_s32_relu` and the other `.relu` forms of
+  pantheonsim #547 already ran since #451; new e2e test `e2e_minmax_forms` sweeps every sibling form (the relu and DPX ones are in
+  `e2e_dpx_intrinsics`).
+- cuFFT: an in-place real transform (`cufftExecR2C`, `D2Z`, `C2R`, `Z2D` on one buffer, no advanced layout) reads and writes the
+  padded real array cuFFT documents (each row of the fastest axis is `2 * (n / 2 + 1)` reals, a batch is the complex distance
+  apart). It read the array as dense, so 2D and 3D results were wrong and so was a 1D batch (pantheonsim #548).
+- cuBLAS and cuBLASLt: `CUBLAS_TF32_TENSOR_OP_MATH`, `CUBLAS_COMPUTE_32F_FAST_TF32` and the FP16/BF16 fast compute types round the
+  FP32 inputs of the host-computed GEMMs (A and B, not C) as a tensor core does: TF32 to nearest with ties away from zero
+  (measured on an RTX 3060), FP16 and BF16 to nearest even, for `Sgemm`, `SgemmEx`, `Cgemm`, the batched forms, `GemmEx` and
+  `cublasLtMatmul`, from the size the card starts using tensor cores; `NVIDIA_TF32_OVERRIDE=0` is honoured. Before, the result was the plain
+  FP32 one in every mode (pantheonsim #549; the rules and what is modelled are in `nvidia/docs/cublas.md`).
 - CUDA runtime and driver: a zero-byte `cudaMalloc`, `cudaMallocManaged`, `cudaMallocHost`, `cudaHostAlloc` or `cudaMallocAsync` succeeds
   and gives a NULL pointer, as on a GPU, where it gave a distinct non-NULL one (Gpufit tests its unused buffers against NULL); the
   driver's `cuMemHostAlloc`/`cuMemAllocHost` of 0 bytes do the same, and `cuMemAlloc(0)` is `CUDA_ERROR_INVALID_VALUE` with the

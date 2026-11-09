@@ -4455,6 +4455,7 @@ class Parser {
       bool carry_out = false;
       bool nan_propagate = false;
       bool sat = false, xorsign_abs = false, ftz = false, relu = false;
+      bool abs_seen = false, xorsign_seen = false;
       bool wide = false, lo = false, hi = false;
       FRound frnd = FRound::Nearest;
       bool frnd_explicit = false;
@@ -4486,7 +4487,7 @@ class Parser {
         else if (p == "NaN") nan_propagate = true;
         // .xorsign.abs takes the magnitude and xors the signs; a semantic
         // change rather than an accuracy one, so it is carried to execution.
-        else if (p == "xorsign" || p == "abs") xorsign_abs = true;
+        else if (p == "xorsign" || p == "abs") { xorsign_abs = true; if (p == "abs") abs_seen = true; else xorsign_seen = true; }
         // .sat clamps: floats into [0,1], add/sub.s32 into the s32 range.
         else if (p == "sat") sat = true;
         // min/max{.relu}.s32 (PTX ISA 8.0, sm_90): the result, or 0 when it is negative.
@@ -4576,6 +4577,31 @@ class Parser {
             {"min", FloatBinOp::Min}, {"max", FloatBinOp::Max}, {"div", FloatBinOp::Div}};
         auto it = fops.find(base_op);
         if (it == fops.end()) return unsupported("float op '" + base_op + "'");
+        if ((base_op == "min" || base_op == "max") && ty.bits == 32 && (abs_seen && !xorsign_seen)) {
+          // min/max{.ftz}{.NaN}{.abs}.f32 d, a, b, c (PTX ISA 8.8, sm_100): three inputs; a bare .abs is this form's.
+          OpFloatMinMax3 m3;
+          m3.is_min = base_op == "min";
+          m3.nan_propagate = nan_propagate;
+          m3.ftz = ftz;
+          m3.abs = true;
+          int sm = 0;
+          std::sscanf(target_.c_str(), "sm_%d", &sm);
+          if (sm < 100)
+            fail(ins.line, opcode + " requires an sm_100 or later target; this module targets " +
+                               (target_.empty() ? std::string("nothing") : target_));
+          m3.dst = expect_reg_operand("destination");
+          expect_punct(",");
+          m3.a = parse_operand();
+          expect_punct(",");
+          m3.b = parse_operand();
+          expect_punct(",");
+          m3.c = parse_operand();
+          ins.op = std::move(m3);
+          expect_punct(";");
+          ins.text = reconstruct_from(start_tok);
+          ins.opcode_id = intern_opcode(parts[0]);
+          return ins;
+        }
         OpFloatBin op;
         op.round = frnd;
         op.round_explicit = frnd_explicit;
@@ -4591,7 +4617,27 @@ class Parser {
         op.a = parse_operand();
         expect_punct(",");
         op.b = parse_operand();
-        ins.op = op;
+        if ((base_op == "min" || base_op == "max") && ty.bits == 32 && peek_punct(",")) {
+          // min/max{.ftz}{.NaN}.f32 d, a, b, c (PTX ISA 8.8, sm_100) without .abs.
+          if (xorsign_abs) return unsupported(opcode + " with three inputs takes .abs only");
+          int sm = 0;
+          std::sscanf(target_.c_str(), "sm_%d", &sm);
+          if (sm < 100)
+            fail(ins.line, opcode + " requires an sm_100 or later target; this module targets " +
+                               (target_.empty() ? std::string("nothing") : target_));
+          next();
+          OpFloatMinMax3 m3;
+          m3.is_min = base_op == "min";
+          m3.nan_propagate = nan_propagate;
+          m3.ftz = ftz;
+          m3.dst = op.dst;
+          m3.a = op.a;
+          m3.b = op.b;
+          m3.c = parse_operand();
+          ins.op = std::move(m3);
+        } else {
+          ins.op = op;
+        }
       } else if (wide) {
         // .wide doubles the operand width: 16-bit sources give a 32-bit result,
         // 32-bit give 64. Quantized kernels use the 16-bit form for byte-pair

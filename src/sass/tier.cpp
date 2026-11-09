@@ -1327,9 +1327,9 @@ void analyze(const Instr& ins, int sm, Program& prog, MOp& op) {
       return;
     }
     case Op::FMNMX: {   // min or max by a predicate (fast_float)
-      if (ins.guard_uniform || ins.src.size() < 3 || !plain_kind(ins.src[0]) || !plain_kind(ins.src[1]) || ins.src[0].bnot ||
+      if (ins.guard_uniform || ins.f[2] || ins.src.size() < 3 || !plain_kind(ins.src[0]) || !plain_kind(ins.src[1]) || ins.src[0].bnot ||
           ins.src[1].bnot || (ins.src[2].kind != Kind::Pred && ins.src[2].kind != Kind::UPred))
-        return;
+        return;   // (.XORSIGN is not a tier form)
       if (!src32(b, ins.src[0], Dom::Flt, m.s[0], maxreg) || !src32(b, ins.src[1], Dom::Flt, m.s[1], maxreg)) return;
       m.p = pred_src(ins.src[2]);
       m.a = ins.f[0] != 0;   // flush to zero

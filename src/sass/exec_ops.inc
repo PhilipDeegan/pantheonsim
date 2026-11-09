@@ -79,7 +79,7 @@ bool executes(const Instr& ins) {
     case Op::UTCSHIFT: case Op::UTCATOMSWS: case Op::STAS: case Op::REDAS: case Op::UGETNEXTWORKID:
     case Op::DADD: case Op::DFMA: case Op::DMUL: case Op::DSETP: case Op::F2F: case Op::F2I:
     case Op::FADD: case Op::FCHK: case Op::FFMA: case Op::FMNMX: case Op::FMUL: case Op::FRND: case Op::FSEL: case Op::FSWZADD:
-    case Op::FSET: case Op::FSETP: case Op::HADD2: case Op::HFMA2: case Op::HMUL2: case Op::HSET2: case Op::HSETP2:
+    case Op::FSET: case Op::FSETP: case Op::HADD2: case Op::HFMA2: case Op::HMUL2: case Op::HSET2: case Op::HSETP2: case Op::HMNMX2:
     case Op::I2F: case Op::I2FP: case Op::I2I: case Op::I2IP: case Op::MUFU:
     case Op::ATOM: case Op::ATOMG: case Op::ATOMS: case Op::LD: case Op::LDC: case Op::LDG: case Op::LDGDEPBAR:
     case Op::LDGSTS: case Op::LDL: case Op::LDS: case Op::RED: case Op::ST: case Op::STG:
@@ -2046,9 +2046,9 @@ bool Runner::fast_float(Warp& w, const Instr& ins, Mask ex) {
       return true;
     }
     case Op::FMNMX: {
-      if (ins.src.size() < 3 || !plain(ins.src[0]) || !plain(ins.src[1]) || ins.src[0].bnot || ins.src[1].bnot ||
+      if (ins.f[2] || ins.src.size() < 3 || !plain(ins.src[0]) || !plain(ins.src[1]) || ins.src[0].bnot || ins.src[1].bnot ||
           !is_pred(ins.src[2]) || ins.dst[0].kind != Kind::Reg)
-        return false;
+        return false;   // (.XORSIGN takes the general path)
       sk->fmnmx(r, lanes(0, ins.src[0], true), lanes(1, ins.src[1], true), static_cast<uint32_t>(pmask(ins.src[2])), ins.f[0] != 0,
                 ins.f[1] != 0);
       if (ins.dst[0].reg != kRZ) store_row(ins.dst[0].reg, r);
@@ -2597,7 +2597,10 @@ void Runner::exec_float(Block&, Warp& w, const Instr& ins, Mask ex) {
         else if (b != b) r = a;
         else if (a == 0 && b == 0) r = mn ? (std::signbit(a) ? a : b) : (std::signbit(a) ? b : a);
         else r = mn ? std::min(a, b) : std::max(a, b);
-        write32(w, ins.dst[0], l, f32_bits(r));
+        uint32_t bits = f32_bits(r);
+        // .XORSIGN: the smaller or larger magnitude (the operands carry |.|), signed by the XOR of the operands' own signs.
+        if (ins.f[2]) bits = (bits & 0x7fffffffu) | ((read32(w, ins.src[0], l) ^ read32(w, ins.src[1], l)) & 0x80000000u);
+        write32(w, ins.dst[0], l, bits);
       });
       return;
     case Op::MUFU: {
@@ -2900,6 +2903,56 @@ void Runner::exec_float(Block&, Warp& w, const Instr& ins, Mask ex) {
       });
       return;
     }
+    case Op::HMNMX2: {
+      // The min (p) or max of two f16 (or bf16) lanes at once, as the PTX engine's min/max.{f16,f16x2,bf16,bf16x2} computes each
+      // lane (and as an RTX 3060 does, tests e2e minmax_forms): in double, a NaN operand losing unless .NAN, min(+0, -0) = -0,
+      // .FTZ flushing subnormal f16 inputs and the result, .XORSIGN giving the magnitude the XOR of the inputs' signs (taken before
+      // the operands' |.|). A NaN result is the canonical 0x7fff.
+      const bool bf = ins.f[0], fz = ins.f[1], nanp = ins.f[2], xs = ins.f[3];
+      const bool imm_pair = ins.src.size() > 3 && ins.src[1].kind == Kind::FImm && ins.src[2].kind == Kind::FImm;
+      const size_t next = imm_pair ? 3 : 2;
+      each_lane(ex, [&](unsigned l) {
+        const bool mn = pred(w, ins.src[next], l);
+        // A source's two halves, after its swizzle: the raw bits, and with |.| and - applied.
+        const auto halves = [&](const Operand& o, uint16_t raw[2], uint16_t val[2]) {
+          const uint32_t v = read32(w, o, l);
+          raw[0] = static_cast<uint16_t>(v);
+          raw[1] = static_cast<uint16_t>(v >> 16);
+          if (o.suffix == ".H0_H0") raw[1] = raw[0];
+          else if (o.suffix == ".H1_H1") raw[0] = raw[1];
+          for (int i = 0; i < 2; ++i) {
+            val[i] = raw[i];
+            if (o.abs) val[i] &= 0x7fffu;
+            if (o.neg) val[i] ^= 0x8000u;
+          }
+        };
+        uint16_t ar[2], av[2], br[2], bv[2];
+        halves(ins.src[0], ar, av);
+        if (imm_pair) {
+          br[1] = bv[1] = static_cast<uint16_t>(ins.src[1].fbits);   // the high half prints first
+          br[0] = bv[0] = static_cast<uint16_t>(ins.src[2].fbits);
+        } else {
+          halves(ins.src[1], br, bv);
+        }
+        uint32_t out = 0;
+        for (int i = 0; i < 2; ++i) {
+          const uint16_t xa = fz_half(av[i], bf, fz), xb = fz_half(bv[i], bf, fz);
+          const double x = bf ? static_cast<double>(bf16_to_f32(xa)) : static_cast<double>(half_to_f32(xa));
+          const double y = bf ? static_cast<double>(bf16_to_f32(xb)) : static_cast<double>(half_to_f32(xb));
+          double v;
+          if (x == 0 && y == 0) v = mn ? (std::signbit(x) || std::signbit(y) ? -0.0 : 0.0) : (std::signbit(x) && std::signbit(y) ? -0.0 : 0.0);
+          else v = mn ? std::fmin(x, y) : std::fmax(x, y);
+          const bool any_nan = x != x || y != y;
+          if (nanp && any_nan) v = std::numeric_limits<double>::quiet_NaN();
+          uint16_t h = v != v ? uint16_t{0x7fff} : bf ? f64_to_bf16(v) : f64_to_half(v);
+          const bool h_nan = bf ? (h & 0x7fffu) > 0x7f80u : (h & 0x7fffu) > 0x7c00u;
+          if (xs && !h_nan) h = static_cast<uint16_t>((h & 0x7fffu) | ((ar[i] ^ br[i]) & 0x8000u));
+          out |= static_cast<uint32_t>(fz_half(h, bf, fz)) << (16 * i);
+        }
+        write32(w, ins.dst[0], l, out);
+      });
+      return;
+    }
     case Op::FMNMX3:   // the min (p) or max of three, NaN losing unless .NAN
       each_lane(ex, [&](unsigned l) {
         const bool fz = ins.f[0], mn = pred(w, ins.src[3], l);
@@ -2913,7 +2966,8 @@ void Runner::exec_float(Block&, Warp& w, const Instr& ins, Mask ex) {
           else if (r == 0 && b == 0) r = mn ? (std::signbit(r) ? r : b) : (std::signbit(r) ? b : r);
           else r = mn ? std::min(r, b) : std::max(r, b);
         }
-        write32(w, ins.dst[0], l, ins.f[1] && nan ? 0x7fffffffu : f32_bits(r));
+        // (Three NaNs give the canonical NaN, as FMNMX does for two -- measured on an RTX 3060; not measured on an sm_100 part.)
+        write32(w, ins.dst[0], l, (ins.f[1] && nan) || r != r ? 0x7fffffffu : f32_bits(r));
       });
       return;
     case Op::FSETP: case Op::FSET: {
