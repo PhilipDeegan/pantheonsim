@@ -36,6 +36,7 @@ std::vector<std::string> run_child(const char* value, int ms) {
   char path[] = "/tmp/vgpu-host-stats-XXXXXX";
   const int fd = mkstemp(path);
   close(fd);
+  std::fflush(stdout);   // (a child would write the parent's buffered lines again)
   const pid_t pid = fork();
   if (pid == 0) {
     setenv("VGPU_HOST_STATS", value, 1);
