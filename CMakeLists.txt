@@ -44,6 +44,7 @@ endif()
 set(VGPU_PGO "" CACHE STRING "Profile-guided optimization: generate, use, or empty for off")
 set_property(CACHE VGPU_PGO PROPERTY STRINGS "" generate use)
 set(VGPU_PGO_DIR "${CMAKE_BINARY_DIR}/pgo" CACHE PATH "Where the PGO profile (.gcda files) is written and read")
+option(VGPU_PGO_STRICT "With VGPU_PGO=use: a source that does not match its profile is a compile error" ON)
 if(VGPU_PGO)
   if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     message(FATAL_ERROR "VGPU_PGO is written for GCC (-fprofile-generate=DIR); this is ${CMAKE_CXX_COMPILER_ID}")
@@ -52,10 +53,17 @@ if(VGPU_PGO)
     # prefer-atomic: a training run may use several host threads.
     set(_pgo_flags -fprofile-generate=${VGPU_PGO_DIR} -fprofile-update=prefer-atomic)
   elseif(VGPU_PGO STREQUAL "use")
-    # A function whose source changed since the profile was taken is compiled
-    # without it (-Wno-coverage-mismatch), not rejected.
-    set(_pgo_flags -fprofile-use=${VGPU_PGO_DIR} -fprofile-correction -Wno-missing-profile
-                   -Wno-coverage-mismatch)
+    # VGPU_PGO_STRICT (default): a function whose source changed since the profile was taken is a
+    # compile error (-Werror=coverage-mismatch), so a stale profile can never be used silently.
+    # OFF: such a function is compiled without its profile and nothing is said (the old behaviour).
+    # A translation unit with no profile file at all stays silent either way (-Wno-missing-profile):
+    # tests and tools that training does not run have none; scripts/pgo-build.sh counts them.
+    set(_pgo_flags -fprofile-use=${VGPU_PGO_DIR} -fprofile-correction -Wno-missing-profile)
+    if(VGPU_PGO_STRICT)
+      list(APPEND _pgo_flags -Werror=coverage-mismatch)
+    else()
+      list(APPEND _pgo_flags -Wno-coverage-mismatch)
+    endif()
   else()
     message(FATAL_ERROR "VGPU_PGO must be generate, use or empty, not '${VGPU_PGO}'")
   endif()
@@ -4071,6 +4079,10 @@ if(Python3_Interpreter_FOUND)
   # A curl that downloads a file retries on any error (a dropped HTTP/2 stream is not retried by --retry alone).
   add_test(NAME lint_curl_retries
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/lint/check_curl_retries.py)
+  # The pieces of scripts/pgo-build.sh (training runner, profile fingerprint, gcc's merge and the strict use step) on a tiny
+  # manifest and a tiny C program: seconds, no simulator build. Skipped (77) where gcc or gcov-tool is missing.
+  add_test(NAME lint_pgo_pipeline COMMAND bash ${CMAKE_SOURCE_DIR}/tests/lint/check_pgo_pipeline.sh)
+  set_tests_properties(lint_pgo_pipeline PROPERTIES SKIP_RETURN_CODE 77)
   # A key repeated in a workflow file makes GitHub refuse the whole file (it then runs on every push as a
   # failure with no jobs, and its schedule stops): the check reads every workflow for one.
   add_test(NAME lint_workflow_yaml

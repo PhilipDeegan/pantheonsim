@@ -1,0 +1,58 @@
+# PGO held-out test manifest: programs the training manifest never runs. scripts/pgo/ab.py measures a profile on these.
+
+# --- NVIDIA
+nv/polybench/3DCONV | sass | 1 | 1 | 60 | @CORP@/polybench/bin | - | @CORP@/polybench/bin/3DCONV
+nv/polybench/3DCONV-ptx | ptx | 1 | 1 | 240 | @CORP@/polybench/bin | - | @CORP@/polybench/bin/3DCONV
+nv/polybench/JACOBI1D | sass | 1 | 1 | 60 | @CORP@/polybench/bin | - | @CORP@/polybench/bin/JACOBI1D
+nv/polybench/JACOBI1D-ptx | ptx | 1 | 1 | 240 | @CORP@/polybench/bin | - | @CORP@/polybench/bin/JACOBI1D
+nv/polybench/SYRK | sass | 1 | 1 | 60 | @CORP@/polybench/bin | - | @CORP@/polybench/bin/SYRK
+nv/rodinia/pathfinder | sass | 1 | 1 | 60 | tmp | - | @CORP@/rodinia/bin/pathfinder 100000 100 20
+nv/rodinia/hotspot | sass | 1 | 1 | 60 | tmp | - | @CORP@/rodinia/bin/hotspot 64 2 2000 @CORP@/rodinia/bin/data/temp_64 @CORP@/rodinia/bin/data/power_64 output.out
+nv/rodinia/hotspot-ptx | ptx | 1 | 1 | 240 | tmp | - | @CORP@/rodinia/bin/hotspot 64 2 2000 @CORP@/rodinia/bin/data/temp_64 @CORP@/rodinia/bin/data/power_64 output.out
+nv/rodinia/lavaMD | sass | 1 | 1 | 60 | tmp | - | @CORP@/rodinia/bin/lavaMD -boxes1d 6
+nv/hecbench/aobench-cuda | sass | 1 | 1 | 60 | @CORP@/hec/src/aobench-cuda | - | @CORP@/hec/src/aobench-cuda/main 1
+nv/hecbench/aobench-cuda-ptx | ptx | 1 | 1 | 240 | @CORP@/hec/src/aobench-cuda | - | @CORP@/hec/src/aobench-cuda/main 1
+nv/hecbench/bilateral-cuda | sass | 1 | 1 | 60 | @CORP@/hec/src/bilateral-cuda | - | @CORP@/hec/src/bilateral-cuda/main 256 128 0.5 0.5 1
+nv/hecbench/bilateral-cuda-ptx | ptx | 1 | 1 | 240 | @CORP@/hec/src/bilateral-cuda | - | @CORP@/hec/src/bilateral-cuda/main 256 128 0.5 0.5 1
+nv/hecbench/fpdc-cuda | sass | 1 | 1 | 90 | @CORP@/hec/src/fpdc-cuda | - | @CORP@/hec/src/fpdc-cuda/main 255 8 1 2
+nv/hecbench/radixsort2-cuda | sass | 1 | 1 | 60 | @CORP@/hec/src/radixsort2-cuda | - | @CORP@/hec/src/radixsort2-cuda/main -float -keysonly -n=65536
+nv/hecbench/radixsort2-cuda-ptx | ptx | 1 | 1 | 240 | @CORP@/hec/src/radixsort2-cuda | - | @CORP@/hec/src/radixsort2-cuda/main -float -keysonly -n=65536
+nv/hecbench/shmembench-cuda | sass | 1 | 1 | 76 | @CORP@/hec/src/shmembench-cuda | - | @CORP@/hec/src/shmembench-cuda/main 1
+nv/samples/mergeSort | sass | 1 | 1 | 87 | @CORP@/samples/Samples/0_Introduction/mergeSort | - | @CORP@/samples/Samples/0_Introduction/mergeSort/mergeSort
+nv/samples/MC_SingleAsianOptionP | sass | 1 | 1 | 60 | @CORP@/samples/Samples/2_Concepts_and_Techniques/MC_SingleAsianOptionP | - | @CORP@/samples/Samples/2_Concepts_and_Techniques/MC_SingleAsianOptionP/MC_SingleAsianOptionP
+nv/samples/MC_SingleAsianOptionP-ptx | ptx | 1 | 1 | 240 | @CORP@/samples/Samples/2_Concepts_and_Techniques/MC_SingleAsianOptionP | - | @CORP@/samples/Samples/2_Concepts_and_Techniques/MC_SingleAsianOptionP/MC_SingleAsianOptionP
+nv/samples/immaTensorCoreGemm | sass | 1 | 1 | 123 | @CORP@/samples/Samples/3_CUDA_Features/immaTensorCoreGemm | - | @CORP@/samples/Samples/3_CUDA_Features/immaTensorCoreGemm/immaTensorCoreGemm
+nv/samples/transpose | sass | 1 | 1 | 66 | @CORP@/samples/Samples/6_Performance/transpose | - | @CORP@/samples/Samples/6_Performance/transpose/transpose
+
+# --- AMD
+amd/amd-hecbench/aobench | amd | 1 | 1 | 60 | tmp | - | @CORP@/amd/bin/hec-aobench 1
+amd/amd-hecbench/radixsort2 | amd | 1 | 1 | 63 | tmp | - | @CORP@/amd/bin/hec-radixsort2 -float -keysonly -n=65536
+amd/amd-hecbench/shmembench | amd | 1 | 1 | 60 | tmp | - | @CORP@/amd/bin/hec-shmembench 1
+amd/amd-polybench/3DCONV | amd | 1 | 1 | 60 | tmp | - | @CORP@/amd/bin/pb-3DCONV
+amd/amd-polybench/JACOBI1D | amd | 1 | 1 | 60 | tmp | - | @CORP@/amd/bin/pb-JACOBI1D
+amd/amd-polybench/SYRK | amd | 1 | 1 | 83 | tmp | - | @CORP@/amd/bin/pb-SYRK
+amd/amd-rodinia/hotspot | amd | 1 | 1 | 60 | tmp | - | @CORP@/amd/bin/rod-hotspot 64 2 2000 @CORP@/rodinia/bin/data/temp_64 @CORP@/rodinia/bin/data/power_64 output.out
+
+# --- pantheon soak workloads (duration-driven: the A/B tool compares instructions per CPU second)
+pan/pantheon/memory_hammer | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/memory_hammer 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/memory_read | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/memory_read 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/memory_write | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/memory_write 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/galpat | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/galpat 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/march_test | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/march_test 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/kv_cache_churn | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/kv_cache_churn 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/llm_decode | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/llm_decode 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/fused_attention | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/fused_attention 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/transformer_virus | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/transformer_virus 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/quantized_gemm | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/quantized_gemm 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/allocation_fragmentation | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/allocation_fragmentation 0 3 2 --kernel_loops 2 --grid_size 4
+pan/pantheon/scheduler_virus | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/scheduler_virus 0 3 2 --kernel_loops 2 --grid_size 4
+
+# --- PyTorch sweep group nn (79 checks)
+torch/sweep/nn | raw | 1 | 1 | 900 | tmp | VGPU_THREADS=1 VGPU_SWEEP_GROUPS=nn VGPU_SWEEP_TIER=quick OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 TRITON_CACHE_DIR=@TMP@/t TORCHINDUCTOR_CACHE_DIR=@TMP@/i | @BUILD@/vgpu run --gpu nvidia/rtx5090 --preload @PY@ @SRC@/nvidia/tests/pytorch/sweep.py
+
+# --- tiny programs (start-up cost: a context, one module, one or two launches)
+tiny/samples/clock | sass | 1 | 1 | 60 | @CORP@/samples/Samples/0_Introduction/clock | - | @CORP@/samples/Samples/0_Introduction/clock/clock
+tiny/samples/simplePrintf | sass | 1 | 1 | 60 | @CORP@/samples/Samples/0_Introduction/simplePrintf | - | @CORP@/samples/Samples/0_Introduction/simplePrintf/simplePrintf
+tiny/samples/simpleTemplates | sass | 1 | 1 | 60 | @CORP@/samples/Samples/0_Introduction/simpleTemplates | - | @CORP@/samples/Samples/0_Introduction/simpleTemplates/simpleTemplates
+tiny/samples/template | sass | 1 | 1 | 60 | @CORP@/samples/Samples/0_Introduction/template | - | @CORP@/samples/Samples/0_Introduction/template/template
+tiny/samples/vectorAdd | sass | 1 | 1 | 60 | @CORP@/samples/Samples/0_Introduction/vectorAdd | - | @CORP@/samples/Samples/0_Introduction/vectorAdd/vectorAdd

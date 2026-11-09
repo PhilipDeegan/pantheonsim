@@ -8190,3 +8190,25 @@ Reading it: **not beyond the noise, not kept.** On the three programs the change
 * The long programs were measured for 4 of the 13 (the other 9 would each take 30 to 50 minutes of an exclusive server for 3 runs of four states): FDTD-2D is +4.2 % cold (151 of 1,500 launches recorded, the 3 % budget at work).
 * The JIT timings were taken on a box with CI runners and production Postgres; spreads are in the table, A/A control programs read 0.994 to 1.009 in the ones that carry a conclusion.
 * The e2e shards ran on server2 with programs compiled with nvcc 13.0 elsewhere (no nvcc on the server); the stage `form` was not run under a JIT mutant.
+
+## Round sp39 (release-wide PGO): no speed-up on held-out programs, stays opt-in (branch `sp39-pgo`)
+
+A plain Release build (A), a copy of it (A2, the noise control) and a PGO build (P) trained on 122 manifest entries (395 runs, 179 profile files) were compared on 47 held-out programs the profile never ran (22 NVIDIA, 7 AMD, 12 pantheon workloads, one PyTorch group, 5 tiny programs). Ratios are A/P of median CPU seconds, above 1 means PGO is faster. Server2 under the builder lock, load below 5.
+
+| group (1 thread) | programs | A/A2 | A/P geomean | min | max |
+|---|---:|---:|---:|---:|---:|
+| NVIDIA | 22 | 0.999 | 0.958 | 0.488 | 1.120 |
+| AMD | 7 | 0.999 | 0.958 | 0.884 | 1.017 |
+| pantheon workloads (CPU s per 1e9 warp instructions) | 12 | 1.012 | 1.065 | 0.959 | 1.619 |
+| tiny start-up | 5 | 0.998 | 1.029 | 1.008 | 1.052 |
+| all 47 | 47 | | 0.993 | 0.488 | 1.619 |
+
+At 8 threads (wall, 29 NVIDIA and AMD programs) the geomean is 0.946. The median NVIDIA program is 4% faster, but `shmembench-cuda` (0.57x), `aobench-cuda-ptx` (0.49x) and `immaTensorCoreGemm` (0.76x) lose reproducibly, and five of seven AMD programs are 2 to 12% slower. `fused_attention` at 1.62x is unexplained.
+
+* `-fprofile-partial-training` repairs `immaTensorCoreGemm` (1.056x) and part of `aobench-cuda-ptx`, but makes `test_amd_gcn_same_bits` fail (one `v_mac_f32_e32` result of 16,806 differs), so it was dropped.
+* Bits: counters, kernel digests and final memory hashes are equal on all 35 non-pantheon held-out programs at 1 and 8 threads (70 runs), except three runs that already differ between A and A2. The pantheon workloads were not bit-checked (their counters depend on the clock).
+* Full ctest on the PGO build: 867 tests, 678 skipped, 8 failed; seven fail the same way on the plain build here. The PGO-only failure is `test_amd_matrix_kernels_layout`: `-fprofile-use` drops the 64-byte alignment of the AVX2 tile kernels.
+* Not measured: BOLT (`llvm-bolt` is not installed on server2 or server3, and `perf` is blocked there).
+* Caveats: the held-out PyTorch set is one 1 s group, and the cause of the `shmembench` and `radixsort2` losses is a hypothesis.
+
+Verdict: PGO is not enabled for releases. `scripts/pgo-build.sh`, the manifests and `docs/pgo.md` stay as an opt-in tool; `VGPU_PGO=use` now fails on a profile that does not match the source (`VGPU_PGO_STRICT`).
