@@ -11,6 +11,8 @@
 #include <atomic>
 #include <cstdint>
 #include <map>
+#include <mutex>
+#include <shared_mutex>
 #include <utility>
 #include <vector>
 
@@ -64,6 +66,46 @@ inline size_t sync_tracked(TrackedMap& res, const MemoryManager& mem, const std:
     res[b] = std::move(a);
   }
   return dropped;
+}
+
+// The gate's reaction to one simulator access of [addr, addr + len) (Runtime::Impl::before_access, kept here so that a unit test runs the real function): the
+// chunks the card alone holds that the access needs come back (`pull(entry, chunks)` copies them), a write makes its chunks the simulator's, and `update(entry)`
+// publishes the entry's new count of card-valid chunks.
+//
+// Most accesses change nothing: while a card copy is valid the simulator's threads reach here for EVERY access of a launch they run (a verify run, or a
+// launch that runs next to card-resident data), and all but the first access to a chunk find it already settled. Those take the shared lock and look at the
+// accessed chunks only, so the threads do not serialise on one mutex and the cost does not grow with the allocation (before sp43 each access took an exclusive lock
+// and counted every chunk of the allocation twice: PolyBench 2DCONV with VGPU_HOST_GPU_VERIFY=1 and 128 MiB live ran for more than 8 CPU-minutes, 35% of it in the
+// count and 43% in the kernel's side of the mutex, against 0.97 s simulated). Only an access that does change something retakes the lock exclusively and
+// decides again, for another thread may have changed the chunks in between.
+template <class Pull, class Update>
+inline void gate_access(std::shared_mutex& mu, TrackedMap& res, uint64_t addr, uint64_t len, bool write, Pull&& pull, Update&& update) {
+  {
+    std::shared_lock<std::shared_mutex> g(mu);
+    auto it = res.upper_bound(addr);
+    if (it == res.begin()) return;
+    const Tracked& a = std::prev(it)->second;
+    if (a.slot->load(std::memory_order_relaxed) == 0) return;
+    const ChunkSpan sp = chunk_span(a.base, a.size, addr, len);
+    if (!sp.any) return;
+    if (!a.r.access_changes_state(sp.first, sp.last, write)) return;
+  }
+  std::lock_guard<std::shared_mutex> g(mu);
+  auto it = res.upper_bound(addr);
+  if (it == res.begin()) return;
+  Tracked& a = std::prev(it)->second;
+  if (a.slot->load(std::memory_order_relaxed) == 0) return;
+  const ChunkSpan sp = chunk_span(a.base, a.size, addr, len);
+  if (!sp.any) return;
+  if (!write) {
+    pull(a, a.r.sim_read(sp.first, sp.last));
+  } else {
+    for (uint64_t c = sp.first; c <= sp.last; ++c) {
+      const bool whole = c == sp.first ? sp.first_whole : c == sp.last ? sp.last_whole : true;
+      pull(a, a.r.sim_write(c, c, whole));
+    }
+  }
+  update(a);
 }
 
 }  // namespace vgpu::hostgpu
