@@ -1266,217 +1266,6 @@ constexpr size_t op_index() {
   return Op(std::in_place_type<T>).index();
 }
 
-// D = A x B + C for a 16x16 tile, K deep, in f32: each element accumulates
-// its products in k order, one rounding for the product and one for the sum,
-// as exec_wmma_mma always has. A row is two 8-float vectors, built for AVX2 as
-// well as the baseline, and the CPU is asked which to use -- the way
-// g_hw_fma chooses. Not target_clones: that picks through an IFUNC resolver,
-// which the loader runs before main, and under ThreadSanitizer the resolver
-// runs instrumented before the sanitizer's runtime is up, so every program
-// linking the interpreter crashed at startup without a word. Contraction is
-// off here so that no build -- -march=native included -- fuses the multiply
-// and add into an FMA and changes the bits.
-#pragma GCC push_options
-#pragma GCC optimize("fp-contract=off")
-typedef float WmmaRow8 __attribute__((vector_size(32)));
-typedef int32_t WmmaBits8 __attribute__((vector_size(32)));
-// A NaN in the result becomes the canonical one, 0x7fffffff, which is what the SASS executor's HMMA path
-// (simd::hmma, a NaN result the canonical 0x7fffffff) and an RTX 3060 write. Left to the adds and multiplies above,
-// a NaN that meets another NaN is whichever the host instruction returns for two NaN operands -- the first source
-// operand's, in its sign and payload -- and the compiler picks the operand order of every vector add and multiply, so
-// it differed between builds (an optimised one and a ThreadSanitizer -O1 one). A NaN is rare, so the tile sums its
-// result rows as it writes them (one add each; a NaN anywhere makes the sum a NaN, and a sum that is not one holds
-// none) and only a tile whose sum is a NaN -- which an infinity minus an infinity also makes: then nothing changes --
-// is gone over again, a compare and a select on the bits.
-// (Everything here takes and gives pointers, never a 32-byte vector by value: the tile below is compiled twice, once for the
-// baseline and once with target("avx2"), and a vector passed between a function of one target and a function of the other is
-// passed in different places -- in a ymm register by the AVX function and in memory by the baseline one (GCC's -Wpsabi
-// "changes the ABI"). Optimised, the helpers are inlined and nothing is passed; at -O0, as in the AddressSanitizer Debug build,
-// nothing is inlined and the callee read whatever was on the stack. Round 8's version did that and passed on one CPU and
-// failed on another by luck of the stack.)
-__attribute__((noinline)) static void wmma_canon_row(float* p) {
-  WmmaRow8 v;
-  WmmaBits8 b;
-  std::memcpy(&v, p, sizeof v);
-  std::memcpy(&b, p, sizeof b);
-  const WmmaBits8 nan = v != v;   // all ones where the lane is a NaN
-  const WmmaBits8 canon = {0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF};
-  b = nan ? canon : b;
-  std::memcpy(p, &b, sizeof b);
-}
-__attribute__((noinline)) static void wmma_canon_tile(float (&D)[16][16], const float* sum8) {
-  bool any = false;
-  for (int l = 0; l < 8; ++l) any |= sum8[l] != sum8[l];
-  if (!any) return;
-  for (uint32_t i = 0; i < 16; ++i) {
-    wmma_canon_row(&D[i][0]);
-    wmma_canon_row(&D[i][8]);
-  }
-}
-#define VGPU_WMMA_TILE_BODY                                          \
-  WmmaRow8 chk = {0, 0, 0, 0, 0, 0, 0, 0};                           \
-  for (uint32_t i = 0; i < 16; ++i) {                                \
-    WmmaRow8 lo, hi;                                                 \
-    std::memcpy(&lo, &C[i][0], sizeof lo);                           \
-    std::memcpy(&hi, &C[i][8], sizeof hi);                           \
-    for (uint32_t k = 0; k < K; ++k) {                               \
-      const float aik = A[i][k];                                     \
-      const WmmaRow8 a = {aik, aik, aik, aik, aik, aik, aik, aik};   \
-      WmmaRow8 bl, bh;                                               \
-      std::memcpy(&bl, &B[k][0], sizeof bl);                         \
-      std::memcpy(&bh, &B[k][8], sizeof bh);                         \
-      const WmmaRow8 pl = a * bl, ph = a * bh;                       \
-      lo = lo + pl;                                                  \
-      hi = hi + ph;                                                  \
-    }                                                                \
-    chk = chk + lo;                                                  \
-    chk = chk + hi;                                                  \
-    std::memcpy(&D[i][0], &lo, sizeof lo);                           \
-    std::memcpy(&D[i][8], &hi, sizeof hi);                           \
-  }                                                                  \
-  {                                                                  \
-    alignas(32) float chk8[8];                                       \
-    std::memcpy(chk8, &chk, sizeof chk);                             \
-    wmma_canon_tile(D, chk8);                                        \
-  }
-void wmma_tile_base(float (&D)[16][16], const float (&A)[16][16], const float (&B)[16][16],
-                    const float (&C)[16][16], uint32_t K) {
-  VGPU_WMMA_TILE_BODY
-}
-#if defined(__x86_64__) && defined(__GNUC__)
-__attribute__((target("avx2"))) void wmma_tile_avx2(float (&D)[16][16], const float (&A)[16][16],
-                                                    const float (&B)[16][16],
-                                                    const float (&C)[16][16], uint32_t K) {
-  VGPU_WMMA_TILE_BODY
-}
-const bool g_avx2 = __builtin_cpu_supports("avx2");
-#endif
-#undef VGPU_WMMA_TILE_BODY
-void wmma_tile(float (&D)[16][16], const float (&A)[16][16], const float (&B)[16][16],
-               const float (&C)[16][16], uint32_t K) {
-#if defined(__x86_64__) && defined(__GNUC__)
-  if (g_avx2) return wmma_tile_avx2(D, A, B, C, K);
-#endif
-  wmma_tile_base(D, A, B, C, K);
-}
-#pragma GCC pop_options
-
-// Sixteen binary16 values -- eight 32-bit words, low half first -- as floats:
-// one f16 WMMA fragment row. F16C converts eight at a time; it is used only
-// if it gives the table's bits for all 65536 inputs, NaNs included, which is
-// checked once rather than assumed.
-void f16x16_to_float_table(const uint32_t* w8, float* out) {
-  for (int i = 0; i < 8; ++i) {
-    out[2 * i] = kF16ToFloat[w8[i] & 0xFFFF];
-    out[2 * i + 1] = kF16ToFloat[w8[i] >> 16];
-  }
-}
-#if defined(__x86_64__) && defined(__GNUC__)
-// (A NaN comes out of VCVTPH2PS with its payload shifted up, and the table above has only the quiet NaN of that
-// sign, so every NaN is replaced by the table's: without that this path never matched the table for all 65536
-// halves, g_f16c was always false, and the table lookups below ran on every host.)
-__attribute__((target("avx,f16c"))) inline __m256 f16x8_to_float_f16c(__m128i h8) {
-  const __m256 x = _mm256_cvtph_ps(h8);
-  const __m256 is_nan = _mm256_cmp_ps(x, x, _CMP_UNORD_Q);
-  const __m256 quiet = _mm256_or_ps(_mm256_and_ps(x, _mm256_castsi256_ps(_mm256_set1_epi32(static_cast<int>(0x80000000u)))),
-                                    _mm256_castsi256_ps(_mm256_set1_epi32(0x7FC00000)));
-  return _mm256_blendv_ps(x, quiet, is_nan);
-}
-__attribute__((target("avx,f16c"))) void f16x16_to_float_f16c(const uint32_t* w8, float* out) {
-  const __m128i lo = _mm_loadu_si128(reinterpret_cast<const __m128i*>(w8));
-  const __m128i hi = _mm_loadu_si128(reinterpret_cast<const __m128i*>(w8 + 4));
-  _mm256_storeu_ps(out, f16x8_to_float_f16c(lo));
-  _mm256_storeu_ps(out + 8, f16x8_to_float_f16c(hi));
-}
-// Checked on the first use, not when the library loads (a program that never converts a WMMA fragment of halves skips the
-// four thousand conversions); the answer is the same for every use.
-bool f16c_matches_table() {
-  if (!__builtin_cpu_supports("avx") || !__builtin_cpu_supports("f16c")) return false;
-  for (uint32_t h = 0; h < 65536; h += 16) {
-    uint32_t w8[8];
-    for (uint32_t i = 0; i < 8; ++i) w8[i] = (h + 2 * i) | ((h + 2 * i + 1) << 16);
-    float got[16];
-    f16x16_to_float_f16c(w8, got);
-    if (std::memcmp(got, &kF16ToFloat[h], sizeof got) != 0) return false;
-  }
-  return true;
-}
-bool f16c_usable() {
-  static const bool ok = f16c_matches_table();
-  return ok;
-}
-#endif
-// 8x8 transposes of 32-bit values, for moving WMMA fragments between the
-// register file (one array of lanes per register) and tiles (one row per
-// element group). Shuffles only: the bits are moved, never interpreted.
-#if defined(__x86_64__) && defined(__GNUC__)
-__attribute__((target("avx2"))) inline void transpose8x8(__m256 r[8]) {
-  const __m256 t0 = _mm256_unpacklo_ps(r[0], r[1]), t1 = _mm256_unpackhi_ps(r[0], r[1]);
-  const __m256 t2 = _mm256_unpacklo_ps(r[2], r[3]), t3 = _mm256_unpackhi_ps(r[2], r[3]);
-  const __m256 t4 = _mm256_unpacklo_ps(r[4], r[5]), t5 = _mm256_unpackhi_ps(r[4], r[5]);
-  const __m256 t6 = _mm256_unpacklo_ps(r[6], r[7]), t7 = _mm256_unpackhi_ps(r[6], r[7]);
-  const __m256 u0 = _mm256_shuffle_ps(t0, t2, 0x44), u1 = _mm256_shuffle_ps(t0, t2, 0xEE);
-  const __m256 u2 = _mm256_shuffle_ps(t1, t3, 0x44), u3 = _mm256_shuffle_ps(t1, t3, 0xEE);
-  const __m256 u4 = _mm256_shuffle_ps(t4, t6, 0x44), u5 = _mm256_shuffle_ps(t4, t6, 0xEE);
-  const __m256 u6 = _mm256_shuffle_ps(t5, t7, 0x44), u7 = _mm256_shuffle_ps(t5, t7, 0xEE);
-  r[0] = _mm256_permute2f128_ps(u0, u4, 0x20);
-  r[1] = _mm256_permute2f128_ps(u1, u5, 0x20);
-  r[2] = _mm256_permute2f128_ps(u2, u6, 0x20);
-  r[3] = _mm256_permute2f128_ps(u3, u7, 0x20);
-  r[4] = _mm256_permute2f128_ps(u0, u4, 0x31);
-  r[5] = _mm256_permute2f128_ps(u1, u5, 0x31);
-  r[6] = _mm256_permute2f128_ps(u2, u6, 0x31);
-  r[7] = _mm256_permute2f128_ps(u3, u7, 0x31);
-}
-// out[l * 8 + k] = rows[k][first + l], for k, l < 8.
-__attribute__((target("avx2"))) void gather8x8(const uint32_t* const rows[8], uint32_t first, void* out) {
-  __m256 r[8];
-  for (int k = 0; k < 8; ++k)
-    r[k] = _mm256_castsi256_ps(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(rows[k] + first)));
-  transpose8x8(r);
-  for (int l = 0; l < 8; ++l) _mm256_storeu_ps(static_cast<float*>(out) + l * 8, r[l]);
-}
-// t[c * 16 + i] = r[i][c], for i, c < 16: a 16 x 16 transpose as four 8 x 8 ones.
-__attribute__((target("avx2"))) void transpose16x16(float* t, const float (*r)[16]) {
-  for (int bi = 0; bi < 2; ++bi)
-    for (int bj = 0; bj < 2; ++bj) {
-      __m256 v[8];
-      for (int k = 0; k < 8; ++k) v[k] = _mm256_loadu_ps(&r[bi * 8 + k][bj * 8]);
-      transpose8x8(v);
-      for (int k = 0; k < 8; ++k) _mm256_storeu_ps(t + (bj * 8 + k) * 16 + bi * 8, v[k]);
-    }
-}
-// rows[k][first + l] = in[l * 8 + k], for k, l < 8.
-__attribute__((target("avx2"))) void scatter8x8(const void* in, uint32_t* const rows[8], uint32_t first) {
-  __m256 r[8];
-  for (int l = 0; l < 8; ++l) r[l] = _mm256_loadu_ps(static_cast<const float*>(in) + l * 8);
-  transpose8x8(r);
-  for (int k = 0; k < 8; ++k)
-    _mm256_storeu_si256(reinterpret_cast<__m256i*>(rows[k] + first), _mm256_castps_si256(r[k]));
-}
-#else
-// Elsewhere the callers take their scalar paths; these keep the code compiling.
-void gather8x8(const uint32_t* const rows[8], uint32_t first, void* out) {
-  for (int l = 0; l < 8; ++l)
-    for (int k = 0; k < 8; ++k) std::memcpy(static_cast<uint32_t*>(out) + l * 8 + k, rows[k] + first + l, 4);
-}
-void transpose16x16(float* t, const float (*r)[16]) {
-  for (int i = 0; i < 16; ++i)
-    for (int c = 0; c < 16; ++c) t[c * 16 + i] = r[i][c];
-}
-void scatter8x8(const void* in, uint32_t* const rows[8], uint32_t first) {
-  for (int l = 0; l < 8; ++l)
-    for (int k = 0; k < 8; ++k) std::memcpy(rows[k] + first + l, static_cast<const uint32_t*>(in) + l * 8 + k, 4);
-}
-#endif
-
-void f16x16_to_float(const uint32_t* w8, float* out) {
-#if defined(__x86_64__) && defined(__GNUC__)
-  if (f16c_usable()) return f16x16_to_float_f16c(w8, out);
-#endif
-  f16x16_to_float_table(w8, out);
-}
-
 // tcgen05.mma's rows: acc[i] += a[k] * b[k * ldb + i] for k = 0..K-1 in order,
 // i < n -- each sum in k order, the product and the sum each rounded to f32,
 // as a one-element-at-a-time loop does; contraction off, as above, so no
@@ -9093,7 +8882,6 @@ class Interpreter {
     }
     if (const auto* op = std::get_if<OpWmmaMma>(&ins.op)) {
       require_warp32(ins, "wmma.mma");
-      if (g_fast_path.load(std::memory_order_relaxed) && fast_wmma_mma(w, *op, m)) return;
       exec_wmma_mma(w, ctx, ins, *op, m);
       return;
     }
@@ -11652,130 +11440,34 @@ class Interpreter {
     exec::tcgen05_mma(m, h);
   }
 
-  // The same fragments as exec_wmma_mma below, read from and written to the
-  // 32-bit register file in place, with the halves decoded from the table.
-  bool fast_wmma_mma(Warp& w, const OpWmmaMma& op, Mask m) {
-    if (op.generic || op.elem == WmmaElem::TF32 || op.any_wide || alu_armed() || W_ != 32)
-      return false;
-    const bool bf = op.elem == WmmaElem::BF16;
-    const int ab_regs = bf ? 4 : 8;
-    if (op.a.size() != size_t(ab_regs) || op.b.size() != size_t(ab_regs) || op.c.size() != 8 ||
-        op.d.size() != 8)
-      return false;
-#if defined(__x86_64__) && defined(__GNUC__)
-    const bool avx2 = g_avx2;
-#else
-    constexpr bool avx2 = false;
-#endif
-    // Every element of A, B and C is written below, so none is initialized.
-    // The tiles are indexed flat, row * 16 + column.
-    alignas(32) float A[kMmaDim][kMmaDim], B[kMmaDim][kMmaDim], C[kMmaDim][kMmaDim];
-    float* const af = &A[0][0];
-    float* const bff = &B[0][0];
-    float* const cf = &C[0][0];
-    // A register nothing has written reads as zero, as read_operand has it.
-    static const Lanes32 kZero{};
-    auto regs = [&](const Reg& r) -> const Lanes32& {
-      return r.id < w.regs32.size() && w.written32[r.id] ? w.regs32[r.id] : kZero;
-    };
-    // Element (lane, register, half) of an A or B fragment is matrix element
-    // `linear` in row-major order, and the fragment's layout says whether that
-    // is (row, column) or (column, row) of the tile: f16 puts lane l's sixteen
-    // halves in row l, bf16 packs eight per lane.
-    auto unpack = [&](const std::vector<Reg>& frag, MatLayout layout, float* t) {
-      const bool row = layout == MatLayout::Row;
-      if (!bf) {
-        // f16: lane l's eight registers are row l of the fragment.
-        const uint32_t* v[8];
-        for (int reg = 0; reg < 8; ++reg) v[reg] = regs(frag[reg]).data();
-        alignas(32) uint32_t w8[kMmaDim][8];
-        if (avx2) {
-          gather8x8(v, 0, w8[0]);
-          gather8x8(v, 8, w8[8]);
-        } else {
-          for (uint32_t lane = 0; lane < kMmaDim; ++lane)
-            for (int reg = 0; reg < 8; ++reg) w8[lane][reg] = v[reg][lane];
-        }
-        if (row) {
-          for (uint32_t lane = 0; lane < kMmaDim; ++lane) f16x16_to_float(w8[lane], t + lane * kMmaDim);
-          return;
-        }
-        alignas(32) float r[kMmaDim][kMmaDim];
-        for (uint32_t lane = 0; lane < kMmaDim; ++lane) f16x16_to_float(w8[lane], r[lane]);
-        if (avx2) {
-          transpose16x16(t, r);
-          return;
-        }
-        for (uint32_t i = 0; i < kMmaDim; ++i)
-          for (uint32_t c = 0; c < kMmaDim; ++c) t[c * kMmaDim + i] = r[i][c];
-        return;
-      }
-      for (int reg = 0; reg < ab_regs; ++reg) {
-        const uint32_t* v = regs(frag[reg]).data();
-        const uint32_t lanes = bf ? W_ : kMmaDim;
-        for (uint32_t lane = 0; lane < lanes; ++lane) {
-          const uint32_t word = v[lane];
-          const uint32_t base = bf ? lane * 8 + static_cast<uint32_t>(reg * 2)
-                                   : lane * kMmaDim + static_cast<uint32_t>(reg * 2);
-          for (uint32_t h = 0; h < 2; ++h) {
-            const uint32_t bits = (word >> (16 * h)) & 0xFFFF;
-            const float x = bf ? static_cast<float>(bf16_to_double(bits)) : kF16ToFloat[bits];
-            const uint32_t linear = base + h;
-            t[row ? linear : (linear % kMmaDim) * kMmaDim + linear / kMmaDim] = x;
-          }
-        }
-      }
-    };
-    unpack(op.a, op.alayout, af);
-    unpack(op.b, op.blayout, bff);
-    // C and D: register r of lane l is element l * 8 + r -- an 8 x 32
-    // transpose each way.
-    if (avx2) {
-      const uint32_t* cr[8];
-      for (int reg = 0; reg < 8; ++reg) cr[reg] = regs(op.c[reg]).data();
-      for (uint32_t lane = 0; lane < W_; lane += 8) gather8x8(cr, lane, cf + lane * 8);
-    } else {
-      for (int reg = 0; reg < 8; ++reg) {
-        const uint32_t* v = regs(op.c[reg]).data();
-        for (uint32_t lane = 0; lane < W_; ++lane) cf[lane * 8 + static_cast<uint32_t>(reg)] = f32(v[lane]);
-      }
-    }
-    alignas(32) float D[kMmaDim][kMmaDim];
-    if (vgpu::exec::tc86::applies(profile_.cc_major, profile_.cc_minor))   // (include/vgpu/exec/tc_ampere.hpp)
-      vgpu::exec::tc86::mma(kMmaDim, kMmaDim, kMmaDim, 8, bf ? vgpu::exec::tc86::kEminWide : vgpu::exec::tc86::kEminF16, false, af, kMmaDim,
-                            bff, kMmaDim, cf, kMmaDim, &D[0][0], kMmaDim);
-    else
-      wmma_tile(D, A, B, C, kMmaDim);
-    const float* const df = &D[0][0];
-    // Every register of D, written after all of A, B and C have been read:
-    // D may name the same registers as C.
-    if (avx2 && m == all_lanes(W_)) {
-      uint32_t* dr[8];
-      for (int reg = 0; reg < 8; ++reg) dr[reg] = dst32(w, op.d[reg].id, m);
-      for (uint32_t lane = 0; lane < W_; lane += 8) scatter8x8(df + lane * 8, dr, lane);
-      return true;
-    }
-    for (int reg = 0; reg < 8; ++reg) {
-      uint32_t* d = dst32(w, op.d[reg].id, m);
-      for_active(m, W_, [&](uint32_t lane) {
-        d[lane] = static_cast<uint32_t>(f32bits(df[lane * 8 + static_cast<uint32_t>(reg)]));
-      });
-    }
-    return true;
-  }
-
-  // ---- WMMA for every shape and type the ISA has (the `generic` ones) ----
+  // ---- WMMA, every shape and type the ISA has ----
   //
-  // A generic fragment holds the logical matrix: slot (lane, register,
-  // element) is matrix element (lane * per_lane + register * per_reg +
-  // element) mod the matrix's size, row by row. The ISA leaves the
-  // distribution unspecified, so any consistent one is correct; this one
-  // holds whole copies when the register count has room for more than one.
-  static std::pair<uint32_t, uint32_t> wmma_slot(const WmmaGeom& g, uint32_t lane, uint32_t reg, uint32_t e) {
-    const uint32_t per_reg = g.reg_bits / g.bits;
-    const uint64_t linear = uint64_t{lane} * g.regs * per_reg + uint64_t{reg} * per_reg + e;
-    const uint64_t idx = linear % (uint64_t{g.rows} * g.cols);
-    return {static_cast<uint32_t>(idx / g.cols), static_cast<uint32_t>(idx % g.cols)};
+  // A fragment holds the logical matrix in the hardware's distribution over lanes, registers and the elements of a register
+  // (ptx::wmma_hw_slot, which says what the distribution is and why it is not our own invention: kernels read fragment elements
+  // one by one and rely on it).
+  //
+  // The slot map as a table, per fragment kind, shape and type: element j of lane l is matrix element idx[l][j] (row * columns +
+  // column). Built on first use by each thread, a handful of entries, searched linearly.
+  struct WmmaIdx {
+    uint64_t key = ~uint64_t{0};
+    uint16_t idx[32][32];
+  };
+  static const WmmaIdx& wmma_idx(const WmmaGeom& g) {
+    thread_local std::vector<std::unique_ptr<WmmaIdx>> cache;
+    const uint64_t key = (uint64_t{static_cast<uint8_t>(g.frag)} << 56) | (uint64_t{g.shape.m} << 40) | (uint64_t{g.shape.n} << 24) |
+                         (uint64_t{g.shape.k} << 8) | static_cast<uint64_t>(g.type);
+    for (const auto& e : cache)
+      if (e->key == key) return *e;
+    auto e = std::make_unique<WmmaIdx>();
+    e->key = key;
+    const uint32_t per_lane = g.regs * (g.reg_bits / g.bits);
+    for (uint32_t lane = 0; lane < 32; ++lane)
+      for (uint32_t j = 0; j < per_lane && j < 32; ++j) {
+        const WmmaSlot sl = wmma_hw_slot(g.frag, g.shape, g.type, lane, j);
+        e->idx[lane][j] = static_cast<uint16_t>(sl.row * g.cols + sl.col);
+      }
+    cache.push_back(std::move(e));
+    return *cache.back();
   }
   static char wmma_frag(OpWmmaLoad::Which w) {
     return w == OpWmmaLoad::Which::A ? 'a' : w == OpWmmaLoad::Which::B ? 'b' : 'c';
@@ -11876,42 +11568,13 @@ class Interpreter {
         }
     }
   }
-  // The f16/bf16 A and B fragments at m16n16k16 keep the layout exec_wmma_mma
-  // reads (memory order, the mma transposing a column-major one), since a load
-  // does not know which accumulator type the mma will use.
-  void wmma_gather_legacy(Warp& w, const BlockCtx& ctx, const Instr& ins, const std::vector<Reg>& regs,
-                          bool bf, MatLayout layout, std::vector<double>& out) {
-    out.assign(size_t{kMmaDim} * kMmaDim, 0.0);
-    for (size_t reg = 0; reg < regs.size(); ++reg) {
-      Lanes _s;
-      const Lanes& v = read_operand(w, ctx, ins, Operand{RegOperand{regs[reg]}}, _s);
-      const uint32_t lanes_used = bf ? W_ : kMmaDim;
-      for (uint32_t lane = 0; lane < lanes_used; ++lane)
-        for (int h = 0; h < 2; ++h) {
-          uint32_t row, col;
-          if (bf) {
-            const uint32_t linear = lane * 8 + static_cast<uint32_t>(reg * 2 + h);
-            row = linear / kMmaDim;
-            col = linear % kMmaDim;
-          } else {
-            row = lane;
-            col = static_cast<uint32_t>(reg * 2 + h);
-          }
-          const uint64_t bits = (v[lane] >> (16 * h)) & 0xFFFF;
-          const double x = bf ? bf16_to_double(bits) : f16_to_double(bits);
-          if (layout == MatLayout::Row) out[size_t{row} * kMmaDim + col] = x;
-          else out[size_t{col} * kMmaDim + row] = x;
-        }
-    }
-  }
-
-  // A generic fragment's logical matrix as raw element bits (wmma_gather's loops without the decode): slot (lane, reg, e) holds element
-  // (lane * regs * per_reg + reg * per_reg + e) modulo the matrix's size, the last slot in (reg, lane, e) order to name an element winning, the
-  // elements no slot names 0.
+  // A fragment's logical matrix as raw element bits (wmma_gather's loops without the decode): the slots in (reg, lane, e) order, the last
+  // to name an element winning (the duplicated halves of an f16 A or B fragment agree unless the program wrote them apart), the elements no
+  // slot names 0.
   void wmma_gather_raw(Warp& w, const BlockCtx& ctx, const Instr& ins, const std::vector<Reg>& regs, const WmmaGeom& g, uint64_t* raw) {
     const uint32_t per_reg = g.reg_bits / g.bits, size = g.rows * g.cols;
-    const uint64_t mask = g.bits == 64 ? ~0ull : (1ull << g.bits) - 1, per_lane = uint64_t{g.regs} * per_reg;
-    const bool pow2 = (size & (size - 1)) == 0;
+    const uint64_t mask = g.bits == 64 ? ~0ull : (1ull << g.bits) - 1;
+    const WmmaIdx& ix = wmma_idx(g);
     std::fill(raw, raw + size, uint64_t{0});
     for (uint32_t reg = 0; reg < g.regs; ++reg) {
       uint64_t v[32];
@@ -11924,30 +11587,21 @@ class Interpreter {
         const Lanes& wide = read_operand(w, ctx, ins, Operand{RegOperand{regs[reg]}}, _s);
         for (uint32_t lane = 0; lane < 32; ++lane) v[lane] = wide[lane];
       }
-      for (uint32_t lane = 0; lane < 32; ++lane) {
-        const uint64_t lin = uint64_t{lane} * per_lane + uint64_t{reg} * per_reg;
-        uint32_t idx = static_cast<uint32_t>(pow2 ? (lin & (size - 1)) : lin % size);
-        for (uint32_t e = 0; e < per_reg; ++e) {
-          raw[idx] = (v[lane] >> (e * g.bits)) & mask;
-          if (++idx == size) idx = 0;
-        }
-      }
+      for (uint32_t lane = 0; lane < 32; ++lane)
+        for (uint32_t e = 0; e < per_reg; ++e) raw[ix.idx[lane][reg * per_reg + e]] = (v[lane] >> (e * g.bits)) & mask;
     }
   }
 
   // The generic wmma.mma forms with f16, bf16 or tf32 operands (f16 or f32 C and D), 8- and 4-bit integers (s32) and f64, through the tile kernels:
   // the fragments gathered as raw bits (wmma_gather_raw), decoded, summed k in order with every product rounded and then added, and D scattered
   // by the same slot map -- the arithmetic and the bits of exec_wmma_mma_generic below (tests/unit/test_wmma_generic_fast.cpp). Returns false,
-  // having changed nothing, for what it does not take: .b1, the 16x16x16 f16 and bf16 fragments (their own layout), a NaN in an f64 form, a fault
-  // injector armed.
+  // having changed nothing, for what it does not take: .b1, a NaN in an f64 form, a fault injector armed.
   __attribute__((noinline, section(".text.unlikely"))) bool wmma_generic_fast(Warp& w, const BlockCtx& ctx, const Instr& ins, const OpWmmaMma& op, Mask m) {
     if (W_ != 32 || alu_armed()) return false;
     const uint32_t M = op.shape.m, N = op.shape.n, K = op.shape.k;
     const WmmaType at = op.atype, bt = op.btype;
     if (N == 0 || N % 8 || M == 0 || K == 0 || M * K > 1024 || K * N > 1024 || M * N > 1024) return false;
-    if (op.shape == WmmaShape{16, 16, 16} && (at == WmmaType::F16 || at == WmmaType::BF16)) return false;
-    // (tf32 has only m16n16k8, which is not a generic form: its own tile)
-    const bool is_float = at == WmmaType::F16 || at == WmmaType::BF16;
+    const bool is_float = at == WmmaType::F16 || at == WmmaType::BF16 || at == WmmaType::TF32;
     const bool is_int = at == WmmaType::S8 || at == WmmaType::U8 || at == WmmaType::S4 || at == WmmaType::U4;
     const bool is_f64 = at == WmmaType::F64;
     if (!is_float && !is_int && !is_f64) return false;
@@ -12042,19 +11696,14 @@ class Interpreter {
       }
     }
     // D into its fragment, by the slot map.
-    const uint32_t per_reg = gd.reg_bits / gd.bits, size = M * N;
-    const uint64_t mask = gd.bits == 64 ? ~0ull : (1ull << gd.bits) - 1, per_lane = uint64_t{gd.regs} * per_reg;
-    const bool pow2 = (size & (size - 1)) == 0;
+    const uint32_t per_reg = gd.reg_bits / gd.bits;
+    const uint64_t mask = gd.bits == 64 ? ~0ull : (1ull << gd.bits) - 1;
+    const WmmaIdx& dix = wmma_idx(gd);
     for (uint32_t reg = 0; reg < gd.regs; ++reg) {
       uint64_t packed[32];
       for (uint32_t lane = 0; lane < 32; ++lane) {
-        const uint64_t lin = uint64_t{lane} * per_lane + uint64_t{reg} * per_reg;
-        uint32_t idx = static_cast<uint32_t>(pow2 ? (lin & (size - 1)) : lin % size);
         uint64_t p = 0;
-        for (uint32_t e = 0; e < per_reg; ++e) {
-          p |= (dbits[idx] & mask) << (e * gd.bits);
-          if (++idx == size) idx = 0;
-        }
+        for (uint32_t e = 0; e < per_reg; ++e) p |= (dbits[dix.idx[lane][reg * per_reg + e]] & mask) << (e * gd.bits);
         packed[lane] = p;
       }
       if (gd.reg_bits == 32) {
@@ -12074,15 +11723,8 @@ class Interpreter {
     if (fast_enabled_ && simd::enabled() && wmma_generic_fast(w, ctx, ins, op, m)) return;
     const uint32_t M = op.shape.m, N = op.shape.n, K = op.shape.k;
     std::vector<double> A, B, C;
-    const bool legacy_ab = op.shape == WmmaShape{16, 16, 16} &&
-                           (op.atype == WmmaType::F16 || op.atype == WmmaType::BF16);
-    if (legacy_ab) {
-      wmma_gather_legacy(w, ctx, ins, op.a, op.atype == WmmaType::BF16, op.alayout, A);
-      wmma_gather_legacy(w, ctx, ins, op.b, op.btype == WmmaType::BF16, op.blayout, B);
-    } else {
-      wmma_gather(w, ctx, ins, op.a, 'a', op.shape, op.atype, A);
-      wmma_gather(w, ctx, ins, op.b, 'b', op.shape, op.btype, B);
-    }
+    wmma_gather(w, ctx, ins, op.a, 'a', op.shape, op.atype, A);
+    wmma_gather(w, ctx, ins, op.b, 'b', op.shape, op.btype, B);
     wmma_gather(w, ctx, ins, op.c, 'c', op.shape, op.ctype, C);
     std::vector<uint64_t> D(size_t{M} * N);
     const WmmaType at = op.atype;
@@ -12167,214 +11809,16 @@ class Interpreter {
     }
   }
 
+  // wmma.mma, wmma.load and wmma.store: one route for every shape and type, the fragments in the hardware's layout (wmma_slot) with
+  // the memory layout applied by the load and the store.
   void exec_wmma_mma(Warp& w, const BlockCtx& ctx, const Instr& ins, const OpWmmaMma& op, Mask m) {
-    if (op.generic) {
-      exec_wmma_mma_generic(w, ctx, ins, op, m);
-      return;
-    }
-    // Gather A and B (16x16 f16 each) and C (16x16 f32) from the warp.
-    // Held as f32, which every element type here fits exactly (f16 and bf16 are
-    // both exact in a float), since the product is accumulated in f32 anyway.
-    float A[kMmaDim][kMmaDim] = {}, B[kMmaDim][kMmaDim] = {}, C[kMmaDim][kMmaDim] = {};
-    const bool bf = op.elem == WmmaElem::BF16;
-    const bool tf = op.elem == WmmaElem::TF32;
-    const int ab_regs = op.elem == WmmaElem::F16 ? 8 : 4;
-    // k is 8 for tf32's m16n16k8 and 16 otherwise.
-    const uint32_t K = tf ? 8u : kMmaDim;
-    if (tf) {
-      for (int reg = 0; reg < ab_regs; ++reg) {
-        Lanes _s_av;
-        const Lanes& av = read_operand(w, ctx, ins, Operand{RegOperand{op.a[reg]}}, _s_av);
-        Lanes _s_bv;
-        const Lanes& bv = read_operand(w, ctx, ins, Operand{RegOperand{op.b[reg]}}, _s_bv);
-        for (uint32_t lane = 0; lane < W_; ++lane) {
-          const uint32_t linear = lane * 4 + static_cast<uint32_t>(reg);
-          // A is 16x8, B is 8x16: different inner extents, so different maps.
-          const uint32_t ar = linear / 8u, ac = linear % 8u;
-          const uint32_t br = linear / kMmaDim, bc = linear % kMmaDim;
-          // The tensor core ignores the low 13 bits of a tf32 operand (they are truncated, not rounded, as the SASS
-          // executor's HMMA does and an RTX 3060 shows for fragments loaded without __float_to_tf32).
-          A[ar][ac] = f32(av[lane] & 0xFFFFE000u);
-          B[br][bc] = f32(bv[lane] & 0xFFFFE000u);
-        }
-      }
-    } else
-    for (int reg = 0; reg < ab_regs; ++reg) {
-      Lanes _s_av;
-      const Lanes& av = read_operand(w, ctx, ins, Operand{RegOperand{op.a[reg]}}, _s_av);
-      Lanes _s_bv;
-      const Lanes& bv = read_operand(w, ctx, ins, Operand{RegOperand{op.b[reg]}}, _s_bv);
-      // A bf16 fragment covers the matrix exactly once across all 32 lanes; an
-      // f16 fragment covers it twice, so only the first 16 lanes are read.
-      const uint32_t lanes_used = bf ? W_ : kMmaDim;
-      for (uint32_t lane = 0; lane < lanes_used; ++lane) {
-        for (int h = 0; h < 2; ++h) {
-          uint32_t row, col;
-          if (bf) {
-            const uint32_t linear = lane * 8 + static_cast<uint32_t>(reg * 2 + h);
-            row = linear / kMmaDim;
-            col = linear % kMmaDim;
-          } else {
-            row = lane;
-            col = static_cast<uint32_t>(reg * 2 + h);
-          }
-          const uint64_t abits = (av[lane] >> (16 * h)) & 0xFFFF;
-          const uint64_t bbits = (bv[lane] >> (16 * h)) & 0xFFFF;
-          const double a = bf ? bf16_to_double(abits) : f16_to_double(abits);
-          const double b = bf ? bf16_to_double(bbits) : f16_to_double(bbits);
-          // .row: element (row, col); .col: transposed.
-          if (op.alayout == MatLayout::Row) A[row][col] = a; else A[col][row] = a;
-          if (op.blayout == MatLayout::Row) B[row][col] = b; else B[col][row] = b;
-        }
-      }
-    }
-    for (int reg = 0; reg < 8; ++reg) {
-      Lanes _s_cv;
-      const Lanes& cv = read_operand(w, ctx, ins, Operand{RegOperand{op.c[reg]}}, _s_cv);
-      for (uint32_t lane = 0; lane < W_; ++lane) {
-        uint32_t linear = lane * 8 + static_cast<uint32_t>(reg);
-        C[linear / kMmaDim][linear % kMmaDim] = f32(cv[lane]);
-      }
-    }
-    // D = A x B + C, accumulated in f32 (matching the .f32 accumulate type).
-    // Each element still accumulates its products in k order, exactly as the
-    // element-by-element form did; running j innermost lets it vectorize.
-    float D[kMmaDim][kMmaDim];
-    if (vgpu::exec::tc86::applies(profile_.cc_major, profile_.cc_minor))   // (include/vgpu/exec/tc_ampere.hpp)
-      vgpu::exec::tc86::mma(kMmaDim, kMmaDim, K, tf ? 4 : 8, bf || tf ? vgpu::exec::tc86::kEminWide : vgpu::exec::tc86::kEminF16, false,
-                            &A[0][0], kMmaDim, &B[0][0], kMmaDim, &C[0][0], kMmaDim, &D[0][0], kMmaDim);
-    else
-      wmma_tile(D, A, B, C, K);
-    // Scatter D back into the destination fragment.
-    for (int reg = 0; reg < 8; ++reg) {
-      Lanes r;  // written for every active lane below
-      for (uint32_t lane = 0; lane < W_; ++lane) {
-        uint32_t linear = lane * 8 + static_cast<uint32_t>(reg);
-        r[lane] = f32bits(D[linear / kMmaDim][linear % kMmaDim]);
-      }
-      alu_fault(r, m, 32);
-      write_reg(w, op.d[reg], m, r, 32);
-    }
+    exec_wmma_mma_generic(w, ctx, ins, op, m);
   }
-
-  // wmma.load.{a,b,c}. The addressing mirrors exactly what exec_wmma_mma reads
-  // back out, because a WMMA fragment is opaque: CUDA specifies no register
-  // assignment, and the only thing that has to hold is that load, mma and
-  // store agree.
-  //
-  // For A and B the layout flag cancels out. mma interprets a .col fragment as
-  // transposed, and .col memory is itself transposed, so both paths land on
-  // the same element -- which is the point: a column-major A read with .col is
-  // the same logical matrix as a row-major A read with .row.
-  //
-  // Only 16 of the 32 lanes carry distinct A/B data (16x16 halves over 32
-  // lanes is exactly a factor of two of duplication, which is what the
-  // hardware fragment does too), so lanes 16-31 duplicate lanes 0-15 rather
-  // than reading rows 16-31 of a 16-row matrix, which would be out of bounds.
-  void exec_wmma_load(Warp& w, const BlockCtx& ctx, const Instr& ins, const OpWmmaLoad& op,
-                      Mask m) {
-    if (op.generic) {
-      exec_wmma_load_generic(w, ctx, ins, op, m);
-      return;
-    }
-    Lanes _s_base;
-    const Lanes& base = addr_base(w, ctx, ins, op.addr, _s_base);
-    Lanes _s_stride;
-    const Lanes& stride = read_operand(w, ctx, ins, op.stride, _s_stride);
-    const uint64_t sbase = space_base(op.space);
-    uint32_t lead = 0;
-    while (lead < W_ && !(m & (Mask{1} << lead))) ++lead;
-    if (lead == W_) return;
-    const uint64_t addr0 = sbase + base[lead] + static_cast<uint64_t>(op.addr.offset);
-    const uint64_t ld = stride[lead];
-
-    const bool bf = op.elem == WmmaElem::BF16;
-    const bool tf = op.elem == WmmaElem::TF32;
-    const int nregs =
-        (op.which == OpWmmaLoad::Which::C || op.elem == WmmaElem::F16) ? 8 : 4;
-    for (int reg = 0; reg < nregs; ++reg) {
-      Lanes r;
-      for (uint32_t lane = 0; lane < W_; ++lane) {
-        if (!(m & (Mask{1} << lane))) continue;
-        if (op.which == OpWmmaLoad::Which::C) {
-          const uint32_t linear = lane * 8 + static_cast<uint32_t>(reg);
-          const uint32_t i = linear / kMmaDim, j = linear % kMmaDim;
-          const uint64_t elem = op.layout == MatLayout::Row ? (uint64_t{i} * ld + j)
-                                                            : (uint64_t{j} * ld + i);
-          r[lane] = load_routed(w, ctx, ins, lane, addr0 + elem * 4, 4);
-        } else if (tf) {
-          // m16n16k8: A is 16x8 and B is 8x16, so the two fragments do not
-          // share an index map and the square shapes' layout cancellation
-          // does not apply. The address is computed from the layout directly
-          // instead: row-major puts (r,c) at r*ld+c, column-major at c*ld+r.
-          const uint32_t linear = lane * 4 + static_cast<uint32_t>(reg);
-          const uint32_t inner = op.which == OpWmmaLoad::Which::A ? 8u : kMmaDim;
-          const uint32_t rr = linear / inner, cc = linear % inner;
-          const uint64_t elem = op.layout == MatLayout::Row ? (uint64_t{rr} * ld + cc)
-                                                            : (uint64_t{cc} * ld + rr);
-          const uint64_t bits = load_routed(w, ctx, ins, lane, addr0 + elem * 4, 4);
-          // wmma.load of a tf32 fragment is a plain 32-bit load: the register holds the
-          // float as it is in memory (an RTX 3060: fa.x[i] reads back every bit), and
-          // the tensor core reads only the top 19 bits of it (see exec_wmma_mma).
-          r[lane] = bits;
-        } else {
-          uint64_t packed = 0;
-          for (int h = 0; h < 2; ++h) {
-            uint32_t row, col;
-            if (bf) {
-              // 4 registers x 2 halves x 32 lanes is exactly 16x16, so a bf16
-              // fragment covers the matrix once with no duplication and every
-              // lane carries distinct data.
-              const uint32_t linear = lane * 8 + static_cast<uint32_t>(reg * 2 + h);
-              row = linear / kMmaDim;
-              col = linear % kMmaDim;
-            } else {
-              // f16 takes 8 registers, which is twice the matrix, so lanes
-              // 16-31 duplicate lanes 0-15 rather than reading rows that do
-              // not exist.
-              row = lane % kMmaDim;
-              col = static_cast<uint32_t>(reg * 2 + h);
-            }
-            const uint64_t elem = uint64_t{row} * ld + col;
-            const uint64_t v = load_routed(w, ctx, ins, lane, addr0 + elem * 2, 2);
-            packed |= (v & 0xFFFF) << (16 * h);
-          }
-          r[lane] = packed;
-        }
-      }
-      write_reg(w, op.dsts[reg], m, r, 32);
-    }
+  void exec_wmma_load(Warp& w, const BlockCtx& ctx, const Instr& ins, const OpWmmaLoad& op, Mask m) {
+    exec_wmma_load_generic(w, ctx, ins, op, m);
   }
-
-  void exec_wmma_store(Warp& w, const BlockCtx& ctx, const Instr& ins, const OpWmmaStore& op,
-                       Mask m) {
-    if (op.generic) {
-      exec_wmma_store_generic(w, ctx, ins, op, m);
-      return;
-    }
-    Lanes _s_base;
-    const Lanes& base = addr_base(w, ctx, ins, op.addr, _s_base);
-    Lanes _s_stride;
-      const Lanes& stride = read_operand(w, ctx, ins, op.stride, _s_stride);
-    uint64_t sbase = space_base(op.space);
-    // The whole warp cooperates; lane 0's address and stride describe the tile.
-    uint32_t lead = 0;
-    while (lead < W_ && !(m & (Mask{1} << lead))) ++lead;
-    if (lead == W_) return;
-    uint64_t addr0 = sbase + base[lead] + static_cast<uint64_t>(op.addr.offset);
-    uint64_t ld = stride[lead];
-    for (int reg = 0; reg < 8; ++reg) {
-      Lanes _s_v;
-      const Lanes& v = read_operand(w, ctx, ins, op.src[reg], _s_v);
-      for (uint32_t lane = 0; lane < W_; ++lane) {
-        if (!(m & (Mask{1} << lane))) continue;
-        uint32_t linear = lane * 8 + static_cast<uint32_t>(reg);
-        uint32_t i = linear / kMmaDim, j = linear % kMmaDim;
-        uint64_t elem = op.layout == MatLayout::Row ? (uint64_t{i} * ld + j)
-                                                    : (uint64_t{j} * ld + i);
-        store_routed(w, ctx, ins, lane, addr0 + elem * 4, 4, v[lane] & 0xFFFFFFFFull);
-      }
-    }
+  void exec_wmma_store(Warp& w, const BlockCtx& ctx, const Instr& ins, const OpWmmaStore& op, Mask m) {
+    exec_wmma_store_generic(w, ctx, ins, op, m);
   }
 
   // Applies an integer rounding mode to a real value.

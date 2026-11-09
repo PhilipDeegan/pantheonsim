@@ -821,30 +821,26 @@ struct OpF32x2 {
   Operand a, b, c;
 };
 
-// Tensor-core MMA (m16n16k16, f16 inputs, f32 accumulate). A warp-collective
-// operation: the 32 lanes jointly hold the matrices.
+// Tensor-core MMA. A warp-collective operation: the 32 lanes jointly hold the
+// matrices.
 //
-// NOTE: PTX deliberately leaves the mapping of matrix elements to fragment
-// registers UNSPECIFIED. VirtualGPU therefore defines its own self-consistent
-// layout (see interpreter.cpp). Kernels that use wmma as an opaque
-// load->mma->store pipeline, or that fill fragments uniformly, get
-// hardware-matching results; kernels that depend on NVIDIA's exact
-// undocumented element distribution may differ. Documented in ARCHITECTURE.md.
+// PTX leaves the mapping of matrix elements to fragment registers unspecified,
+// but real code reads and writes fragment elements one by one (`frag.x[i]`),
+// and relies on what the hardware does: tiny-cuda-nn masks an accumulator with
+// the elements of an A fragment, CUTLASS epilogues and many hand-written
+// kernels do the same. So the layout here is the one an RTX 3060 (sm_86, the
+// Turing-and-later one) shows for every shape and type (`wmma_hw_slot` below),
+// measured with `nvcuda::wmma::load_matrix_sync` of a matrix whose element
+// (row, col) holds its own index.
 enum class MatLayout { Row, Col };
-// The element type of a WMMA A/B fragment, which decides both the register
-// count and the shape:
-//   f16   m16n16k16, 8 registers -- covers the 16x16 matrix twice, so lanes
-//         16-31 duplicate lanes 0-15
-//   bf16  m16n16k16, 4 registers -- covers it exactly once
-//   tf32  m16n16k8,  4 registers -- A is 16x8 and B is 8x16, so the two
-//         fragments do not even share an index map
+// The element type of the f16, bf16 and tf32 WMMA forms (the register count and the shape follow from it):
+//   f16   m16n16k16, 8 registers -- an f16 A or B fragment lists its elements twice over
+//   bf16  m16n16k16, 4 registers -- covers the matrix exactly once
+//   tf32  m16n16k8,  4 registers
 enum class WmmaElem : uint8_t { F16, BF16, TF32 };
-// Every WMMA element type and shape (PTX ISA 9.7.16.4). The combinations
-// above -- f16/bf16 A and B at m16n16k16 with f32 accumulators, and tf32 at
-// m16n16k8 -- keep the layouts they have always had and the fast path; every
-// other one is `generic`: its fragment holds the logical matrix, elements
-// spread across lanes and registers in order, as many whole copies as the
-// ISA's register count holds, with the load applying the memory layout.
+// Every WMMA element type and shape (PTX ISA 9.7.16.4). Every fragment holds
+// the logical matrix in the hardware's distribution over lanes and registers
+// (`wmma_hw_slot`), the load applying the memory layout.
 enum class WmmaType : uint8_t { F16, BF16, TF32, F32, F64, S8, U8, S4, U4, B1, S32 };
 struct WmmaShape {
   uint32_t m = 16, n = 16, k = 16;
@@ -865,9 +861,15 @@ inline uint32_t wmma_type_bits(WmmaType t) {
 // B, which always take eight .f16x2 registers.
 struct WmmaGeom {
   uint32_t rows = 0, cols = 0, bits = 0, reg_bits = 32, regs = 0;
+  char frag = 'c';                // 'a', 'b' or 'c' ('d' is 'c')
+  WmmaShape shape;
+  WmmaType type = WmmaType::F32;
 };
 inline WmmaGeom wmma_geom(char frag, WmmaShape s, WmmaType t) {
   WmmaGeom g;
+  g.frag = frag == 'd' ? 'c' : frag;
+  g.shape = s;
+  g.type = t;
   g.rows = frag == 'a' ? s.m : frag == 'b' ? s.k : s.m;
   g.cols = frag == 'a' ? s.k : frag == 'b' ? s.n : s.n;
   g.bits = wmma_type_bits(t);
@@ -876,6 +878,89 @@ inline WmmaGeom wmma_geom(char frag, WmmaShape s, WmmaType t) {
   g.regs = static_cast<uint32_t>((total + uint64_t{32} * g.reg_bits - 1) / (uint64_t{32} * g.reg_bits));
   if (t == WmmaType::F16 && (frag == 'a' || frag == 'b')) g.regs = 8;
   return g;
+}
+// Which matrix element (row, column) the j-th element of a lane's fragment is
+// (j counts elements, a register holding reg_bits / bits of them, the first in
+// the low bits): the distribution an RTX 3060 shows for every shape and type,
+// the one of the `mma.sync` fragments the tensor core takes. With g = lane / 4
+// and t = lane % 4:
+//   A, f16/bf16   rows 16*rb + g + 8*h, columns 8*kh + 2*t + e         (e: 0..1)
+//                 listed rb, kh, h, e; m8n32k16 has the rows g only, and an f16
+//                 fragment (8 registers) lists its elements twice over (m16: 8
+//                 distinct, m8: 4, m32: 16)
+//   A, s8/u8      rows 16*rb + g + 8*h, columns 4*t + e                (e: 0..3)
+//   A, tf32       rows g + 8*h, columns 4*kh + t, listed kh, h
+//   A, s4/u4      row g, columns 8*t + e;  b1: row g, columns 32*t + e;  f64: (g, t)
+//   B, f16/bf16   rows 8*kh + 2*t + e, columns g + 8 * (the column block): n8
+//                 one block, n16 listed nh, kh, e, n32 listed nb, kh, nh, e
+//   B, s8/u8      rows 4*t + e, columns 8*nh + g, listed nh, e
+//   B, tf32       rows 4*kh + t, columns 8*nh + g, listed nh, kh
+//   B, s4/u4      rows 8*t + e, column g;  b1: rows 32*t + e, column g;  f64: (t, g)
+//   C and D       m16n16: rows g + 8*h, columns 8*nh + 2*t + e, listed nh, h, e;
+//                 m32n8: rows 8*rh + g, columns 2*t + e;  m8n32: rows 2*t + e,
+//                 columns 8*ch + g;  m8n8: row g, columns 2*t + e
+// (tests: nvidia/tests/e2e/wmma_fragment_layout.cu, which loads a matrix of
+// indices through every one of these and compares with this table's rules.)
+struct WmmaSlot {
+  uint32_t row, col;
+};
+inline WmmaSlot wmma_hw_slot(char frag, WmmaShape s, WmmaType t, uint32_t lane, uint32_t j) {
+  const uint32_t g = lane >> 2, q = lane & 3;
+  const bool half = t == WmmaType::F16 || t == WmmaType::BF16;
+  const bool byte = t == WmmaType::S8 || t == WmmaType::U8;
+  if (frag == 'a') {
+    if (half) {
+      const uint32_t nb = s.m == 8 ? 4 : (s.m / 16) * 8, k = j % nb;
+      if (s.m == 8) return {g, 8 * (k >> 1) + 2 * q + (k & 1)};
+      return {16 * (k >> 3) + g + 8 * ((k >> 1) & 1), 8 * ((k >> 2) & 1) + 2 * q + (k & 1)};
+    }
+    if (byte) {
+      const uint32_t nb = s.m == 8 ? 4 : (s.m / 16) * 8, k = j % nb;
+      if (s.m == 8) return {g, 4 * q + k};
+      return {16 * (k >> 3) + g + 8 * ((k >> 2) & 1), 4 * q + (k & 3)};
+    }
+    if (t == WmmaType::TF32) {
+      const uint32_t k = j & 3;
+      return {g + 8 * (k & 1), 4 * (k >> 1) + q};
+    }
+    if (t == WmmaType::S4 || t == WmmaType::U4) return {g, 8 * q + (j & 7)};
+    if (t == WmmaType::B1) return {g, 32 * q + (j & 31)};
+    return {g, q};   // f64 m8n8k4
+  }
+  if (frag == 'b') {
+    if (half) {
+      if (s.n == 8) {
+        const uint32_t k = j & 3;
+        return {8 * (k >> 1) + 2 * q + (k & 1), g};
+      }
+      if (s.n == 16) {
+        const uint32_t k = j & 7;
+        return {8 * ((k >> 1) & 1) + 2 * q + (k & 1), 8 * (k >> 2) + g};
+      }
+      const uint32_t k = j & 15;
+      return {8 * ((k >> 2) & 1) + 2 * q + (k & 1), 16 * (k >> 3) + 8 * ((k >> 1) & 1) + g};
+    }
+    if (byte) {
+      const uint32_t k = j % (s.n == 8 ? 4u : s.n == 16 ? 8u : 16u);
+      return {4 * q + (k & 3), 8 * (k >> 2) + g};
+    }
+    if (t == WmmaType::TF32) {
+      const uint32_t k = j & 3;
+      return {4 * (k & 1) + q, 8 * (k >> 1) + g};
+    }
+    if (t == WmmaType::S4 || t == WmmaType::U4) return {8 * q + (j & 7), g};
+    if (t == WmmaType::B1) return {32 * q + (j & 31), g};
+    return {q, g};   // f64 m8n8k4
+  }
+  // The accumulator and the result.
+  const uint32_t k = j & (s.m == 8 && s.n == 8 ? 1u : 7u);
+  if (s.m == 8 && s.n == 8) return {g, 2 * q + k};
+  if (s.m == 32) return {8 * (k >> 1) + g, 2 * q + (k & 1)};
+  if (s.n == 32) return {2 * q + (k & 1), 8 * (k >> 1) + g};
+  return {g + 8 * ((k >> 1) & 1), 8 * (k >> 2) + 2 * q + (k & 1)};
+}
+inline WmmaSlot wmma_slot(const WmmaGeom& g, uint32_t lane, uint32_t reg, uint32_t e) {
+  return wmma_hw_slot(g.frag, g.shape, g.type, lane, reg * (g.reg_bits / g.bits) + e);
 }
 struct OpWmmaMma {
   WmmaElem elem = WmmaElem::F16;
@@ -889,13 +974,10 @@ struct OpWmmaMma {
   FRound rnd = FRound::Nearest;  // f64
   bool any_wide = false;       // some fragment register is 64-bit (set by the parser)
 };
-// wmma.load.{a,b,c}.sync.aligned.<layout>.m16n16k16[.space].<type> {d...}, [addr], stride
+// wmma.load.{a,b,c}.sync.aligned.<layout>.<shape>[.space].<type> {d...}, [addr], stride
 //
-// The fragment layout WMMA uses is deliberately unspecified by CUDA -- a
-// fragment is an opaque object, and the only contract is that load, mma and
-// store agree with each other. So this mirrors exactly what exec_wmma_mma
-// already reads rather than trying to reproduce NVIDIA's register assignment,
-// which is not documented and not observable through the API.
+// The fragment holds the logical matrix in the hardware's distribution over lanes and registers (wmma_hw_slot); the load applies
+// the memory layout, so a .col fragment is the same logical matrix as a .row one loaded from the transposed memory.
 struct OpWmmaLoad {
   enum class Which { A, B, C } which = Which::A;
   WmmaElem elem = WmmaElem::F16;

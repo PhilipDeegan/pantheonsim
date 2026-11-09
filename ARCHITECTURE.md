@@ -287,20 +287,23 @@ so a 32-bit `st.shared [%r]` truncated a 64-bit pointer and wrote through
 address 0. Shared memory is per-block and **zero-initialized** (hardware leaves
 it undefined) — another deliberate determinism divergence.
 
-### D8. Tensor-core fragments: a chosen, documented layout
+### D8. Tensor-core fragments: the hardware's layout
 
 PTX explicitly leaves the mapping of matrix elements to `wmma` fragment
-registers **unspecified**. VirtualGPU therefore defines its own self-consistent
-layout (m16n16k16: A/B halves indexed by lane and register, C/D f32 as a flat
-row-major 256-element spread over 32 lanes x 8 registers) and computes
-`D = A x B + C` from it.
+registers **unspecified**, but programs observe it: `frag.x[i]` is an ordinary
+array, and tiny-cuda-nn masks an accumulator with the elements of an A fragment
+(`acc.x[i] *= (a.x[i] > 0)`), as CUTLASS epilogues and hand-written kernels do.
+A layout of our own broke exactly that (pantheonsim #550), so every fragment of
+every shape and type holds its elements where an RTX 3060 (sm_86) puts them: the
+distribution of the `mma.sync` fragments the tensor core takes, listed in
+`wmma_hw_slot` (`include/vgpu/ptx/ast.hpp`), measured by loading a matrix of
+element indices through `nvcuda::wmma::load_matrix_sync` and reading every
+fragment element back. `nvidia/tests/e2e/wmma_fragment_layout.cu` states the
+same layout a different way and passes on the card and on both engines.
 
-Consequence, stated plainly: kernels that treat fragments as opaque
-(`wmma.load` -> `wmma.mma` -> `wmma.store`) or that fill them uniformly get
-hardware-matching results. A kernel that depends on NVIDIA's exact undocumented
-element distribution — which is legal to observe but not to rely on — may
-differ. That is the correct trade for a functional simulator, and the
-characterization suite is where any real divergence would be caught.
+Not measured: Volta (sm_70), whose layout may differ, and not modelled: the contents of the
+duplicated halves of an f16 A or B fragment that a program rewrites element by
+element (the duplicate is read back as the last of its slots).
 
 ### D9. Clean-room ABI discipline
 

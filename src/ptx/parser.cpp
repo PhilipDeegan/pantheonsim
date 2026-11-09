@@ -839,6 +839,7 @@ class Parser {
     parse_body(fn);
     FinalizeOptions passes;
     passes.contract_mul_add = true;   // ptxas contracts; no other frontend does (builder.hpp)
+    passes.drop_dead_wmma_loads = true;   // and removes a wmma.load nothing reads
     finalize_function(fn, passes);
     current_kernel_.clear();
     cur_fn_ = nullptr;
@@ -2365,7 +2366,6 @@ class Parser {
         if (shape == WmmaShape{8, 8, 4}) return t == WmmaType::F64;
         return t == WmmaType::S32;
       };
-      const bool legacy_shape = shape == WmmaShape{16, 16, 16} || shape == WmmaShape{16, 16, 8};
       auto arity = [&](char f, WmmaType t, size_t have) -> bool { return wmma_geom(f, shape, t).regs == have; };
       // The stride is optional: the matrix's own leading dimension otherwise.
       auto stride_or_default = [&](char f, WmmaType t, MatLayout lay) -> Operand {
@@ -2390,10 +2390,7 @@ class Parser {
         if ((t == WmmaType::S4 || t == WmmaType::U4 || t == WmmaType::B1) &&
             op.layout != (frag == 'a' ? MatLayout::Row : MatLayout::Col))
           return unsupported("sub-byte and single-bit wmma loads A row-major and B column-major");
-        // The layouts this simulator has always used stay as they were.
-        if (frag == 'c') op.generic = !(legacy_shape && t == WmmaType::F32);
-        else op.generic = !((shape == WmmaShape{16, 16, 16} && (t == WmmaType::F16 || t == WmmaType::BF16)) ||
-                            t == WmmaType::TF32);
+        op.generic = true;
         op.f32 = frag == 'c';
         op.elem = t == WmmaType::BF16 ? WmmaElem::BF16 : t == WmmaType::TF32 ? WmmaElem::TF32 : WmmaElem::F16;
         op.dsts = parse_reg_vector_any();
@@ -2412,7 +2409,7 @@ class Parser {
         op.space = space;
         op.shape = shape;
         op.type = types[0];
-        op.generic = !(legacy_shape && op.type == WmmaType::F32);
+        op.generic = true;
         op.addr = parse_addr(fn);
         expect_punct(",");
         for (auto& r : parse_reg_vector_any()) op.src.push_back(Operand{RegOperand{r}});
@@ -2473,9 +2470,7 @@ class Parser {
         op.satfinite = satfinite;
         op.b1_and = b1_and;
         op.rnd = rnd;
-        op.generic = !((shape == WmmaShape{16, 16, 16} && (fp16 || at == WmmaType::BF16) &&
-                        op.ctype == WmmaType::F32 && op.dtype == WmmaType::F32) ||
-                       at == WmmaType::TF32);
+        op.generic = true;
         op.elem = at == WmmaType::BF16 ? WmmaElem::BF16 : at == WmmaType::TF32 ? WmmaElem::TF32 : WmmaElem::F16;
         op.d = parse_reg_vector_any();
         expect_punct(",");

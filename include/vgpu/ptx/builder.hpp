@@ -54,6 +54,8 @@ struct FinalizeOptions {
   // PTX only: rewrite a mul and the add/sub that consumes its product into an
   // fma, as ptxas does (src/ptx/contract.cpp). Off for every other frontend.
   bool contract_mul_add = false;
+  // PTX only: a wmma.load nothing reads is dead code that ptxas removes (drop_dead_wmma_loads). Off for every other frontend.
+  bool drop_dead_wmma_loads = false;
   // Record which of two NaN operands an f64 add/mul/min/max/fma returns
   // (mark_nan_order). Independent of contraction.
   bool nan_order = true;

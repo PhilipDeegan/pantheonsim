@@ -4397,6 +4397,17 @@ if(TARGET vgpucudart)
     TIMEOUT 600)
 endif()
 
+# Which matrix element each WMMA fragment element is, for every shape and type (the card's layout), and the accumulator-masked-by-an-A-
+# fragment pattern of tiny-cuda-nn's fused backward pass; on the SASS engine and on the PTX engine.
+if(TARGET vgpucudart)
+  add_test(NAME e2e_wmma_fragment_layout COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_wmma_fragment_layout.sh)
+  set_tests_properties(e2e_wmma_fragment_layout PROPERTIES
+    DEPENDS vgpucudart
+    ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
+    SKIP_REGULAR_EXPRESSION "^SKIP:"
+    TIMEOUT 600)
+endif()
+
 # Dynamic parallelism: device-side launches, nesting, order, named streams.
 if(TARGET vgpucudart)
   add_test(NAME e2e_dynamic_parallelism COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_dynamic_parallelism.sh)
