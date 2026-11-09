@@ -1,4 +1,4 @@
-# Host-GPU mode on a real card (docs/performance.md "Round sp15"; plan in docs/perf-design/09-host-gpu-spike.md section 6). Hosted CI has no GPU, so
+# Host-GPU mode on a real card (docs/perf-design/rounds/08-rounds-sp11-sp15.md "Round sp15"; plan in docs/perf-design/09-host-gpu-spike.md section 6). Hosted CI has no GPU, so
 # e2e_host_gpu skips there; this workflow gives the mode a card: it launches ONE ephemeral g5.xlarge (NVIDIA A10G) with tools/card-ci/card-runner.sh, runs
 # tools/card-ci/run-card-ci.sh on it, and terminates it whatever happened. About 35 to 50 minutes, about $0.70 a run.
 #

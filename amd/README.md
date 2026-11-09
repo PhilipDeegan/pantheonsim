@@ -33,7 +33,7 @@ registers, RAS counts, CPER records and amdgpu sysfs files are modelled
   that handler over whole register rows instead of lane by lane (`VGPU_AMD_TIER=0` turns it off). A handler does the
   whole instruction or nothing, so everything it does not model -- and every float result that is a NaN -- is the
   interpreter's, and results and counters are the interpreter's bit for bit
-  (`tests/unit/test_gcn_tier_same_bits.cpp`; `docs/performance.md`, "The AMD pre-decoded tier").
+  (`tests/unit/test_gcn_tier_same_bits.cpp`; `docs/perf-design/rounds/04-speedup-branches-tier2-amd-tier.md`, "The AMD pre-decoded tier").
 
 - `src/hip_api.cpp` is `libamdhip64`: the HIP runtime API, over those pieces.
   A HIP program links against it the way it links against AMD's, asks for

@@ -65,7 +65,7 @@ them. Say in the pull request which you ran.
   header, or the card output the claim comes from.
 - **A loud failure for what you leave out.** If a change handles only part of
   an instruction or an API, make the rest fail with a message that names it,
-  and add it to the gap list in [TODO.md](TODO.md).
+  and add it to the gap list in [docs/gap-register.md](docs/gap-register.md) (open work is summarised in [TODO.md](TODO.md)).
 - **Documentation that matches.** Update the page that describes the behaviour
   (`docs/`, `nvidia/docs/`, `amd/docs/`, or the README of that vendor), and the
   counts in [docs/status.md](docs/status.md) if you add or change a profile or a

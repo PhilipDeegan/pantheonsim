@@ -8,7 +8,7 @@
 //   VGPU_HOST_STATS_FILE=  append the lines to this file instead of stderr
 //
 // A line reads, for example,
-//   vgpu-host-stats t=120.0s cpu_user=95.1s cpu_sys=21.7s minflt=4783885 majflt=0 vol_cs=9018 invol_cs=88 threads=5 \
+//   vgpu-host-stats t=120.0s cpu_user=95.1s cpu_sys=21.7s minflt=4783885 majflt=0 vol_cs=9018 invol_cs=88 threads=5
 //     thp_kb=0 madvise_dontneed=100000 arena_maps=3 pool_threads=4 pool_calls=88123 kernel=7.0.0-1017-azure cpus=4 thp=madvise
 // A large cpu_sys against cpu_user, or minflt growing by millions, points at the kernel (page faults, mmap/madvise);
 // invol_cs growing fast with the pool's threads busy points at scheduling; neither points at the simulator's own work.

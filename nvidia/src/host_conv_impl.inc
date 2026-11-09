@@ -181,8 +181,6 @@ void filt_block(const Geom& g, const double* dy, const double* xt, int64_t cs, i
 //
 // dyk: filter k's output planes (image n at dyk + n*K*osz); xc: input channel c's planes (image n at xc + n*C*isz);
 // xend: one past the last element of x (a vector load must not reach it); dw: this (k, ci)'s taps, fsz of them.
-constexpr int kTapLanes = 2 * (kVB / 8);
-
 void filt_taps(const Geom& g, const double* dyk, const double* xc, const double* xend, double* dw) {
   typedef double V __attribute__((vector_size(kVB)));
   constexpr int L = kVB / 8;

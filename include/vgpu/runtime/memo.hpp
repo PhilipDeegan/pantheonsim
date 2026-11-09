@@ -1,6 +1,6 @@
 // Launch-level result caching for one device: the history chain, the launch key, the write-set capture, the store
 // (memory and disk) and the rules that say when a launch cannot be cached. Opt-in (VGPU_MEMO=1); everything here is
-// idle, and Device::launch does not reach it, when it is off. vgpu/memo.hpp has the idea; docs/performance.md,
+// idle, and Device::launch does not reach it, when it is off. vgpu/memo.hpp has the idea; docs/perf-design/rounds/10-rounds-sp19-sp27.md,
 // "Round sp35", has the rules and the measurements; docs/cli.md the knobs.
 #pragma once
 

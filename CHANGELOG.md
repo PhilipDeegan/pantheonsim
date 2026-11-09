@@ -108,10 +108,6 @@ release says what runs and what it produces, never how fast a real GPU would run
   names, not just the first lane's. With two half-warp tiles, the tile that did not contain the first lane went on while a member of
   its own tile was still in a long loop and read 0 for it (HierarchicalKV's `tlp_v2_upsert*`). Only the lanes whose members are away
   wait; the rest of the path runs on (pantheonsim #488).
-- License: from the next release PantheonSim is under the Business Source License 1.1, which keeps it free to use, change and run in
-  your own CI and allows one restriction: you may not offer it to other people as a hosted or managed service. Each version becomes
-  Apache-2.0 four years after release. Versions up to 0.2.0 stay Apache-2.0 (`LICENSE-APACHE-2.0`). `docs/licensing.md` has the
-  details, and contributions now need the Contributor Agreement.
 - libcudart exports the nine `cudaGL*` interop functions the CUDA 13.0 runtime does (`cudaGLRegisterBufferObject`, `cudaGLMapBufferObject`,
   `cudaGLSetGLDevice`, `cudaGLGetDevices`, ...). A program that only names one of them, such as COLMAP's SiftGPU, failed to start when linked with
   `-z now` ("undefined symbol: cudaGLRegisterBufferObject"). With no OpenGL context on a simulated GPU they answer what an RTX 3060 answers with none:
@@ -124,7 +120,7 @@ release says what runs and what it produces, never how fast a real GPU would run
   memory a kernel can reach, device malloc and printf, cooperative and cluster launches, textures, atomics on several threads, a
   profiler, the race detector, an armed fault, ...) restarts the chain, so the cost on a miss is a budgeted before-and-after hash of
   the allocations the launch can write and the answer is never a stale one. Knobs: [docs/cli.md](docs/cli.md); rules, tests, mutants
-  and measurements: [docs/performance.md](docs/performance.md#round-sp35-launch-level-result-caching-built-tested-measured-branch-sp35-memo-base-originmain-9f80d40e).
+  and measurements: [docs/perf-design/rounds/10-rounds-sp19-sp27.md](docs/perf-design/rounds/10-rounds-sp19-sp27.md#round-sp35-launch-level-result-caching-built-tested-measured-branch-sp35-memo-base-originmain-9f80d40e).
 - The container image builds again. `scripts/package-build.sh` left `shim/libcudss.so.1` pointing into `cudss1/`, a directory the image does not
   have, so the build stopped at "links that lead nowhere" from the cuDSS 1.0 change onward. A lint test (`lint_package_build`) now builds a small
   tree with the same layout.

@@ -3398,7 +3398,7 @@ void tier_classify(Inst& in) {
 
 namespace {
 
-// ---- Defined last (Round sp27, amd-f64): nothing above moves for them; see docs/performance.md.
+// ---- Defined last (Round sp27, amd-f64): nothing above moves for them; see docs/perf-design/rounds/10-rounds-sp19-sp27.md.
 
 // v_ldexp_f32 of the lanes of a row where some active lane is not the exact case: every active lane by gcn::divide::ldexp_f32_bits (libm's
 // ldexpf, in integers). Inactive lanes get a copy of the operand: their results are never stored.

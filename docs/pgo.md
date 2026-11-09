@@ -3,7 +3,7 @@
 `scripts/pgo-build.sh` builds the simulator's libraries with GCC's profile-guided optimisation: an instrumented build, a training
 run over a manifest of real programs, and an optimised build from the profile. The default build is untouched (PGO stays opt-in:
 `VGPU_PGO=generate|use` in `CMakeLists.txt`); the script is what a release job calls. The first measurement (2026-11-08, held-out programs, train/test split) found NO release-wide gain (geometric mean 0.993x, three large
-losses): releases do not ship PGO builds, and this is an experiment tool. Whether they should, and what it buys, is measured in [performance.md, "Round sp39 (PGO)"](performance.md).
+losses): releases do not ship PGO builds, and this is an experiment tool. Whether they should, and what it buys, is measured in [Round sp39](perf-design/rounds/11-rounds-sp36-sp41.md#round-sp39-release-wide-pgo-no-speed-up-on-held-out-programs-stays-opt-in-branch-sp39-pgo).
 
 ```
 export PGO_CORP=/path/to/corpus PGO_PY=/path/to/python-with-pytorch   # see "The corpus"
@@ -112,8 +112,7 @@ The pipeline therefore treats any difference in the compiler's full version as s
 
 * GCC optimises for size every function the profile never executed. `-DCMAKE_CXX_FLAGS=-fprofile-partial-training` (given to the
   `use` stage with `--cmake-arg`) turns that off; it repaired two of the five large losses of the first measurement and none of the
-  shared-memory ones, and it made `test_amd_gcn_same_bits` fail (one `v_mac_f32` result differs): do not use it (performance.md,
-  "Round sp39").
+  shared-memory ones, and it made `test_amd_gcn_same_bits` fail (one `v_mac_f32` result differs): do not use it ([Round sp39](perf-design/rounds/11-rounds-sp36-sp41.md)).
 * A PGO build fails `test_amd_matrix_kernels_layout`: `-fprofile-use` drops the 64-byte alignment the tree gives its AVX2 tile kernels.
   Run `ctest` on a PGO build before trusting it for anything beyond the held-out timings.
 
