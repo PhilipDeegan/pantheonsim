@@ -5022,6 +5022,7 @@ class Interpreter {
     // Arithmetic that carries a type: float by width, otherwise integer.
     if (const auto* o = std::get_if<OpFloatBin>(&ins.op)) return by_width(o->ty);
     if (const auto* o = std::get_if<OpFma>(&ins.op)) return by_width(o->ty);
+    if (std::holds_alternative<OpFloatMinMax3>(ins.op)) return InstClass::Fp32;
     if (const auto* o = std::get_if<OpMath>(&ins.op)) return by_width(o->ty);
     if (const auto* o = std::get_if<OpLibm>(&ins.op)) return by_width(o->ty);
     if (const auto* o = std::get_if<OpCopysign>(&ins.op)) return by_width(o->ty);
@@ -7403,6 +7404,37 @@ class Interpreter {
         Mask& q = pred_slot(w, op->dst2);
         q = (q & ~m) | (qv & m);
       }
+      return;
+    }
+    if (const auto* op = std::get_if<OpFloatMinMax3>(&ins.op)) {
+      // min/max of three f32 (sm_100): what the card's FMNMX3 does with the inputs in turn. A NaN input loses to a number (all three NaN: the
+      // last one's bits), of two zeros the min takes the negative one and the max the positive one; .NaN makes any NaN input the
+      // canonical NaN (so do three NaNs, as for FMNMX's two); .abs takes each input's magnitude first and .ftz flushes subnormal inputs.
+      Lanes _s_a, _s_b, _s_c;
+      const Lanes& a = read_operand(w, ctx, ins, op->a, _s_a);
+      const Lanes& b = read_operand(w, ctx, ins, op->b, _s_b);
+      const Lanes& c = read_operand(w, ctx, ins, op->c, _s_c);
+      Lanes r;  // written for every active lane below
+      const auto load = [&](uint64_t bits) {
+        float f = std::bit_cast<float>(static_cast<uint32_t>(bits));
+        if (op->ftz && (std::bit_cast<uint32_t>(f) & 0x7F800000u) == 0) f = std::bit_cast<float>(std::bit_cast<uint32_t>(f) & 0x80000000u);
+        if (op->abs) f = std::fabs(f);
+        return f;
+      };
+      for (uint32_t lane = 0; lane < W_; ++lane)
+        if (m & (Mask{1} << lane)) {
+          float v = load(a[lane]);
+          bool nan = v != v;
+          for (const float x : {load(b[lane]), load(c[lane])}) {
+            nan = nan || x != x;
+            if (v != v) v = x;
+            else if (x != x) continue;
+            else if (v == 0 && x == 0) v = op->is_min ? (std::signbit(v) ? v : x) : (std::signbit(v) ? x : v);
+            else v = op->is_min ? std::min(v, x) : std::max(v, x);
+          }
+          r[lane] = (op->nan_propagate && nan) || v != v ? uint64_t{0x7FFFFFFFu} : uint64_t{std::bit_cast<uint32_t>(v)};
+        }
+      write_reg(w, op->dst, m, r, 32);
       return;
     }
     if (const auto* op = std::get_if<OpFloatBin>(&ins.op)) {

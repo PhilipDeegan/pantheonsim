@@ -3891,6 +3891,17 @@ if(TARGET vgpucudart)
     TIMEOUT 1800)
 endif()
 
+# min and max in every PTX form (f32, f16, f16x2, bf16, bf16x2 with .ftz, .NaN and .xorsign.abs; the sm_100 three-input f32 forms), against a
+# model of the ISA, on sm_80 and up, SASS (interpreter and tier) and PTX (pantheonsim #547 and its siblings).
+if(TARGET vgpucudart)
+  add_test(NAME e2e_minmax_forms COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_sass_archs.sh)
+  set_tests_properties(e2e_minmax_forms PROPERTIES
+    DEPENDS vgpucudart
+    ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR};VGPU_SASS_PROGRAMS=minmax_forms:80;VGPU_SASS_ARCHS=sm_80 sm_86 sm_89 sm_90 sm_100 sm_120"
+    SKIP_REGULAR_EXPRESSION "^SKIP:"
+    TIMEOUT 1800)
+endif()
+
 # The SASS executor's fast paths against its general path (VGPU_FASTPATH=0): answers and counters.
 add_test(NAME e2e_sass_fastpath
          COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_sass_fastpath.sh)
@@ -4775,7 +4786,7 @@ endif()
 foreach(_t e2e_cutlass_gemm e2e_cutlass_sm120 e2e_cutlass_sm100 e2e_cutlass_hopper e2e_cutlass_sm103
            e2e_cutlass_sm100_conv e2e_cutlass_fmha e2e_tma_gemm_cute e2e_wgmma_cute
            e2e_tma_reduce_cute e2e_tensormap_replace_cute e2e_sass_archs e2e_device_runtime
-           e2e_sync_masks e2e_dpx_intrinsics e2e_packed_f32x2)
+           e2e_sync_masks e2e_dpx_intrinsics e2e_minmax_forms e2e_packed_f32x2)
   if(TEST ${_t})
     set_property(TEST ${_t} APPEND PROPERTY RESOURCE_LOCK nvcc_memory)
   endif()

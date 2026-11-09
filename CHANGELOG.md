@@ -7,6 +7,13 @@ release says what runs and what it produces, never how fast a real GPU would run
 
 ## Unreleased
 
+- PTX and SASS `min`/`max`: the SASS tier could not decode `HMNMX2`, the instruction behind `min`/`max` on `f16`, `f16x2`, `bf16` and
+  `bf16x2` (`__hmin2`, `__hmax2`, `min.NaN.f16`, ...), so a kernel using one stopped with an illegal-memory-access error; it now runs
+  them, with `.ftz`, `.NaN` and `.xorsign.abs` as the PTX engine and an RTX 3060 give. `FMNMX.XORSIGN` (`min.xorsign.abs.f32`) ignored
+  its sign rule on SASS and returned an unsigned magnitude. The PTX engine accepts the three-input `min`/`max{.ftz}{.NaN}{.abs}.f32` of
+  sm_100 that ptxas emits (it was an unsupported-PTX error). `max.s32.relu`, `__viaddmax_s32_relu` and the other `.relu` forms of
+  pantheonsim #547 already ran since #451; new e2e test `e2e_minmax_forms` sweeps every sibling form (the relu and DPX ones are in
+  `e2e_dpx_intrinsics`).
 - cuFFT: an in-place real transform (`cufftExecR2C`, `D2Z`, `C2R`, `Z2D` on one buffer, no advanced layout) reads and writes the
   padded real array cuFFT documents (each row of the fastest axis is `2 * (n / 2 + 1)` reals, a batch is the complex distance
   apart). It read the array as dense, so 2D and 3D results were wrong and so was a 1D batch (pantheonsim #548).
