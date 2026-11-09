@@ -2724,7 +2724,10 @@ bool Runner::tier_run_t(Block& blk, Warp& w, Mask group, uint64_t pick, const Co
       }
       blk.live -= popc(go & w.alive & ~w.exited);
       w.exited |= go;
-      for (Mask m = group & ~go; m; m &= m - 1) w.pc[std::countr_zero(m)] = here + 16;
+      // The lanes of the group that stay go on to the next instruction: one masked store of the addresses, not a loop over the lanes (a guard that
+      // lets a few lanes of a warp leave, the end of a grid that is not a multiple of the block, leaves most of them here, and the loop was the
+      // largest single line of FDTD-2D's and LU's run loop: 3 % of their cycles).
+      if (const Mask stay = group & ~go) tier_set_pcs(w, stay, here + 16);
       cluster_barrier_check(blk);
       if (tier_stats_) [[unlikely]] tier_stats().native[static_cast<size_t>(Op::EXIT)].fetch_add(1, std::memory_order_relaxed);
     } else if (last.form == tier::Form::Bar) {

@@ -1,0 +1,14 @@
+samples/radixSortThrust            thr=1 b0:tier                    tier  DIFFERENT out:b053ac3e1aad/b053ac3e1aad cnt:False dig:False rc:0/0
+samples/radixSortThrust            thr=1 a:tier                     tier  DIFFERENT out:b053ac3e1aad/b053ac3e1aad cnt:False dig:False rc:0/0
+samples/radixSortThrust            thr=4 b0:tier                    tier  DIFFERENT out:b053ac3e1aad/b053ac3e1aad cnt:False dig:False rc:0/0
+samples/radixSortThrust            thr=4 a:tier                     tier  DIFFERENT out:b053ac3e1aad/b053ac3e1aad cnt:False dig:False rc:0/0
+samples/jacobiCudaGraphs           thr=1 b0:tier                    tier  same
+samples/jacobiCudaGraphs           thr=1 a:tier                     tier  same
+samples/jacobiCudaGraphs           thr=4 b0:tier                    tier  DIFFERENT out:1d5f88eb23a9/1d5f88eb23a9 cnt:True dig:False rc:0/0
+samples/jacobiCudaGraphs           thr=4 a:tier                     tier  DIFFERENT out:1d5f88eb23a9/1d5f88eb23a9 cnt:True dig:False rc:0/0
+samples/segmentationTreeThrust     thr=1 b0:tier                    tier  same
+samples/segmentationTreeThrust     thr=1 a:tier                     tier  same
+samples/segmentationTreeThrust     thr=4 b0:tier                    tier  DIFFERENT out:de1141cd7928/de1141cd7928 cnt:False dig:True rc:0/0
+samples/segmentationTreeThrust     thr=4 a:tier                     tier  DIFFERENT out:de1141cd7928/de1141cd7928 cnt:False dig:True rc:0/0
+DIFFERENCES: 8
+CTLDONE

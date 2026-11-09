@@ -243,6 +243,17 @@ memo::Config base_config(const std::string& dir = "") {
   return c;
 }
 
+// The cache as shipped in the one respect the host-write budget tests are about: nothing is forced, recording is free (a second of
+// credit), and the hashing of the bytes of host writes has `event_credit_ns` of credit and no share of the kernel time.
+memo::Config budget_config(const std::string& dir, uint64_t event_credit_ns) {
+  memo::Config c = base_config(dir);
+  c.force_record = false;
+  c.budget = 0.0;
+  c.credit_ns = 1000000000ull;
+  c.event_credit_ns = event_credit_ns;
+  return c;
+}
+
 // Runs a shell command; its status is of no interest (a directory that is not there is what rm -rf is asked about).
 void sh(const std::string& cmd) {
   const int rc = std::system(cmd.c_str());
@@ -1290,6 +1301,30 @@ bool caught(const std::string& m, bool mutate = true) {
     remove_dir(dir);
     return warm.stats.hits == 1 && warm.stats.replayed_instructions != cold.stats.recorded_instructions;
   }
+  if (m == "event_budget_no_poison") {   // a host write the budget refuses is an event without its bytes: another run's bytes match it
+    const std::string dir = temp_dir("mut-evb");
+    memo::Config cfg = budget_config(dir, 0);
+    cfg.mutant = mut;
+    (void)run_program(axpy_prog(1, 2, 1), &cfg);
+    const Outcome warm = run_program(axpy_prog(1, 2, 5), &cfg);
+    const Outcome truth = run_program(axpy_prog(1, 2, 5), nullptr);
+    remove_dir(dir);
+    return warm.log != truth.log || warm.stats.hits != 0;
+  }
+  if (m == "dormant_keeps_history") {   // a cache that went quiet still hashes the host writes it is told about
+    memo::Config cfg = budget_config("", 1000000000ull);
+    cfg.dormant_after = 4;
+    cfg.dormant_fixed_share = 0.0;
+    cfg.mutant = mut;
+    Rig r(&cfg);
+    const uint64_t y = r.alloc(4096), x = r.alloc(4096);
+    r.write_words(x, {1, 2, 3, 4});
+    for (uint32_t i = 0; i < 8; ++i) r.launch("axpy", 1, 4, {arg_u64(y), arg_u64(x), arg_u32(i + 2)});
+    if (r.stats().dormant_launches == 0) return false;   // (the scenario did not make it quiet: not a catch)
+    const memo::Hash128 s0 = r.memo()->state();
+    r.write_words(x, {9, 9, 9, 9});
+    return r.memo()->state() != s0;   // moved: the write was hashed into a history nobody will read
+  }
   // The poisoning rows: with the rule off, a launch that must not be cached is, and the second run hits after it.
   struct Row {
     const char* mutant;
@@ -1397,6 +1432,114 @@ bool caught(const std::string& m, bool mutate = true) {
 
 }  // namespace
 
+// ---- the hashing of host writes is part of the budget ----------------------------------------------------------------------------
+
+VTEST(host_writes_over_the_budget_poison_and_never_make_a_wrong_hit) {
+  const std::string dir = temp_dir("evbudget");
+  const memo::Config cfg = budget_config(dir, 0);   // every write is over budget
+  const Outcome t1 = run_program(axpy_prog(1, 2, 1), nullptr);
+  const Outcome t5 = run_program(axpy_prog(1, 2, 5), nullptr);
+  const Outcome a = run_program(axpy_prog(1, 2, 1), &cfg);
+  const Outcome b = run_program(axpy_prog(1, 2, 5), &cfg);
+  const Outcome c = run_program(axpy_prog(1, 2, 1), &cfg);   // the same program as the first: a poisoned history still never matches
+  check_same(t1, a, "over budget, first");
+  check_same(t5, b, "over budget, other bytes");
+  check_same(t1, c, "over budget, same bytes again");
+  for (const Outcome* o : {&a, &b, &c}) {
+    VCHECK(o->stats.events_skipped >= 1);
+    VCHECK_EQ(o->stats.hits, 0u);
+    VCHECK(o->stats.reasons.count("event-budget") == 1);
+    VCHECK_EQ(o->stats.event_ns, 0u);   // nothing was hashed
+    VCHECK(o->stats.recorded >= 1);     // (the launch itself was still recorded: it is the history that is poisoned)
+  }
+  remove_dir(dir);
+}
+
+VTEST(host_writes_within_the_budget_are_hashed_and_a_second_run_hits) {
+  const std::string dir = temp_dir("evbudget-ok");
+  const memo::Config cfg = budget_config(dir, 1000000000ull);
+  const Outcome t1 = run_program(axpy_prog(1, 2, 1), nullptr);
+  const Outcome t5 = run_program(axpy_prog(1, 2, 5), nullptr);
+  const Outcome cold = run_program(axpy_prog(1, 2, 1), &cfg);
+  const Outcome same = run_program(axpy_prog(1, 2, 1), &cfg);
+  const Outcome other = run_program(axpy_prog(1, 2, 5), &cfg);
+  check_same(t1, cold, "within budget, cold");
+  check_same(t1, same, "within budget, warm");
+  check_same(t5, other, "within budget, other bytes");
+  VCHECK_EQ(cold.stats.events_skipped, 0u);
+  VCHECK(cold.stats.event_ns > 0);
+  VCHECK_EQ(same.stats.hits, 1u);    // the same bytes: the hit
+  VCHECK_EQ(other.stats.hits, 0u);   // other bytes: none
+  remove_dir(dir);
+}
+
+VTEST(a_big_write_over_the_budget_poisons_and_the_small_writes_after_it_are_hashed_again) {
+  const std::string dir = temp_dir("evbudget-big");
+  // 8 MiB at the cache's starting hash rate is 1.4 ms; the credit is 1 ms. A 64-byte write is 0.3 us.
+  const memo::Config cfg = budget_config(dir, 1000000);
+  const Program prog = [](Rig& r, std::vector<std::string>& log) {
+    const uint64_t big = r.alloc(8u << 20), y = r.alloc(4096), x = r.alloc(4096);
+    std::vector<uint8_t> bytes(8u << 20, 3);
+    r.mem().write(big, bytes.data(), bytes.size());   // refused: poisons
+    r.write_words(x, {1, 2, 3, 4});                   // hashed
+    r.write_words(x, {5, 6, 7, 8});                   // hashed
+    r.launch("axpy", 1, 4, {arg_u64(y), arg_u64(x), arg_u32(2)});
+    r.launch("fixed", 1, 4, {arg_u64(y)});
+    r.launch("fixed", 1, 4, {arg_u64(y)});
+    r.launch("fixed", 1, 4, {arg_u64(y)});
+    log.push_back(r.everything());
+  };
+  const Outcome truth = run_program(prog, nullptr);
+  const Outcome cold = run_program(prog, &cfg);
+  const Outcome warm = run_program(prog, &cfg);
+  check_same(truth, cold, "big write, cold");
+  check_same(truth, warm, "big write, warm");
+  VCHECK_EQ(warm.stats.events_skipped, 1u);
+  VCHECK_EQ(warm.stats.disk_hits, 0u);   // nothing carries over from the first run: the history is poisoned
+  VCHECK(warm.stats.hits >= 1);          // but the loop of unchanged launches after the two small writes hits in the run
+  VCHECK(warm.stats.event_ns > 0);       // the small writes were hashed (charged by estimate)
+  remove_dir(dir);
+}
+
+VTEST(the_hashing_of_host_writes_stops_at_its_credit) {
+  const memo::Config cfg = budget_config("", 10000000);   // 10 ms
+  Rig r(&cfg);
+  const uint64_t buf = r.alloc(1u << 20);
+  const std::vector<uint8_t> bytes(1u << 20, 7);
+  for (int i = 0; i < 700; ++i) r.mem().write(buf, bytes.data(), bytes.size());   // 700 MiB: tens of ms of hashing, if it were all done
+  const memo::Stats s = r.stats();
+  VCHECK(s.events_skipped > 0);
+  VCHECK(s.event_ns > 0);
+  VCHECK(s.event_ns < 30000000ull);   // (the credit and the last write's error, not the whole)
+  VCHECK(s.events_skipped + 1 <= 700u);
+}
+
+VTEST(a_dormant_cache_keeps_no_history_and_the_answers_are_the_same) {
+  memo::Config cfg = budget_config("", 1000000000ull);
+  cfg.dormant_after = 4;            // quiet after 4 launches that did not hit, whatever they cost
+  cfg.dormant_fixed_share = 0.0;
+  const Program prog = [](Rig& r, std::vector<std::string>& log) {
+    const uint64_t y = r.alloc(4096), x = r.alloc(4096);
+    r.write_words(x, {1, 2, 3, 4});
+    for (uint32_t i = 0; i < 8; ++i) r.launch("axpy", 1, 4, {arg_u64(y), arg_u64(x), arg_u32(i + 2)});   // every launch changes y: no hit
+    log.push_back("before " + r.everything());
+    const memo::Hash128 s0 = r.memo() ? r.memo()->state() : memo::Hash128{};
+    r.write_words(x, {9, 9, 9, 9});    // a host write after the cache went quiet
+    const memo::Hash128 s1 = r.memo() ? r.memo()->state() : memo::Hash128{};
+    log.push_back(std::string("history ") + (s0 == s1 ? "kept still" : "moved"));
+    r.launch("axpy", 1, 4, {arg_u64(y), arg_u64(x), arg_u32(3)});
+    log.push_back("after " + r.everything());
+  };
+  const Outcome off = run_program(prog, nullptr);
+  const Outcome on = run_program(prog, &cfg);
+  VCHECK(on.stats.dormant_launches >= 1);
+  VCHECK(on.log.size() == off.log.size());
+  for (size_t i = 0; i < on.log.size() && i < off.log.size(); ++i) {
+    if (off.log[i].rfind("history", 0) == 0) VCHECK_EQ(on.log[i], std::string("history kept still"));   // (without a cache there is nothing to compare)
+    else VCHECK_EQ(on.log[i], off.log[i]);
+  }
+}
+
 VTEST(every_mutant_is_caught) {
   ::unsetenv("VGPU_THREADS");
   const char* mutants[] = {"drop_byte",        "key_no_grid",         "key_no_args",         "key_no_code",       "key_no_profile",
@@ -1404,7 +1547,7 @@ VTEST(every_mutant_is_caught) {
                            "no_copy_event",    "no_free_event",       "no_alloc_event",      "commutative_chain", "state_never_advances",
                            "no_cache_invalidation", "ptrs_never",     "skip_module_globals", "hit_zero_counters", "no_poison_vmm",
                            "no_poison_atomics", "no_poison_device_calls", "no_poison_smid",   "no_poison_textures", "no_poison_host_maps",
-                           "no_poison_taint",  "no_poison_concurrent", "no_poison_faults"};
+                           "no_poison_taint",  "no_poison_concurrent", "no_poison_faults",  "event_budget_no_poison", "dormant_keeps_history"};
   int missed = 0;
   for (const char* m : mutants) {
     const bool c = caught(m);
@@ -1427,7 +1570,7 @@ VTEST(the_unmutated_cache_passes_the_same_scenarios) {
                          "no_copy_event",    "no_free_event",       "no_alloc_event",      "commutative_chain", "state_never_advances",
                          "no_cache_invalidation", "ptrs_never",     "skip_module_globals", "hit_zero_counters", "no_poison_vmm",
                          "no_poison_atomics", "no_poison_device_calls", "no_poison_smid",   "no_poison_textures", "no_poison_host_maps",
-                         "no_poison_taint",  "no_poison_concurrent", "no_poison_faults"};
+                         "no_poison_taint",  "no_poison_concurrent", "no_poison_faults",  "event_budget_no_poison", "dormant_keeps_history"};
   int broken = 0;
   for (const char* m : names)
     if (caught(m, false)) {

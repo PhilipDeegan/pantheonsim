@@ -1,0 +1,35 @@
+=== shard tier 07:02:16
+ok   sm_86 sass_tier  (30 units (253 regions), 30 ready, 0 cache hits, 30 compiles (43115.6 ms), 0 failures, 0 damaged objects replaced; 245350 region calls ran 1543985 warp instructions (1160327 comp
+PASS
+=== shard tier rc=0 07:13:55
+=== shard loops 07:13:55
+ok   sm_86 jit_loops  (12 units (27 regions), 12 ready, 0 cache hits, 12 compiles (11702.5 ms), 0 failures, 0 damaged objects replaced; 156341 region calls ran 1417469 warp instructions (1289573 compu
+PASS
+=== shard loops rc=0 07:26:18
+=== shard steps 07:26:18
+ok   sm_86 sass_tier_steps  (26 units (213 regions), 26 ready, 0 cache hits, 26 compiles (51210.7 ms), 0 failures, 0 damaged objects replaced; 3468022 region calls ran 186340496 warp instructions (185
+PASS
+=== shard steps rc=0 07:41:06
+=== shard steps_gather 07:41:06
+ok   sm_86 sass_tier_steps  (26 units (213 regions), 26 ready, 0 cache hits, 26 compiles (51064.9 ms), 0 failures, 0 damaged objects replaced; 3468022 region calls ran 186340496 warp instructions (185
+PASS
+=== shard steps_gather rc=0 07:49:25
+=== shard steps_shared 07:49:25
+ok   sm_86 sass_tier_steps  (26 units (213 regions), 26 ready, 0 cache hits, 26 compiles (51290.0 ms), 0 failures, 0 damaged objects replaced; 3468022 region calls ran 186340496 warp instructions (185
+PASS
+=== shard steps_shared rc=0 07:55:59
+=== shard random 07:55:59
+ok   sm_86 jit_random seed 1  (16 units (37 regions), 16 ready, 0 cache hits, 16 compiles (26126.0 ms), 0 failures, 0 damaged objects replaced; 6100 region calls ran 395616 warp instructions (362464 c
+PASS
+=== shard random rc=0 08:10:44
+=== shard modes 08:10:44
+ok   sm_86 sass_tier (no compiler)  (1 units (2 regions), 0 ready, 0 cache hits, 0 compiles (0.0 ms), 1 failures, 0 damaged objects replaced; 0 region calls ran 0 warp instructions (0 computed by gene
+ok   sm_86 sass_tier (a compiler that fails)  (30 units (202 regions), 0 ready, 0 cache hits, 30 compiles (236.9 ms), 30 failures, 0 damaged objects replaced; 0 region calls ran 0 warp instructions (0
+ok   sm_86 sass_tier (a cache that cannot be created)  (1 units (2 regions), 0 ready, 0 cache hits, 0 compiles (0.0 ms), 1 failures, 0 damaged objects replaced; 0 region calls ran 0 warp instructions 
+ok   sm_86 sass_tier (a cache others can write to)  (1 units (2 regions), 0 ready, 0 cache hits, 0 compiles (0.0 ms), 1 failures, 0 damaged objects replaced; 0 region calls ran 0 warp instructions (0 
+ok   sm_86 sass_tier (a compile that times out)  (30 units (202 regions), 0 ready, 0 cache hits, 30 compiles (30191.4 ms), 30 failures, 0 damaged objects replaced; 0 region calls ran 0 warp instructio
+ok   sm_86 sass_tier (the full form: residence and specialisation)  (30 units (253 regions), 30 ready, 0 cache hits, 30 compiles (60301.1 ms), 0 failures, 0 damaged objects replaced; 181936 region cal
+ok   sm_86 sass_tier (residence only)  (30 units (253 regions), 30 ready, 0 cache hits, 30 compiles (43430.3 ms), 0 failures, 0 damaged objects replaced; 181936 region calls ran 1662731 warp instructi
+ok   sm_86 sass_tier (specialisation only)  (30 units (253 regions), 30 ready, 0 cache hits, 30 compiles (51259.2 ms), 0 failures, 0 damaged objects replaced; 181936 region calls ran 1662731 warp inst
+PASS
+=== shard modes rc=0 08:25:54
