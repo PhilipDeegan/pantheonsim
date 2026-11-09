@@ -1,4 +1,4 @@
-// H.264 (ITU-T H.264 03/2009) bitstream syntax: Annex B NAL units, the RBSP bit
+// H.264 (ITU-T H.264 03/2009) bitstream syntax: emulation-prevention removal, the RBSP bit
 // reader with Exp-Golomb codes, sequence and picture parameter sets (with the VUI
 // fields a decoder front end reports), and slice headers. Written from clauses
 // 7.3 and 7.4 and nothing else; shared by VirtualGPU's NVDEC (nvcuvid_api.cpp),
@@ -80,46 +80,6 @@ class BitReader {
   size_t pos_ = 0;
   bool overrun_ = false;
 };
-
-// ---- Annex B ------------------------------------------------------------------------------
-struct NalRef {
-  size_t start_code = 0;   // offset of the first byte of the start code (the 00 before 00 01, if any)
-  size_t payload = 0;      // offset of the NAL header byte
-  size_t end = 0;          // one past the last byte of the NAL unit (trailing zero bytes removed)
-  int ref_idc = 0, type = 0;
-};
-
-inline std::vector<NalRef> split_annexb(const uint8_t* d, size_t n) {
-  std::vector<NalRef> out;
-  size_t i = 0;
-  while (i + 3 <= n) {
-    if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 1) {
-      NalRef r;
-      r.start_code = (i > 0 && d[i - 1] == 0) ? i - 1 : i;
-      r.payload = i + 3;
-      if (!out.empty()) {
-        size_t e = r.start_code;
-        // the previous NAL ends at this start code; trailing_zero_8bits belong to no NAL
-        while (e > out.back().payload && d[e - 1] == 0) --e;
-        out.back().end = e;
-      }
-      if (r.payload < n) {
-        r.ref_idc = d[r.payload] >> 5 & 3;
-        r.type = d[r.payload] & 31;
-      }
-      out.push_back(r);
-      i += 3;
-    } else {
-      ++i;
-    }
-  }
-  if (!out.empty()) {
-    size_t e = n;
-    while (e > out.back().payload && d[e - 1] == 0) --e;
-    out.back().end = e;
-  }
-  return out;
-}
 
 // The RBSP of a NAL unit: emulation prevention bytes (00 00 03) removed. `skip` bytes of header are dropped.
 inline std::vector<uint8_t> unescape(const uint8_t* d, size_t n, size_t skip) {

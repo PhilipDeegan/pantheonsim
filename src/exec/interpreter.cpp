@@ -17,11 +17,11 @@ asm(".pushsection .text,\"ax\",@progbits\n.p2align 12\n.skip 2816\n.popsection")
 //    per-thread .local frames live in a reserved window (kLocalVaBase) that
 //    generic loads/stores route to the executing lane's private buffer —
 //    which is exactly PTX .local semantics. cvta is identity everywhere.
-//  - Atomics are read-modify-write in fixed lane order — trivially atomic
-//    and deterministic in this sequential engine.
+//  - Atomics are read-modify-write in fixed lane order within a warp.
 //  - Warps in a block run under a pluggable Scheduler; a warp yields only at
-//    barriers or retirement. Blocks run sequentially in a fixed order.
-//    Everything is deterministic by construction.
+//    barriers or retirement. Blocks run on VGPU_THREADS host threads (default:
+//    every core); VGPU_THREADS=1 runs them in a fixed order, which is the
+//    deterministic schedule (ARCHITECTURE.md).
 #include <algorithm>
 #if defined(__x86_64__)
 #include <immintrin.h>

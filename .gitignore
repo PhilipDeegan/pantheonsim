@@ -16,3 +16,5 @@ build-tsan/
 # Your own settings file (`make init` or `vgpu config init` writes it).
 pantheonsim.yaml
 .ccache/
+# CTest and CMake test outputs when configured in a source subdirectory.
+Testing/
