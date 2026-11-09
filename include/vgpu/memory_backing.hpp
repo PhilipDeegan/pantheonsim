@@ -113,4 +113,12 @@ uint64_t spill_bytes();
 // How many times the host-memory guard has read the host's memory figures.
 uint64_t host_guard_samples();
 
+// Calls this process has made to the kernel to manage heap-chunk memory: madvise(MADV_DONTNEED) on a chunk given back, and
+// mmap of a new arena. (What VGPU_HOST_STATS reports; see vgpu/host_stats.hpp.)
+struct KernelCalls {
+  uint64_t madvise_dontneed = 0;
+  uint64_t arena_maps = 0;
+};
+KernelCalls kernel_calls();
+
 }  // namespace vgpu::backing

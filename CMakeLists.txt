@@ -281,6 +281,7 @@ add_library(vgpu STATIC
   src/exec/worker_pool.cpp
   src/runtime/runtime.cpp
   src/runtime/memo.cpp
+  src/runtime/host_stats.cpp
   src/runtime/host_gpu.cpp
   src/runtime/shared_runtime.cpp
   src/runtime/visible_devices.cpp
@@ -1452,6 +1453,8 @@ vgpu_unit_test(test_ptx_block_reuse)
 # The host threads that run a grid's blocks, kept between launches: reuse,
 # nesting, several callers, fork; and the same kernels at 1, 2 and N threads.
 vgpu_unit_test(test_worker_pool)
+# VGPU_HOST_STATS: the host-kernel counters line for a run that is slower on one kernel than another (#551).
+vgpu_unit_test(test_host_stats)
 vgpu_unit_test(test_sched)
 # The SASS executor's atomics (vgpu/exec/sass_atomics.hpp), and its lane-state helpers and shuffle shapes (vgpu/exec/sass_lanes.hpp,
 # src/sass/tier.hpp), against the lane-by-lane code they replaced.
