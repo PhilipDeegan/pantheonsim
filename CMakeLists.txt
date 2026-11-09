@@ -2577,6 +2577,8 @@ add_test(NAME config_cli COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_config_cli.sh
 set_tests_properties(config_cli PROPERTIES DEPENDS vgpu_cli
   ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}" TIMEOUT 120)
 add_test(NAME lint_makefile COMMAND ${CMAKE_SOURCE_DIR}/tests/lint/check_makefile.sh)
+add_test(NAME lint_tracked_junk COMMAND ${CMAKE_SOURCE_DIR}/tests/lint/check_tracked_junk.sh)
+set_tests_properties(lint_tracked_junk PROPERTIES TIMEOUT 60)
 set_tests_properties(lint_makefile PROPERTIES TIMEOUT 120)
 add_test(NAME lint_readme_commands COMMAND ${CMAKE_SOURCE_DIR}/tests/lint/check_readme_commands.sh)
 set_tests_properties(lint_readme_commands PROPERTIES TIMEOUT 120)

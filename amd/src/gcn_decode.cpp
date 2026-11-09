@@ -1,3 +1,8 @@
+// The decoder behind vgpu/amd_gcn.hpp: instruction words of a code object's
+// .text to gcn::Inst (opcode, operands, widths), and gcn::to_text back to the
+// assembler's spelling. CDNA (gfx9) encodings are handled here; the RDNA
+// (gfx11/gfx12) ones are handed to rdna_decode.hpp.
+
 #include <cctype>
 #include <cstdio>
 #include <cstring>
