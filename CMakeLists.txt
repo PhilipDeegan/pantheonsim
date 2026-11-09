@@ -4708,6 +4708,9 @@ add_test(NAME pantheon_workload_verdicts
 # And the PATH it starts vgpu shell with, which must not hold the Action's drop-in nvcc.
 add_test(NAME pantheon_workload_path
          COMMAND ${CMAKE_SOURCE_DIR}/tests/workloads/path_test.sh)
+# And the summary table, which names the machine whose job left no report.
+add_test(NAME pantheon_workload_matrix
+         COMMAND python3 ${CMAKE_SOURCE_DIR}/tests/workloads/workload_matrix_test.py)
 add_test(NAME pantheon_workloads
          COMMAND ${CMAKE_SOURCE_DIR}/tests/workloads/run_pantheon_workloads.sh)
 set_tests_properties(pantheon_workloads PROPERTIES
