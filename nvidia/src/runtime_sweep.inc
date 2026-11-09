@@ -1163,3 +1163,23 @@ VGPU_EXPORT cudaError_t cudaMemDiscardAndPrefetchBatchAsync(void** dptrs, size_t
   return traced_call("cudaMemDiscardAndPrefetchBatchAsync", cudaMemDiscardAndPrefetchBatchAsync_traced, dptrs, sizes, count, prefetchLocs, prefetchLocIdxs, numPrefetchLocs, flags, stream);
 }
 #endif
+
+// ---- OpenGL interop (cuda_gl_interop.h; pantheonsim #528) ------------------------------------------------------------
+// The nine cudaGL* functions are defined above (OpenGL interop section). NVIDIA's libcudart also exports these two,
+// and a program linked with -z now that merely references one fails to start without the name. With no GL context
+// current an RTX 3060 under CUDA 13.0 answers cudaErrorInvalidGraphicsContext (219), or cudaErrorInvalidValue for a
+// null `resource` (measured with short probes on the card).
+// The GL types are plain unsigned ints here (GLuint) so this file needs no GL header.
+static cudaError_t cudaGraphicsGLRegisterBuffer_traced(cudaGraphicsResource** resource, unsigned int, unsigned int) {
+  return resource ? cudaErrorInvalidGraphicsContext : cudaErrorInvalidValue;
+}
+VGPU_EXPORT cudaError_t cudaGraphicsGLRegisterBuffer(cudaGraphicsResource** resource, unsigned int buffer, unsigned int flags) {
+  return traced_call("cudaGraphicsGLRegisterBuffer", cudaGraphicsGLRegisterBuffer_traced, resource, buffer, flags);
+}
+
+static cudaError_t cudaGraphicsGLRegisterImage_traced(cudaGraphicsResource** resource, unsigned int, unsigned int, unsigned int) {
+  return resource ? cudaErrorInvalidGraphicsContext : cudaErrorInvalidValue;
+}
+VGPU_EXPORT cudaError_t cudaGraphicsGLRegisterImage(cudaGraphicsResource** resource, unsigned int image, unsigned int target, unsigned int flags) {
+  return traced_call("cudaGraphicsGLRegisterImage", cudaGraphicsGLRegisterImage_traced, resource, image, target, flags);
+}

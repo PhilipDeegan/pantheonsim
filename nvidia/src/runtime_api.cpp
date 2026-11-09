@@ -27,6 +27,7 @@
 #include <vector_types.h>
 
 #include <chrono>
+#include <condition_variable>
 
 #include <cmath>
 #include <cstdio>
@@ -37,6 +38,7 @@
 #include <cstring>
 #include <functional>
 #include <dlfcn.h>
+#include <link.h>
 #include <atomic>
 #include <sys/syscall.h>
 #include <deque>
@@ -48,6 +50,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "platform.hpp"
@@ -462,6 +465,32 @@ thread_local bool t_launch_programmatic = false;
 // like work that finished. Here it is recorded when the launch returns, and
 // kept until cudaGetLastError collects it, like the last error.
 thread_local cudaError_t g_async_error = cudaSuccess;
+
+// How many runtime entry points this thread is inside (guard_impl), so a launch can tell it is the outermost one: a launch
+// made from inside another call holds the API lock for it, and must not hand its kernel to a thread that needs that lock.
+thread_local int t_api_depth = 0;
+
+// An asynchronous launch's failure that is not a sticky one (a kernel that ran past VGPU_MAX_STEPS, say): the launch had
+// returned by then, so it is kept for the launching thread and reaches it at its next call, as a synchronous launch's would
+// have reached it at the launch (g_last_error, g_async_error). Sticky faults need none of this: they are the context's.
+std::mutex g_deferred_mu;
+std::vector<std::pair<std::thread::id, cudaError_t>> g_deferred_errors;
+std::atomic<size_t> g_deferred_count{0};
+void take_deferred_launch_errors() {
+  if (g_deferred_count.load(std::memory_order_relaxed) == 0) return;
+  const std::thread::id me = std::this_thread::get_id();
+  std::lock_guard<std::mutex> lock(g_deferred_mu);
+  for (auto it = g_deferred_errors.begin(); it != g_deferred_errors.end();) {
+    if (it->first == me) {
+      g_async_error = it->second;
+      g_last_error = it->second;
+      it = g_deferred_errors.erase(it);
+      g_deferred_count.fetch_sub(1, std::memory_order_relaxed);
+    } else {
+      ++it;
+    }
+  }
+}
 
 // A context a kernel has corrupted. CUDA documents an illegal address, an
 // illegal instruction and a device-side assert as leaving the context unusable:
@@ -940,6 +969,11 @@ template <class F>
 cudaError_t guard_impl(const char* api, bool needs_context, F&& body) {
   State& s = st();
   std::lock_guard<std::recursive_mutex> lock(s.mu);
+  struct Depth {
+    Depth() { ++t_api_depth; }
+    ~Depth() { --t_api_depth; }
+  } depth;
+  take_deferred_launch_errors();   // an asynchronous launch of this thread that has failed since (one relaxed load otherwise)
   // A profiler's API trace, and the correlation the work this call issues
   // carries (vgpu/profiling.hpp).
   vgpu::profiling::ApiCall call(api);
@@ -966,7 +1000,7 @@ cudaError_t guard_impl(const char* api, bool needs_context, F&& body) {
         }
       }
       const cudaError_t r = body(s);
-      if (r != cudaSuccess) g_last_error = r;
+      if (r != cudaSuccess && r != cudaErrorNotReady) g_last_error = r;   // a query's not-ready is not an error
       return r;
     } catch (const vgpu::Error& e) {
       return set_error(s, e, api);
@@ -1546,6 +1580,55 @@ struct DeviceGraphEnv final : vgpu::exec::DeviceGraphLauncher {
 };
 thread_local DeviceGraphEnv* t_graph_env = nullptr;   // the environment a graph's kernel runs in
 static void run_launched_now(DeviceGraphEnv& env, cudaStream_t stream);
+static void async_order(cudaStream_t stream);   // see the stream lanes, with the events
+
+// ---- An asynchronous kernel launch ------------------------------------------------------------------------------------
+// A kernel launched on a stream that can be waited on (below) returns before the kernel has run: everything the launch
+// checks, and every refusal it can make, is done in the call as always, and then the kernel itself is queued on the
+// stream's lane (see "Stream lanes") and run by the lane's worker thread, which takes the API lock for as long as the kernel
+// runs. The launch returns once the worker has the lock (async_enqueue_kernel), so every later call that takes the lock
+// (every runtime and driver entry that touches the machine) waits for the kernel exactly as it waited for it inside the
+// launch; what a call does not take the lock for is what can see the kernel still pending: cudaEventQuery,
+// cudaEventElapsedTime, cudaStreamQuery (cudaErrorNotReady), and an event recorded behind it. Sticky faults are the
+// context's (set_error), so they reach the program as they always did, at its next call.
+//
+// Where it is NOT used (the launch runs inside the call, as before): the legacy and per-thread default streams, streams
+// the runtime did not create, streams that are capturing, cooperative and cluster launches, graph launches, any launch
+// while a profiler or a trace is listening, with VGPU_RACE, VGPU_MAX_STEPS or VGPU_STRICT set, while a managed
+// allocation exists, when a CUDA library shim is loaded (their math runs on the calling thread and reads device memory with
+// no lock), from inside another runtime call, and with VGPU_ASYNC_LAUNCH=0. By default only streams made with
+// cudaStreamNonBlocking qualify; VGPU_ASYNC_LAUNCH=all adds every stream cudaStreamCreate made.
+struct PendingKernel {
+  vgpu::runtime::Device* dev = nullptr;
+  const vgpu::ptx::EntryFn* fn = nullptr;
+  vgpu::exec::LaunchConfig cfg;
+  vgpu::exec::LaunchEnv env;   // cfg.env points here
+  std::vector<std::vector<uint8_t>> kargs;
+  const vgpu::exec::SymbolTable* syms = nullptr;
+  int device = 0;              // the launching thread's current device
+  std::thread::id launcher;
+  bool started = false;        // the worker has the API lock (g_event_mu)
+};
+static bool async_launch_stream_ok(cudaStream_t stream);
+static bool async_libraries_loaded();
+static void async_enqueue_kernel(cudaStream_t stream, std::shared_ptr<PendingKernel> pk);
+static bool async_launch_eligible(State& s, const char* api, cudaStream_t stream, bool cooperative,
+                                  const std::array<uint32_t, 3>& cluster, const vgpu::ptx::EntryFn& fn,
+                                  const vgpu::exec::LaunchEnv& env, bool profiling) {
+  if (std::strcmp(api, "cudaLaunchKernel") != 0 || cooperative) return false;
+  if (cluster[0] || cluster[1] || cluster[2] || fn.req_cluster != std::array<uint32_t, 3>{0, 0, 0}) return false;
+  if (t_api_depth != 1) return false;
+  if (profiling || vgpu::profiling::hooked() || env.trace || env.race || env.max_steps || env.strict) return false;
+  for (const auto& pd : fn.params)
+    if (pd.local_mem) return false;
+  if (!s.managed_allocs.empty() || !s.managed_vars.empty()) return false;
+  using Probe = int (*)();
+  // Looked up each time: the driver shim may be loaded after the first launch.
+  const Probe driver_managed = reinterpret_cast<Probe>(dlsym(RTLD_DEFAULT, "vgpu_driver_has_managed_v1"));
+  if (driver_managed && driver_managed()) return false;
+  if (!async_launch_stream_ok(stream)) return false;
+  return !async_libraries_loaded();
+}
 
 // The body of both launch entry points. `cooperative` is the only difference,
 // and it changes one thing: whether the blocks are resident together and may
@@ -1556,6 +1639,8 @@ static cudaError_t launch_kernel_impl(const char* api, const void* func, dim3 gr
                                       std::array<uint32_t, 3> cluster = {0, 0, 0}) {
   // One pass over the environment for everything this launch reads (vgpu/exec/launch_env.hpp), handed on in the LaunchConfig.
   const vgpu::exec::LaunchEnv env = vgpu::exec::read_launch_env();
+  async_order(stream);   // behind any host function queued earlier on the stream
+  std::shared_ptr<PendingKernel> pending;   // the kernel, when this launch runs it later
   const cudaError_t rc = guard(api, [&](State& s) -> cudaError_t {
     auto it = find_kernel(s, func);
     if (it == s.kernels.end()) {
@@ -1739,6 +1824,21 @@ static cudaError_t launch_kernel_impl(const char* api, const void* func, dim3 gr
       cfg.graph_launcher = t_graph_env;
       cfg.current_graph_exec = t_graph_env ? reinterpret_cast<uint64_t>(t_graph_env->self) : 0;
     }
+    if (async_launch_eligible(s, api, stream, cooperative, cluster, *fn, env, profiling)) {
+      dev.check_launch(*fn, cfg);   // the configuration's refusals are the launch's, as ever
+      auto pk = std::make_shared<PendingKernel>();
+      pk->dev = &dev;
+      pk->fn = fn;
+      pk->env = env;
+      pk->cfg = cfg;
+      pk->cfg.env = &pk->env;
+      pk->kargs = std::move(kargs);
+      pk->syms = dev.symbols(mid);
+      pk->device = t_current_device;
+      pk->launcher = std::this_thread::get_id();
+      pending = std::move(pk);
+      return cudaSuccess;
+    }
     dev.launch(*fn, cfg, kargs, dev.symbols(mid));
     if (profiling) {
       vgpu::profiling::Event ev;
@@ -1763,6 +1863,7 @@ static cudaError_t launch_kernel_impl(const char* api, const void* func, dim3 gr
     }
     return cudaSuccess;
   });
+  if (pending && rc == cudaSuccess) async_enqueue_kernel(stream, std::move(pending));
   // (A launch the device refuses for its configuration -- a block or grid past the limits, a zero dimension, too much shared memory, registers that
   // do not fit, a cluster the part cannot have -- is reported by the launch and by cudaGetLastError and by nothing after: an RTX 3060's
   // cudaDeviceSynchronize after each of those answers cudaSuccess, so they are not kept for the synchronize to report.)
@@ -1955,6 +2056,15 @@ static void pool_waited_for(int device, const void* stream, bool whole_device);
 // on the device underneath does not count as one on all of them.
 thread_local bool t_waiting_on_one_stream = false;
 
+// Asynchronous host functions and the events recorded behind them (defined with the events). They are
+// called before the API lock is taken, so a wait for a host function that needs the host does not hold
+// every other thread's runtime call.
+static void async_wait_stream(cudaStream_t stream);   // stream synchronize: its lanes drain
+static void async_wait_device();                       // device synchronize: every lane drains
+static void async_wait_event(cudaEvent_t e);           // event synchronize: the event completes
+static void async_order(cudaStream_t stream);          // inline work on `stream`: earlier host work finished
+static bool async_stream_busy(cudaStream_t stream);    // stream query
+
 static cudaError_t cudaDeviceSynchronize_impl(void);
 static cudaError_t cudaDeviceSynchronize_body(void) {
   // Measured on an RTX 3060: with any capture going on, in any mode and from any thread, the
@@ -1987,12 +2097,14 @@ static cudaError_t cudaDeviceSynchronize_impl(void) {
   // it does on the card, and this is the call that finds the context dead. It
   // becomes the last error, as every failed call's result does.
   SyncScope waited(vgpu::profiling::SyncKind::Context, nullptr);
+  take_deferred_launch_errors();
   if (!t_waiting_on_one_stream) pool_waited_for(t_current_device, nullptr, true);
   if (const cudaError_t sticky = dead_context(); sticky != cudaSuccess) return sticky;
   return g_async_error;
 }
 
 VGPU_EXPORT cudaError_t cudaDeviceSynchronize(void) {
+  async_wait_device();
   return traced_call("cudaDeviceSynchronize", cudaDeviceSynchronize_body);
 }
 
@@ -2757,10 +2869,11 @@ VGPU_EXPORT cudaError_t cudaMemcpyPeer(void* dst, int dstDevice, const void* src
 
 static cudaError_t cudaMemGetInfo_body(size_t* free_b, size_t* total_b) {
   return guard("cudaMemGetInfo", [&](State& s) {
-    if (!free_b || !total_b) return cudaErrorInvalidValue;
+    // Either pointer, or both, may be NULL: an RTX 3060 answers cudaSuccess and fills the one it is given
+    // (cuda-api-wrappers asks for the total alone).
     vgpu::MemoryManager& mm = current(s).memory();
-    *total_b = static_cast<size_t>(mm.capacity());
-    *free_b = static_cast<size_t>(mm.capacity() - mm.used());
+    if (total_b) *total_b = static_cast<size_t>(mm.capacity());
+    if (free_b) *free_b = static_cast<size_t>(mm.capacity() - mm.used());
     return cudaSuccess;
   });
 }
@@ -2809,6 +2922,14 @@ static cudaError_t cudaMalloc_body(void** ptr, size_t size) {
   if (const cudaError_t unsafe_ = capture_unsafe_gate("cudaMalloc")) return unsafe_;
   return guard("cudaMalloc", [&](State& s) {
     if (!ptr) return cudaErrorInvalidValue;
+    // A zero-byte allocation succeeds and yields no pointer: an RTX 3060 (CUDA 13.0 runtime) answers
+    // cudaSuccess with *ptr == NULL, and cudaFree(NULL) is the no-op that frees it. Programs lean on the
+    // NULL (Gpufit allocates the buffers it does not use with size 0 and tests them against NULL).
+    // It does not count as an allocation for VGPU_FAIL_ALLOC either.
+    if (size == 0) {
+      *ptr = nullptr;
+      return cudaSuccess;
+    }
     // Injected failure, if this occurrence was selected. Returns the documented
     // out-of-memory the API is allowed to return at any time, which is the
     // error most callers claim to handle and few ever execute.
@@ -2818,14 +2939,8 @@ static cudaError_t cudaMalloc_body(void** ptr, size_t size) {
                              "asked. This is injected, not a real exhaustion\n");
       return cudaErrorMemoryAllocation;
     }
-    // A zero-byte allocation succeeds on hardware and yields a distinct pointer
-    // that can be freed. ggml asks for one and treats a failure as fatal, so
-    // rejecting it stopped whole operations that were doing nothing wrong.
-    // Back it with a single byte: that gives an address no other allocation
-    // shares, which is what makes the pointer usable as an identity and
-    // free-able.
-    *ptr = reinterpret_cast<void*>(current(s).memory().alloc(size ? size : 1));
-    profile_memory(1, *ptr, size ? size : 1, vgpu::profiling::MemKind::Device, t_current_device);
+    *ptr = reinterpret_cast<void*>(current(s).memory().alloc(size));
+    profile_memory(1, *ptr, size, vgpu::profiling::MemKind::Device, t_current_device);
     return cudaSuccess;
   });
 }
@@ -2890,6 +3005,7 @@ static vgpu::profiling::MemKind profiled_memory_kind(State& s, const void* p, bo
 constexpr size_t kD2dFrameBytes = 16384;
 
 static cudaError_t cudaMemcpy_body(void* dst, const void* src, size_t count, cudaMemcpyKind kind) {
+  async_order(t_stream_ctx.async ? t_stream_ctx.stream : nullptr);   // behind queued host functions (also for the Async forms)
   return guard("cudaMemcpy", [&](State& s) {
     if (vgpu::faults::should_fail(vgpu::faults::Op::Memcpy)) {
       if (!quiet())
@@ -3113,6 +3229,7 @@ VGPU_EXPORT cudaError_t cudaMemcpy2DAsync(void* dst, size_t dpitch, const void* 
 
 
 static cudaError_t cudaMemset_body(void* dst, int value, size_t count) {
+  async_order(t_stream_ctx.async ? t_stream_ctx.stream : nullptr);
   return guard("cudaMemset", [&](State& s) {
     if (count == 0) return cudaSuccess;  // even for a null pointer, as on hardware
     const uint64_t t0 = vgpu::profiling::enabled() ? vgpu::profiling::now_ns() : 0;
@@ -3257,7 +3374,11 @@ static cudaError_t cudaMallocHost_body(void** ptr, size_t size) {
   if (const cudaError_t unsafe_ = capture_unsafe_gate("cudaMallocHost")) return unsafe_;
   return guard("cudaMallocHost", [&](State& s) -> cudaError_t {
     if (!ptr) return cudaErrorInvalidValue;
-    const size_t n = size ? size : 1;
+    if (size == 0) {   // as cudaMalloc: success and no pointer (an RTX 3060)
+      *ptr = nullptr;
+      return cudaSuccess;
+    }
+    const size_t n = size;
     void* p = std::aligned_alloc(4096, (n + 4095) / 4096 * 4096);
     if (!p) return cudaErrorMemoryAllocation;
     pinned(s)[p] = HostRange{n, t_current_device};
@@ -3278,7 +3399,7 @@ VGPU_EXPORT cudaError_t cudaMallocHost(void** ptr, size_t size) {
 static cudaError_t cudaHostAlloc_body(void** ptr, size_t size, unsigned int flags) {
   if (const cudaError_t unsafe_ = capture_unsafe_gate("cudaHostAlloc")) return unsafe_;
   const cudaError_t e = cudaMallocHost(ptr, size);
-  if (e != cudaSuccess) return e;
+  if (e != cudaSuccess || !*ptr) return e;   // a zero-byte request has no pointer to flag
   return guard("cudaHostAlloc", [&](State& s) {
     pinned(s)[*ptr].flags = flags;
     return cudaSuccess;
@@ -3971,6 +4092,10 @@ static cudaError_t cudaMallocAsync_body(void** ptr, size_t size, cudaStream_t st
     cudaError_t rc = cudaSuccess;
     if (capture_malloc(s, stream, size, t_current_device, ptr, &rc)) return rc;
     if (const cudaError_t unsafe_ = capture_unsafe_gate("cudaMallocAsync")) return unsafe_;
+    if (size == 0) {   // as cudaMalloc: success and no pointer (an RTX 3060)
+      *ptr = nullptr;
+      return cudaSuccess;
+    }
     return pool_alloc(s, pool_for(s, t_current_device), size, ptr, stream);
   });
 }
@@ -5818,8 +5943,12 @@ static cudaError_t cudaMallocManaged_body(void** ptr, size_t size, unsigned int)
   if (const cudaError_t unsafe_ = capture_unsafe_gate("cudaMallocManaged")) return unsafe_;
   return guard("cudaMallocManaged", [&](State& s) -> cudaError_t {
     if (!ptr) return cudaErrorInvalidValue;
+    if (size == 0) {   // as cudaMalloc: success and no pointer (an RTX 3060)
+      *ptr = nullptr;
+      return cudaSuccess;
+    }
     if (vgpu::faults::should_fail(vgpu::faults::Op::Alloc)) return cudaErrorMemoryAllocation;
-    const size_t n = size ? size : 1;
+    const size_t n = size;
     void* p = std::aligned_alloc(4096, (n + 4095) / 4096 * 4096);
     if (!p) return cudaErrorMemoryAllocation;
     // Real host memory, addressable by kernels at its own address. This is the
@@ -6180,13 +6309,16 @@ VGPU_EXPORT cudaError_t cudaStreamGetPriority(cudaStream_t stream, int* priority
   return traced_call("cudaStreamGetPriority", cudaStreamGetPriority_traced, stream, priority);
 }
 
-// A host callback is enqueued behind the stream's work. Work is synchronous
-// here, so everything before it has already finished and it runs now.
+// A host callback is enqueued behind the stream's work and the call returns. Kernels and copies run to
+// completion inside their calls, so everything before it has already finished; the function itself runs on
+// the stream's worker thread (see async_push), in order with the other host functions, event records and
+// event waits queued on that stream. Work issued on the stream after it waits for it (async_order).
+static void async_push_host(cudaStream_t stream, cudaHostFn_t fn, void* user);
 static cudaError_t cudaLaunchHostFunc_traced(cudaStream_t stream, cudaHostFn_t fn, void* user) {
   if (const cudaError_t dead = dead_context()) return dead;
   if (!fn) return cudaErrorInvalidValue;
   if (capture_host_fn(stream, fn, user)) return cudaSuccess;   // a host node, run on launch
-  fn(user);
+  async_push_host(stream, fn, user);
   return cudaSuccess;
 }
 
@@ -6233,12 +6365,15 @@ static cudaError_t cudaStreamSynchronize_body(cudaStream_t stream) {
 }
 
 VGPU_EXPORT cudaError_t cudaStreamSynchronize(cudaStream_t stream) {
+  async_wait_stream(stream);
   return traced_call("cudaStreamSynchronize", cudaStreamSynchronize_body, stream);
 }
 static cudaError_t cudaStreamQuery_body(cudaStream_t stream) {
   if (const cudaError_t dead = dead_context()) return dead;
   if (capture_refuse(stream, "cudaStreamQuery")) return cudaErrorStreamCaptureUnsupported;
   if (const cudaError_t unsafe_ = capture_unsafe_gate("cudaStreamQuery")) return unsafe_;
+  // Not ready while a host function (or a record or wait queued behind one) has not finished.
+  if (async_stream_busy(stream)) return cudaErrorNotReady;
   return cudaSuccess;
 }
 
@@ -6262,6 +6397,10 @@ namespace {
 struct RtEvent {
   bool timing = true;
   bool recorded = false;
+  // Records queued behind a host function (or another queued record or wait) that the stream's worker has not
+  // reached yet. While it is above zero the event is not complete: cudaEventQuery and cudaStreamQuery say
+  // cudaErrorNotReady and cudaEventElapsedTime too. Guarded by g_event_mu.
+  unsigned outstanding = 0;
   std::chrono::steady_clock::time_point when{};
   // Last recorded on a capturing stream: which capture, and the position that
   // stream had reached. A cudaStreamWaitEvent on it depends on that position --
@@ -6293,6 +6432,434 @@ RtEvent* find_event(cudaEvent_t e) {  // caller holds g_event_mu
 }
 }  // namespace
 
+// ---- Stream lanes: host functions, event records and event waits that happen after the call returns -------------------
+// Kernels, copies and fills still run to completion inside their calls (the synchronous engine: ARCHITECTURE,
+// TODO.md "UnifiedMemoryPerf"), so only what a stream queues that does NOT run inside its call can still be
+// pending when the call returns: a host function, an event record or a stream wait queued behind one, and a wait on
+// an event that is itself still pending. Each stream that has such work has a lane: a FIFO of items run in order by
+// one worker thread that lives only while the lane is not empty. The worker never takes the API lock (a host
+// function may not call the runtime, as documented), so a host function that waits for the host cannot deadlock
+// with the thread that enqueued it. Everything here is guarded by g_event_mu, and the one condition variable wakes
+// every waiter; programs that never queue a host function never create a lane and pay one relaxed atomic load.
+//
+// Ordering the rest of the API respects (async_order, before the call takes the API lock): a kernel, copy or fill
+// on a stream first waits for the stream's pending lane work -- the launch blocks where a card would queue it, which
+// keeps the order and loses only the overlap. The legacy default stream orders against every blocking stream and a
+// blocking stream against the default stream, as documented, through "barrier" items that wait for the other lane
+// to reach the position it had when the item was queued.
+namespace {
+struct LaneItem;
+struct Lane {
+  bool blocking = true;             // created without cudaStreamNonBlocking (the legacy default stream is one)
+  bool legacy_default = false;      // the legacy default stream
+  bool worker = false;              // a worker thread is draining q
+  uint64_t pushed = 0, done = 0;    // items ever queued / finished
+  std::deque<LaneItem> q;
+};
+struct LaneItem {
+  enum Kind { Host, Record, Wait, Barrier, Kernel } kind = Host;
+  std::shared_ptr<PendingKernel> kernel;   // Kernel: see "An asynchronous kernel launch"
+  cudaHostFn_t fn = nullptr;
+  void* user = nullptr;
+  cudaEvent_t ev = nullptr;
+  std::vector<std::pair<Lane*, uint64_t>> deps;   // Barrier: lanes and the position each had to reach
+};
+std::condition_variable g_async_cv;
+std::unordered_map<void*, std::unique_ptr<Lane>> g_lanes;
+std::atomic<bool> g_async_used{false};   // a lane was ever created; before that every hook below returns at once
+std::atomic<bool> g_host_used{false};    // a host function was ever queued (by either API): the driver API's hooks act only then
+std::unordered_set<void*> g_drv_nonblocking;   // driver streams made with CU_STREAM_NON_BLOCKING (guarded by g_stream_mu)
+
+// A lane is named by its stream, the default streams by the two special handles; the null stream is the legacy one.
+void* lane_key(cudaStream_t s) { return s == cudaStreamLegacy ? nullptr : static_cast<void*>(s); }
+
+// Whether the stream orders against the legacy default stream: false for a stream made non-blocking, and for the
+// per-thread default stream; true for the rest, including a handle this runtime did not make.
+bool stream_is_blocking(cudaStream_t s) {
+  if (s == nullptr || s == cudaStreamLegacy) return true;
+  if (s == cudaStreamPerThread) return false;
+  std::lock_guard<std::mutex> lock(g_stream_mu);
+  const RtStream* r = stream_record(s);
+  if (!r) return g_drv_nonblocking.count(static_cast<void*>(s)) == 0;   // a stream the driver API made
+  return !(r->flags & cudaStreamNonBlocking);
+}
+
+Lane* find_lane(void* key) {   // caller holds g_event_mu
+  const auto it = g_lanes.find(key);
+  return it == g_lanes.end() ? nullptr : it->second.get();
+}
+bool lane_busy(const Lane* l) { return l && !l->q.empty(); }
+
+// The lanes a wait or query on `key` means: its own, and for the legacy default stream every blocking stream's too.
+std::vector<Lane*> sync_lanes(void* key, bool legacy) {
+  std::vector<Lane*> out;
+  if (Lane* l = find_lane(key)) out.push_back(l);
+  if (legacy)
+    for (auto& kv : g_lanes)
+      if (kv.first != key && kv.second->blocking && kv.second->worker) out.push_back(kv.second.get());
+  return out;
+}
+// The lanes work on `key` follows beyond its own: the default stream's for a blocking stream, every blocking
+// stream's for the default stream.
+std::vector<Lane*> dep_lanes(void* key, bool blocking, bool legacy) {
+  std::vector<Lane*> out;
+  if (legacy) {
+    for (auto& kv : g_lanes)
+      if (kv.first != key && kv.second->blocking && !kv.second->legacy_default) out.push_back(kv.second.get());
+  } else if (blocking) {
+    if (Lane* d = find_lane(nullptr)) out.push_back(d);
+  }
+  return out;
+}
+
+// Runs a queued kernel on the lane's worker thread: the API lock for as long as it runs (so nothing that takes the lock
+// sees the machine mid-kernel), the launching thread's current device, and the error handling a synchronous launch has in
+// guard_impl, with a failure that is not a sticky fault kept for the launching thread (take_deferred_launch_errors).
+void run_pending_kernel(PendingKernel& k, std::unique_lock<std::mutex>& event_lock) {
+  State& s = st();
+  event_lock.unlock();
+  {
+    std::lock_guard<std::recursive_mutex> api_lock(s.mu);   // never taken while g_event_mu is held: that order is API, then event
+    t_current_device = k.device;
+    ++t_api_depth;   // the engine runs on this thread; a call it makes (the device runtime) is inside the lock already
+    {
+      std::lock_guard<std::mutex> lock(g_event_mu);
+      k.started = true;
+      g_async_cv.notify_all();
+    }
+    cudaError_t rc = cudaSuccess;
+    try {
+      k.dev->launch(*k.fn, k.cfg, k.kargs, k.syms);
+    } catch (const vgpu::Error& e) {
+      rc = set_error(s, e, "cudaLaunchKernel");
+    } catch (const std::exception& e) {
+      if (!quiet()) std::fprintf(stderr, "[vgpu] cudaLaunchKernel: %s\n", e.what());
+      rc = cudaErrorUnknown;
+    }
+    --t_api_depth;
+    if (rc != cudaSuccess && rc != cudaErrorInvalidValue && rc != cudaErrorLaunchOutOfResources && rc != cudaErrorInvalidConfiguration &&
+        rc != static_cast<cudaError_t>(912)) {
+      std::lock_guard<std::mutex> lock(g_deferred_mu);
+      g_deferred_errors.emplace_back(k.launcher, rc);
+      g_deferred_count.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+  event_lock.lock();
+}
+
+void lane_worker(Lane* l) {
+  std::unique_lock<std::mutex> lk(g_event_mu);
+  while (!l->q.empty()) {
+    const LaneItem it = l->q.front();   // stays queued while it runs, so the lane reads busy
+    switch (it.kind) {
+      case LaneItem::Host:
+        lk.unlock();
+        it.fn(it.user);
+        lk.lock();
+        break;
+      case LaneItem::Kernel:
+        run_pending_kernel(*it.kernel, lk);
+        break;
+      case LaneItem::Record:
+        if (RtEvent* r = find_event(it.ev)) {
+          r->when = std::chrono::steady_clock::now();
+          if (r->outstanding) --r->outstanding;
+        }
+        break;
+      case LaneItem::Wait:
+        g_async_cv.wait(lk, [&] {
+          const RtEvent* r = find_event(it.ev);
+          return !r || r->outstanding == 0;
+        });
+        break;
+      case LaneItem::Barrier:
+        g_async_cv.wait(lk, [&] {
+          for (const auto& d : it.deps)
+            if (d.first->done < d.second) return false;
+          return true;
+        });
+        break;
+    }
+    l->q.pop_front();
+    ++l->done;
+    g_async_cv.notify_all();
+  }
+  l->worker = false;
+  g_async_cv.notify_all();
+}
+
+// Queues `item` on the stream's lane (made on first use) behind a barrier on the lanes it implicitly follows,
+// and starts the worker when none is running. Caller holds g_event_mu.
+void lane_push(cudaStream_t stream, bool blocking, LaneItem item) {
+  void* key = lane_key(stream);
+  auto& slot = g_lanes[key];
+  if (!slot) {
+    slot = std::make_unique<Lane>();
+    slot->legacy_default = key == nullptr;
+    slot->blocking = blocking;
+    g_async_used.store(true, std::memory_order_relaxed);
+  }
+  Lane* l = slot.get();
+  LaneItem barrier;
+  barrier.kind = LaneItem::Barrier;
+  for (Lane* d : dep_lanes(key, blocking, key == nullptr))
+    if (lane_busy(d)) barrier.deps.emplace_back(d, d->pushed);
+  if (!barrier.deps.empty()) {
+    l->q.push_back(std::move(barrier));
+    ++l->pushed;
+  }
+  l->q.push_back(std::move(item));
+  ++l->pushed;
+  if (!l->worker) {
+    l->worker = true;
+    try {
+      std::thread(lane_worker, l).detach();
+    } catch (...) {
+      // No thread to be had: run what is queued here, as the synchronous engine always did.
+      l->worker = false;
+      std::unique_lock<std::mutex> lk(g_event_mu, std::adopt_lock);
+      lk.unlock();
+      lane_worker(l);
+      lk.lock();
+      lk.release();
+    }
+  }
+}
+
+// True when work on `stream` has to wait: its own lane or a lane it follows is not empty. Caller holds g_event_mu.
+bool order_busy(cudaStream_t stream, bool blocking) {
+  void* key = lane_key(stream);
+  if (lane_busy(find_lane(key))) return true;
+  for (Lane* d : dep_lanes(key, blocking, key == nullptr))
+    if (lane_busy(d)) return true;
+  return false;
+}
+
+// At exit, host functions still queued run to completion first, as a context's teardown waits for its streams.
+struct AsyncDrainAtExit {
+  ~AsyncDrainAtExit() {
+    if (!g_async_used.load()) return;
+    std::unique_lock<std::mutex> lk(g_event_mu);
+    g_async_cv.wait(lk, [] {
+      for (const auto& kv : g_lanes)
+        if (kv.second->worker) return false;
+      return true;
+    });
+  }
+} g_async_drain_at_exit;
+}  // namespace
+
+static void async_push_host(cudaStream_t stream, cudaHostFn_t fn, void* user) {
+  const bool blocking = stream_is_blocking(stream);
+  g_host_used.store(true, std::memory_order_relaxed);
+  LaneItem it;
+  it.kind = LaneItem::Host;
+  it.fn = fn;
+  it.user = user;
+  std::lock_guard<std::mutex> lock(g_event_mu);
+  lane_push(stream, blocking, std::move(it));
+}
+
+// An asynchronous kernel launch (see "An asynchronous kernel launch"): queued behind nothing (the stream's lane and the lanes
+// it follows have drained, which the wait below makes true under the lock the push needs), and the call returns once the
+// worker holds the API lock.
+static void async_enqueue_kernel(cudaStream_t stream, std::shared_ptr<PendingKernel> pk) {
+  // Kernels still running when the program ends finish first (the lanes' own drain is a static destructor, which runs
+  // after the machine is gone; an atexit handler registered here runs before it).
+  static const bool registered = std::atexit([] { async_wait_device(); }) == 0;
+  (void)registered;
+  const bool blocking = stream_is_blocking(stream);
+  std::unique_lock<std::mutex> lk(g_event_mu);
+  g_async_cv.wait(lk, [&] { return !order_busy(stream, blocking); });
+  LaneItem it;
+  it.kind = LaneItem::Kernel;
+  it.kernel = pk;
+  lane_push(stream, blocking, std::move(it));
+  g_async_cv.wait(lk, [&] { return pk->started; });
+}
+
+// Which streams get asynchronous launches: the ones the runtime made, not capturing (the launch checks that), and
+// non-blocking unless VGPU_ASYNC_LAUNCH=all. VGPU_ASYNC_LAUNCH=0 turns it off.
+static bool async_launch_stream_ok(cudaStream_t stream) {
+  static const int mode = [] {
+    const char* e = std::getenv("VGPU_ASYNC_LAUNCH");
+    if (!e || !*e || !std::strcmp(e, "1")) return 1;
+    if (!std::strcmp(e, "all")) return 2;
+    return 0;
+  }();
+  if (mode == 0 || stream == nullptr || stream == cudaStreamLegacy || stream == cudaStreamPerThread) return false;
+  std::lock_guard<std::mutex> lock(g_stream_mu);
+  const RtStream* r = stream_record(stream);
+  if (!r) return false;
+  return mode == 2 || (r->flags & cudaStreamNonBlocking);
+}
+
+// Whether a CUDA library shim (cuBLAS, cuDNN, cuFFT, ...) is loaded in the process. Their math runs on the calling thread
+// and reads and writes device memory without the API lock, so while one is loaded a launch cannot be left pending: the
+// next library call would read what the kernel has not written yet. Looked at again only when the set of loaded objects
+// has changed.
+static bool async_libraries_loaded() {
+  static std::atomic<bool> found{false};   // once one is loaded it stays loaded
+  struct Probe {
+    bool hit = false;
+  } probe;
+  if (found.load(std::memory_order_relaxed)) return true;
+  static const char* const kLibs[] = {"libcublas", "libnccl", "libcudnn", "libcufft", "libcusolver", "libcusparse", "libcurand",
+                                      "libcustatevec", "libcudss", "libcufile", "libnvcomp", "libnvcuvid", "libnvidia-encode",
+                                      "libnvshmem", "libcutensor", "libnpp", "libnvjpeg"};
+  dl_iterate_phdr(
+      [](struct dl_phdr_info* info, size_t size, void* data) -> int {
+        auto* p = static_cast<Probe*>(data);
+        (void)size;
+        const char* name = info->dlpi_name;
+        if (const char* slash = name ? std::strrchr(name, '/') : nullptr) name = slash + 1;
+        if (!name) return 0;
+        for (const char* lib : kLibs)
+          if (!std::strncmp(name, lib, std::strlen(lib))) p->hit = true;
+        return p->hit ? 1 : 0;
+      },
+      &probe);
+  if (probe.hit) found.store(true, std::memory_order_relaxed);
+  return probe.hit;
+}
+
+// An event record that has to wait behind queued work is queued; returns false when the stream has nothing pending
+// and the event is complete the moment it is recorded. Caller holds g_event_mu and gives `blocking` from
+// stream_is_blocking, called before the lock was taken.
+static bool async_record_locked(RtEvent* r, cudaEvent_t e, cudaStream_t stream, bool blocking) {
+  if (!g_async_used.load(std::memory_order_relaxed) || !order_busy(stream, blocking)) return false;
+  LaneItem it;
+  it.kind = LaneItem::Record;
+  it.ev = e;
+  ++r->outstanding;
+  lane_push(stream, blocking, std::move(it));
+  return true;
+}
+
+// cudaStreamWaitEvent on an event that is still pending queues a wait: the stream's later work follows the event.
+static void async_wait_event_on_stream(cudaStream_t stream, cudaEvent_t e) {
+  if (!g_async_used.load(std::memory_order_relaxed)) return;
+  const bool blocking = stream_is_blocking(stream);
+  std::lock_guard<std::mutex> lock(g_event_mu);
+  const RtEvent* r = find_event(e);
+  if (!r || r->outstanding == 0) return;
+  LaneItem it;
+  it.kind = LaneItem::Wait;
+  it.ev = e;
+  lane_push(stream, blocking, std::move(it));
+}
+
+static void async_wait_stream(cudaStream_t stream) {
+  if (!g_async_used.load(std::memory_order_relaxed)) return;
+  const bool legacy = lane_key(stream) == nullptr;
+  std::unique_lock<std::mutex> lk(g_event_mu);
+  g_async_cv.wait(lk, [&] {
+    for (const Lane* l : sync_lanes(lane_key(stream), legacy))
+      if (lane_busy(l)) return false;
+    return true;
+  });
+}
+static void async_wait_device() {
+  if (!g_async_used.load(std::memory_order_relaxed)) return;
+  std::unique_lock<std::mutex> lk(g_event_mu);
+  g_async_cv.wait(lk, [] {
+    for (const auto& kv : g_lanes)
+      if (lane_busy(kv.second.get())) return false;
+    return true;
+  });
+}
+static void async_wait_event(cudaEvent_t e) {
+  if (!g_async_used.load(std::memory_order_relaxed)) return;
+  std::unique_lock<std::mutex> lk(g_event_mu);
+  g_async_cv.wait(lk, [&] {
+    const RtEvent* r = find_event(e);
+    return !r || r->outstanding == 0;
+  });
+}
+static void async_order(cudaStream_t stream) {
+  if (!g_async_used.load(std::memory_order_relaxed)) return;
+  const bool blocking = stream_is_blocking(stream);
+  std::unique_lock<std::mutex> lk(g_event_mu);
+  g_async_cv.wait(lk, [&] { return !order_busy(stream, blocking); });
+}
+static bool async_stream_busy(cudaStream_t stream) {
+  if (!g_async_used.load(std::memory_order_relaxed)) return false;
+  const bool legacy = lane_key(stream) == nullptr;
+  std::lock_guard<std::mutex> lock(g_event_mu);
+  for (const Lane* l : sync_lanes(lane_key(stream), legacy))
+    if (lane_busy(l)) return true;
+  return false;
+}
+
+// ---- What libcuda reaches by name, to order the driver API's work with the stream lanes (cuLaunchHostFunc, #487) -----------
+// The driver API has no lanes of its own: a host function it queues is a lane item here, and its stream, event and
+// synchronization calls ask these (dlsym, as for capture, driver_capture.inc). None is traced or profiled: they are not
+// calls the program made. Every one of them acts only once a host function has been queued by either API
+// (vgpu_async_host_used_v1), so a program that never queues one is not changed by them.
+extern "C" __attribute__((visibility("default"))) int vgpu_async_host_used_v1(void) {
+  return g_host_used.load(std::memory_order_relaxed) ? 1 : 0;
+}
+// Queues `fn` behind the stream's work; the call returns at once.
+extern "C" __attribute__((visibility("default"))) void vgpu_async_host_fn_v1(void* stream, cudaHostFn_t fn, void* user) {
+  async_push_host(reinterpret_cast<cudaStream_t>(stream), fn, user);
+}
+// Returns once the stream's earlier host work has finished (work issued on the stream follows it).
+extern "C" __attribute__((visibility("default"))) void vgpu_async_order_v1(void* stream) {
+  if (!g_host_used.load(std::memory_order_relaxed)) return;
+  async_order(reinterpret_cast<cudaStream_t>(stream));
+}
+extern "C" __attribute__((visibility("default"))) int vgpu_async_stream_busy_v1(void* stream) {
+  if (!g_host_used.load(std::memory_order_relaxed)) return 0;
+  return async_stream_busy(reinterpret_cast<cudaStream_t>(stream)) ? 1 : 0;
+}
+extern "C" __attribute__((visibility("default"))) void vgpu_async_wait_stream_v1(void* stream) {
+  if (!g_host_used.load(std::memory_order_relaxed)) return;
+  async_wait_stream(reinterpret_cast<cudaStream_t>(stream));
+}
+extern "C" __attribute__((visibility("default"))) void vgpu_async_wait_device_v1(void) {
+  if (g_host_used.load(std::memory_order_relaxed)) async_wait_device();
+}
+// The event record the driver API's cuEventRecord makes on the runtime event that stands for its event: queued behind
+// the stream's pending work, else stamped now. Nothing else of cudaEventRecord (no capture, no profiler record: the
+// driver call makes its own).
+extern "C" __attribute__((visibility("default"))) void vgpu_async_event_record_v1(void* event, void* stream) {
+  const cudaEvent_t e = reinterpret_cast<cudaEvent_t>(event);
+  const cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+  const bool blocking = stream_is_blocking(s);
+  std::lock_guard<std::mutex> lock(g_event_mu);
+  RtEvent* r = find_event(e);
+  if (!r) return;
+  r->captured = false;
+  r->capture_deps.clear();
+  r->recorded = true;
+  if (!async_record_locked(r, e, s, blocking)) r->when = std::chrono::steady_clock::now();
+}
+// 0: not a runtime event, never recorded, or last recorded in a capture (the driver's own answer stands); 1: complete,
+// with the time it completed in nanoseconds of the steady clock (CLOCK_MONOTONIC); 2: recorded behind work that has
+// not finished.
+extern "C" __attribute__((visibility("default"))) int vgpu_async_event_state_v1(void* event, long long* when_ns) {
+  std::lock_guard<std::mutex> lock(g_event_mu);
+  const RtEvent* r = find_event(reinterpret_cast<cudaEvent_t>(event));
+  if (!r || !r->recorded || r->captured) return 0;
+  if (r->outstanding) return 2;
+  if (when_ns) *when_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(r->when.time_since_epoch()).count();
+  return 1;
+}
+extern "C" __attribute__((visibility("default"))) void vgpu_async_wait_event_v1(void* event) {
+  async_wait_event(reinterpret_cast<cudaEvent_t>(event));
+}
+// cuStreamWaitEvent: the stream's later work follows an event that is still pending.
+extern "C" __attribute__((visibility("default"))) void vgpu_async_stream_wait_event_v1(void* stream, void* event) {
+  async_wait_event_on_stream(reinterpret_cast<cudaStream_t>(stream), reinterpret_cast<cudaEvent_t>(event));
+}
+// A stream the driver API made without CU_STREAM_NON_BLOCKING orders against the legacy default stream; one made with
+// it does not (the runtime knows only its own streams' flags).
+extern "C" __attribute__((visibility("default"))) void vgpu_async_stream_flags_v1(void* stream, int non_blocking, int created) {
+  std::lock_guard<std::mutex> lock(g_stream_mu);
+  if (created && non_blocking) g_drv_nonblocking.insert(stream);
+  else g_drv_nonblocking.erase(stream);
+}
+
 static cudaError_t cudaEventCreateWithFlags_body(cudaEvent_t* e, unsigned int flags) {
   if (const cudaError_t dead = dead_context()) return dead;
   if (!e) return cudaErrorInvalidValue;
@@ -6316,6 +6883,7 @@ VGPU_EXPORT cudaError_t cudaEventCreate(cudaEvent_t* e) {
 }
 static cudaError_t cudaEventRecord_body(cudaEvent_t e, cudaStream_t stream) {
   if (const cudaError_t dead = dead_context()) return dead;
+  const bool blocking = g_async_used.load(std::memory_order_relaxed) && stream_is_blocking(stream);
   std::lock_guard<std::mutex> lock(g_event_mu);
   RtEvent* r = find_event(e);
   if (!r) return cudaErrorInvalidResourceHandle;
@@ -6333,7 +6901,8 @@ static cudaError_t cudaEventRecord_body(cudaEvent_t e, cudaStream_t stream) {
   r->captured = false;
   r->capture_deps.clear();
   r->recorded = true;
-  r->when = std::chrono::steady_clock::now();
+  // Behind a host function that has not finished the event is not complete: the stream's worker stamps it.
+  if (!async_record_locked(r, e, stream, blocking)) r->when = std::chrono::steady_clock::now();
   // A profiler's record of the event being recorded on its stream.
   if (vgpu::profiling::enabled()) {
     vgpu::profiling::Event ev;
@@ -6359,6 +6928,7 @@ static cudaError_t cudaEventRecordWithFlags_traced(cudaEvent_t e, cudaStream_t s
   if (const cudaError_t dead = dead_context()) return dead;
   if (flags & ~static_cast<unsigned>(cudaEventRecordExternal)) return cudaErrorInvalidValue;
   if (!(flags & cudaEventRecordExternal)) return cudaEventRecord(e, stream);
+  const bool blocking = g_async_used.load(std::memory_order_relaxed) && stream_is_blocking(stream);
   std::lock_guard<std::mutex> lock(g_event_mu);
   RtEvent* r = find_event(e);
   if (!r) return cudaErrorInvalidResourceHandle;
@@ -6373,7 +6943,7 @@ static cudaError_t cudaEventRecordWithFlags_traced(cudaEvent_t e, cudaStream_t s
   r->captured = false;
   r->capture_deps.clear();
   r->recorded = true;
-  r->when = std::chrono::steady_clock::now();
+  if (!async_record_locked(r, e, stream, blocking)) r->when = std::chrono::steady_clock::now();
   return cudaSuccess;
 }
 
@@ -6426,7 +6996,10 @@ static cudaError_t cudaStreamWaitEvent_body(cudaStream_t stream, cudaEvent_t e, 
     capture_event_node(stream, /*record=*/false, e, nullptr, nullptr);
     return cudaSuccess;
   }
-  return capture_wait(stream, captured, id, deps);
+  const cudaError_t waited_rc = capture_wait(stream, captured, id, deps);
+  // Outside a capture, a wait on an event that is still pending holds the stream's later work back.
+  if (waited_rc == cudaSuccess && !captured && !capture_active(stream)) async_wait_event_on_stream(stream, e);
+  return waited_rc;
 }
 
 VGPU_EXPORT cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t e, unsigned int flags) {
@@ -6505,20 +7078,23 @@ static cudaError_t cudaEventSynchronize_body(cudaEvent_t e) {
 }
 
 VGPU_EXPORT cudaError_t cudaEventSynchronize(cudaEvent_t e) {
+  async_wait_event(e);
   return traced_call("cudaEventSynchronize", cudaEventSynchronize_body, e);
 }
 static cudaError_t cudaEventQuery_body(cudaEvent_t e) {
   if (const cudaError_t dead = dead_context()) return dead;
   const cudaError_t unsafe_ = capture_unsafe_gate("cudaEventQuery");
-  bool captured = false;
+  bool captured = false, pending = false;
   unsigned long long id = 0;
   {
     std::lock_guard<std::mutex> lock(g_event_mu);
     const RtEvent* r = find_event(e);
     if (!r) return unsafe_ ? unsafe_ : cudaErrorInvalidResourceHandle;
     captured = r->captured, id = r->capture_id;   // it stands for work not yet run
+    pending = r->outstanding != 0;
   }
   if (captured) return captured_event_answer(id);
+  if (!unsafe_ && pending) return cudaErrorNotReady;   // recorded behind a host function that has not finished
   return unsafe_;
 }
 
@@ -6533,11 +7109,12 @@ static cudaError_t cudaEventElapsedTime_traced(float* ms, cudaEvent_t start, cud
   const RtEvent* b = find_event(end);
   // Documented: an event never recorded, or created with
   // cudaEventDisableTiming, is cudaErrorInvalidResourceHandle.
-  // cudaErrorNotReady is for recorded work that has not finished, which a
-  // synchronous engine never leaves behind.
+  // cudaErrorNotReady is for recorded work that has not finished: an event queued behind a host function.
   if (a && b && (a->captured || b->captured)) return captured_event_answer(a->captured ? a->capture_id : b->capture_id);
   if (!a || !b || !a->recorded || !b->recorded || !a->timing || !b->timing)
     return cudaErrorInvalidResourceHandle;
+  // Recorded behind work that has not finished: the documented cudaErrorNotReady.
+  if (a->outstanding || b->outstanding) return cudaErrorNotReady;
   *ms = std::chrono::duration<float, std::milli>(b->when - a->when).count();
   return cudaSuccess;
 }
@@ -6578,6 +7155,7 @@ VGPU_EXPORT cudaError_t cudaEventDestroy(cudaEvent_t e) {
 // kernel's fault reach the last error before such a call: right after the
 // launch, these report success.
 static cudaError_t cudaGetLastError_body(void) {
+  take_deferred_launch_errors();
   cudaError_t e = g_last_error;
   g_last_error = cudaSuccess;
   g_async_error = cudaSuccess;
@@ -6587,7 +7165,10 @@ static cudaError_t cudaGetLastError_body(void) {
 VGPU_EXPORT cudaError_t cudaGetLastError(void) {
   return traced_call("cudaGetLastError", cudaGetLastError_body);
 }
-static cudaError_t cudaPeekAtLastError_body(void) { return g_last_error; }
+static cudaError_t cudaPeekAtLastError_body(void) {
+  take_deferred_launch_errors();
+  return g_last_error;
+}
 
 VGPU_EXPORT cudaError_t cudaPeekAtLastError(void) {
   return traced_call("cudaPeekAtLastError", cudaPeekAtLastError_body);
@@ -8439,6 +9020,7 @@ static void run_launched_now(DeviceGraphEnv& env, cudaStream_t stream) {
 
 static cudaError_t cudaGraphLaunch_body(cudaGraphExec_t exec, cudaStream_t stream) {
   if (const cudaError_t dead = dead_context()) return dead;
+  async_order(stream);
   std::unique_ptr<GraphRec> replay;
   bool auto_free = false;
   void* source = nullptr;

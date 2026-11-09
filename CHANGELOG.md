@@ -7,6 +7,70 @@ release says what runs and what it produces, never how fast a real GPU would run
 
 ## Unreleased
 
+- CUDA runtime and driver: a zero-byte `cudaMalloc`, `cudaMallocManaged`, `cudaMallocHost`, `cudaHostAlloc` or `cudaMallocAsync` succeeds
+  and gives a NULL pointer, as on a GPU, where it gave a distinct non-NULL one (Gpufit tests its unused buffers against NULL); the
+  driver's `cuMemHostAlloc`/`cuMemAllocHost` of 0 bytes do the same, and `cuMemAlloc(0)` is `CUDA_ERROR_INVALID_VALUE` with the
+  result cleared (pantheonsim #515).
+- CUDA runtime and driver: `cudaMemGetInfo` and `cuMemGetInfo` accept a NULL for the free or the total pointer, or both, and fill
+  the other, as on a GPU. They used to answer invalid value, which stopped cuda-api-wrappers' device_management example
+  (pantheonsim #519).
+- CUDA driver: calls that work with no current context on a GPU now do. A stream-ordered call that names a stream of its own
+  (`cuMemAllocAsync`, `cuMemAllocFromPoolAsync`, `cuMemFreeAsync`, the `Async` copies and fills including `cuMemcpy3DAsync`,
+  `cuStreamSynchronize`, `cuStreamQuery`) takes its context from the stream; `cuMemFree` and `cuMemFreeHost` use the context that
+  owns the pointer; `cuMemAddressReserve` and `cuMemAddressFree` need none. The legacy, per-thread and NULL streams and the
+  synchronous copies still answer `CUDA_ERROR_INVALID_CONTEXT`. This is how cuda-api-wrappers drives the API (retain the primary
+  context, push it for one call, pop it), and five of its examples stopped on it (pantheonsim #518).
+- CUDA driver: `cuPointerGetAttribute(CU_POINTER_ATTRIBUTE_CONTEXT)` (and `cuPointerGetAttributes`) returns the context a
+  `cuMemAlloc`, `cuMemAllocPitch`, `cuMemAllocManaged` or `cuMemHostAlloc` allocation was made in, not the one current on the
+  calling thread (pantheonsim #521).
+- CUDA driver: `cuModuleGetFunction` returns the same `CUfunction` for the same module and name every time, and it is the handle
+  `cuModuleEnumerateFunctions` lists, so programs that compare handles (cuda-api-wrappers' module_management example) find them
+  equal (pantheonsim #520).
+- CUDA runtime: `cudaLaunchHostFunc` (and `cudaLaunchHostFunc_v2`) enqueues the function and returns; it runs on a worker thread for
+  the stream, after the stream's earlier host work and before its later work. An event recorded behind it, and `cudaStreamQuery`, report
+  `cudaErrorNotReady` until it has finished, as does `cudaEventElapsedTime`; `cudaStreamSynchronize`, `cudaEventSynchronize` and
+  `cudaDeviceSynchronize` wait for it; `cudaStreamWaitEvent` on a pending event holds the other stream back; the legacy default stream
+  orders against blocking streams. A host function that waits for something the caller does after enqueueing it no longer hangs the
+  call (pantheonsim #487). Copies and fills still run to completion inside their calls; kernel launches are the next entry;
+  the driver API's `cuLaunchHostFunc` is the entry after that. Programs that never queue a host function see no change. `cudaErrorNotReady` from a query is no longer left as the last error (`cudaGetLastError`), as on a card.
+- CUDA driver: `cuLaunchHostFunc` (and `cuLaunchHostFunc_v2`) enqueues the function and returns, as the runtime's does and as a GPU does
+  (pantheonsim #487, the driver half). It runs on the stream's worker thread, in order with the stream's other host functions, and what
+  the stream is given afterwards waits for it: `cuLaunchKernel` and its variants, every `cuMemcpy*` and `cuMemset*` form (the
+  synchronous ones on the legacy stream wait for blocking streams' host functions only), stream memory operations and
+  `cuStreamAddCallback`. `cuStreamQuery` is `CUDA_ERROR_NOT_READY` while one is pending, `cuStreamSynchronize` and `cuCtxSynchronize` wait
+  for it, and a driver event recorded behind it is `CUDA_ERROR_NOT_READY` from `cuEventQuery` and `cuEventElapsedTime` until it has finished
+  (`cuEventSynchronize` waits, `cuEventElapsedTime` measures to the moment it finished), `cuStreamWaitEvent` holds the other stream back.
+  A host function that waits for something the caller does after queueing it no longer hangs the call. Programs that never queue a host
+  function see no change. Not covered: stream-ordered allocation and free, prefetch and attach, external semaphores and `cuMemMapArrayAsync`
+  do not wait for earlier host functions, and `cuStreamAddCallback` still runs its callback in the call (after the earlier host
+  functions) instead of later.
+- CUDA runtime: a kernel launched with `cudaLaunchKernel` (`<<<>>>`) on a stream made with `cudaStreamNonBlocking` returns before the
+  kernel has run, so `cudaEventQuery` and `cudaStreamQuery` on work behind it report `cudaErrorNotReady`, and so does
+  `cudaEventElapsedTime`, until it has finished (pantheonsim #523; the issue's repro now prints 600, 600, then 0 after the
+  synchronize, as an RTX 3060 does). The kernel runs on the stream's worker thread under the API lock, so every call that takes the
+  lock (copies, frees, allocations, the driver API) waits for it as it waited inside the launch, and a copy or launch on the same
+  stream, `cudaStreamSynchronize`, `cudaEventSynchronize`, `cudaDeviceSynchronize` and `cudaStreamWaitEvent` order after it. Results,
+  counters, `VGPU_KERNEL_DIGEST`, error text and sticky faults are the same as before; a launch the device refuses for its
+  configuration is still refused in the launch. A kernel that ends in a failure that is not a sticky fault (ran past
+  `VGPU_MAX_STEPS`) reports it at the launching thread's next call instead of at the launch. It is not used on the default streams,
+  with a profiler or `VGPU_TRACE`, `VGPU_RACE`, `VGPU_MAX_STEPS` or `VGPU_STRICT`, for cooperative, cluster and graph launches, while
+  a managed allocation exists, or while a CUDA library shim (cuBLAS, cuDNN, cuFFT, ...) is loaded, whose math runs on the calling
+  thread with no lock; those launches run inside the call as before. `VGPU_ASYNC_LAUNCH=all` adds streams made with `cudaStreamCreate`;
+  `VGPU_ASYNC_LAUNCH=0` turns it off. Design and limits: docs/perf-design/streams.md.
+- PTX: `mov.u32%r1, %laneid;` (no space between the type and the operand, which nvcc emits for inline asm written `"mov.u32%0, ..."`) is
+  accepted, as ptxas does; a `%` only ever opens a register name, so it now ends the opcode word (pantheonsim #522).
+- PTX: `elect.sync _|%p, mask;` and `elect.sync %r|_, mask;` accept the sink `_` for either result, as ptxas does (cubecl's
+  `plane_elect`) (pantheonsim #503).
+- PTX: `setp` and `set` on `.bf16` (and `.bf16x2`) compare the values, not the raw bits: the sign counts, `-0 == +0`, and NaN is
+  unordered, so `setp.nan.bf16`, `setp.neu.bf16` and the ordered forms give the answers they give on `.f16` (pantheonsim #502).
+- PTX: `shfl.sync`, `vote.sync`, `match.sync`, `redux.sync` and `bar.warp.sync` wait for every lane that any running lane's member mask
+  names, not just the first lane's. With two half-warp tiles, the tile that did not contain the first lane went on while a member of
+  its own tile was still in a long loop and read 0 for it (HierarchicalKV's `tlp_v2_upsert*`). Only the lanes whose members are away
+  wait; the rest of the path runs on (pantheonsim #488).
+- License: from the next release PantheonSim is under the Business Source License 1.1, which keeps it free to use, change and run in
+  your own CI and allows one restriction: you may not offer it to other people as a hosted or managed service. Each version becomes
+  Apache-2.0 four years after release. Versions up to 0.2.0 stay Apache-2.0 (`LICENSE-APACHE-2.0`). `docs/licensing.md` has the
+  details, and contributions now need the Contributor Agreement.
 - libcudart exports the nine `cudaGL*` interop functions the CUDA 13.0 runtime does (`cudaGLRegisterBufferObject`, `cudaGLMapBufferObject`,
   `cudaGLSetGLDevice`, `cudaGLGetDevices`, ...). A program that only names one of them, such as COLMAP's SiftGPU, failed to start when linked with
   `-z now` ("undefined symbol: cudaGLRegisterBufferObject"). With no OpenGL context on a simulated GPU they answer what an RTX 3060 answers with none:
@@ -43,6 +107,15 @@ release says what runs and what it produces, never how fast a real GPU would run
 - PTX: `ldu.global` (the uniform load, scalar and `.v2`/`.v4`) runs as the `ld.global` it stands for.
 - PTX: the array-element address `var[imm]` (`st.local.b32 arr[0], %f0;`, also `[arr[1]]`) is accepted for `.local`, `.shared`,
   `.global` and `.const` arrays. The index counts elements of the declared type; one outside the array is refused.
+- PTX: the array-element address with a register index, `st.local.b32 arr[%r15], %f16;` and `ld.local.b32 %f100, arr[%r99];` (a 32- or
+  64-bit register; `.local`, `.shared`, `.global` and `.const` arrays), is accepted: the address is the variable's plus the register times
+  the element size, per lane, unchecked as on the card. Dr.Jit emits it for every opaque-index array access, and the module used to fail to
+  load with `bad integer literal '%r0'` (pantheonsim #530).
+- The runtime exports the OpenGL interop functions of `cuda_gl_interop.h` (`cudaGraphicsGLRegisterBuffer`, `cudaGraphicsGLRegisterImage`,
+  `cudaGLGetDevices`, `cudaGLSetGLDevice` and the legacy `cudaGL*BufferObject` family), so a program linked with `-z now` that merely
+  references one (COLMAP's SiftGPU) starts instead of dying with `undefined symbol: cudaGLRegisterBufferObject`. They answer as an RTX 3060
+  with no GL context does: `cudaErrorInvalidGraphicsContext`, `cudaErrorInvalidValue` for a buffer that was never registered
+  (pantheonsim #528). `tests/lint/check_header_exports.py` now checks `cuda_gl_interop.h` too.
 - PTX: a `.func` can take its parameters and return its value in `.reg`s (`.func (.reg .b32 r) f(.reg .u64 data)`), and a call
   (direct, or through a `.callprototype` with `.reg`s) passes registers or numbers for them.
 - libcuda exports the OpenGL, EGL and VDPAU interop functions (`cuGraphicsGLRegisterBuffer`,
