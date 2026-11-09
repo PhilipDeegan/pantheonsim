@@ -5,6 +5,8 @@
 //   usage: hostgpu_sfu_exhaustive <op> [stride]
 //   op:  rcp rsq sqrt ex2 lg2   the .approx.ftz.f32 instruction against the simulator's MUFU          (expected to differ: they are NOT in the set)
 //        div                    IEEE a / b (div.rn.f32) for 12 dividends (8 finite, 0, +-inf, NaN) and every divisor           (the division idiom: must be 0 different)
+//        sqrtrn, rcprn          IEEE sqrt (sqrt.rn.f32, __fsqrt_rn) and IEEE reciprocal (rcp.rn.f32, __frcp_rn) of every pattern    (the sqrt and reciprocal idioms: must be 0 different; sp43)
+//        idiv, sidiv            32-bit integer x / y, unsigned and signed, for 12 dividends and every nonzero divisor            (the integer division idiom: must be 0 different; sp43)
 //   stride: test every stride-th pattern (default 1 = all 2^32; a smoke run uses 4099)
 //
 // Output, one line per op and dividend: "RESULT op=<op> [a=0x...] tested=N differ=N max_ulp=N first=0x<in>:card=0x<bits>:sim=0x<bits>"; the exit status is 0 when
@@ -36,10 +38,15 @@ __device__ uint32_t card_op(int op, uint32_t in, uint32_t a, bool mutate) {
     case 2: asm volatile("sqrt.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(x)); break;
     case 3: asm volatile("ex2.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(x)); break;
     case 4: asm volatile("lg2.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(x)); break;
-    default: r = __fdiv_rn(__uint_as_float(a), x); break;   // div.rn.f32: the idiom (MUFU.RCP, FFMA refinement, FCHK, slow path)
+    case 5: r = __fdiv_rn(__uint_as_float(a), x); break;   // div.rn.f32: the idiom (MUFU.RCP, FFMA refinement, FCHK, slow path)
+    case 6: r = __fsqrt_rn(x); break;                      // sqrt.rn.f32: MUFU.RSQ, FFMA refinement, a slow path for the extremes
+    case 7: r = __frcp_rn(x); break;                       // rcp.rn.f32: MUFU.RCP, FFMA refinement, FCHK, slow path
+    case 8: r = __uint_as_float(in ? a / in : 0u); break;  // u32 x / y: I2F.RP, MUFU.RCP, IADD3 0xffffffe, F2I.TRUNC, a Newton step, two corrections
+    default: r = __uint_as_float(in && !(a == 0x80000000u && in == 0xffffffffu) ? (uint32_t)((int)a / (int)in) : 0u); break;   // s32 (INT_MIN / -1 is undefined)
   }
   uint32_t b = __float_as_uint(r);
-  if (mutate && op == 5 && (b & 0x7f800000u) != 0x7f800000u && (in & 0x3ffu) == 0 && in) b += 1;   // a nudge the harness has to notice
+  const bool is_float = (b & 0x7f800000u) != 0x7f800000u;
+  if (mutate && op >= 5 && (op >= 8 || is_float) && (in & 0x3ffu) == 0 && in) b += 1;   // a nudge the harness has to notice
   return b;
 }
 __global__ void run(int op, uint32_t a, uint64_t first, uint64_t count, uint64_t stride, bool mutate, uint32_t* out) {
@@ -50,26 +57,27 @@ __global__ void run(int op, uint32_t a, uint64_t first, uint64_t count, uint64_t
 
 int main(int argc, char** argv) {
   using namespace vgpu::hostgpu;
-  if (argc < 2) { std::fprintf(stderr, "usage: %s rcp|rsq|sqrt|ex2|lg2|div [stride]\n", argv[0]); return 2; }
+  if (argc < 2) { std::fprintf(stderr, "usage: %s rcp|rsq|sqrt|ex2|lg2|div|sqrtrn|rcprn|idiv|sidiv [stride]\n", argv[0]); return 2; }
   const std::string name = argv[1];
-  const char* names[] = {"rcp", "rsq", "sqrt", "ex2", "lg2", "div"};
-  const ref::Fn fns[] = {ref::Fn::Rcp, ref::Fn::Rsq, ref::Fn::Sqrt, ref::Fn::Ex2, ref::Fn::Lg2, ref::Fn::Rcp};
+  const char* names[] = {"rcp", "rsq", "sqrt", "ex2", "lg2", "div", "sqrtrn", "rcprn", "idiv", "sidiv"};
+  const ref::Fn fns[] = {ref::Fn::Rcp, ref::Fn::Rsq, ref::Fn::Sqrt, ref::Fn::Ex2, ref::Fn::Lg2, ref::Fn::Rcp, ref::Fn::Rcp, ref::Fn::Rcp, ref::Fn::Rcp, ref::Fn::Rcp};   // (the last five: the exact forms below)
   int op = -1;
-  for (int i = 0; i < 6; ++i) if (name == names[i]) op = i;
+  for (int i = 0; i < 10; ++i) if (name == names[i]) op = i;
   if (op < 0) { std::fprintf(stderr, "unknown op %s\n", argv[1]); return 2; }
   const uint64_t stride = argc > 2 ? std::strtoull(argv[2], nullptr, 10) : 1;
   const bool mutate = std::getenv("HOSTGPU_SFU_MUTATE") != nullptr;
   const uint64_t total = ((1ull << 32) + stride - 1) / stride;
   // (0, +-inf and a NaN as dividends reach the slow path's NaN generator, MUFU.RSQ of an immediate NaN, for 0/0, inf/inf and NaN operands.)
   const uint32_t dividends[] = {0x3f800000u, 0x40400000u, 0x3dcccccdu, 0xc0200000u, 0x7bf00000u, 0x0a000000u, 0x3f9e3779u, 0x7f7fffffu, 0x00000000u, 0x7f800000u, 0xff800000u, 0x7fc00000u};
-  const int n_div = op == 5 ? 12 : 1;
+  const uint32_t int_dividends[] = {0u, 1u, 2u, 3u, 0x7fffffffu, 0x80000000u, 0xfffffffeu, 0xffffffffu, 12345u, 0x01234567u, 0x9e3779b9u, 0xdeadbeefu};
+  const int n_div = (op == 5 || op >= 8) ? 12 : 1;
   const uint64_t chunk = 1ull << 26;
   uint32_t* d = nullptr;
   CK(cudaMalloc(&d, chunk * 4));
   std::vector<uint32_t> h(chunk);
   int status = 0;
   for (int di = 0; di < n_div; ++di) {
-    const uint32_t a = dividends[di];
+    const uint32_t a = op >= 8 ? int_dividends[di] : dividends[di];
     uint64_t differ = 0;
     uint32_t max_ulp = 0, first_in = 0, first_card = 0, first_sim = 0;
     for (uint64_t first = 0; first < total; first += chunk) {
@@ -85,8 +93,8 @@ int main(int argc, char** argv) {
         th.emplace_back([&, t] {
           for (uint64_t i = t; i < count; i += nt) {
             const uint32_t in = (uint32_t)((first + i) * stride);
-            const uint32_t sim = op == 5 ? ref::fdiv_rn(a, in) : ref::mufu(fns[op], in);
-            const uint32_t card = (op == 5 && (h[i] & 0x7f800000u) == 0x7f800000u && (h[i] & 0x7fffffu)) ? 0x7fffffffu : h[i];
+            const uint32_t sim = op == 8 ? (in ? a / in : 0u) : op == 9 ? (in && !(a == 0x80000000u && in == 0xffffffffu) ? (uint32_t)((int)a / (int)in) : 0u) : op == 5 ? ref::fdiv_rn(a, in) : op == 6 ? ref::fsqrt_rn(in) : op == 7 ? ref::frcp_rn(in) : ref::mufu(fns[op], in);
+            const uint32_t card = (op >= 5 && op <= 7 && (h[i] & 0x7f800000u) == 0x7f800000u && (h[i] & 0x7fffffu)) ? 0x7fffffffu : h[i];
             if (card == sim) continue;
             if (!bad[t]++ || i < fidx[t]) { fidx[t] = i; fi[t] = in; fc[t] = card; fs[t] = sim; }
             const uint32_t u = ref::ulp_distance(card, sim);
@@ -102,7 +110,7 @@ int main(int argc, char** argv) {
       }
     }
     char ds[32] = "";
-    if (op == 5) std::snprintf(ds, sizeof ds, " a=0x%08x", a);
+    if (op == 5 || op >= 8) std::snprintf(ds, sizeof ds, " a=0x%08x", a);
     std::printf("RESULT op=%s%s tested=%llu differ=%llu max_ulp=%u first=0x%08x:card=0x%08x:sim=0x%08x\n", name.c_str(), ds, (unsigned long long)total,
                 (unsigned long long)differ, max_ulp, first_in, first_card, first_sim);
     std::fflush(stdout);
