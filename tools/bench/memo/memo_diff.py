@@ -133,7 +133,8 @@ def main():
     ap.add_argument("--timeout", type=float, default=300)
     ap.add_argument("--max-load", type=float, default=8.0)
     ap.add_argument("--exe-dir", default="", help="a directory of programs built from nvidia/tests/e2e (run with no arguments; shown as e2e/<name>)")
-    ap.add_argument("--memo-budget", default="", help="VGPU_MEMO_BUDGET for the overhead mode's cold and warm runs ('inf': record every miss)")
+    ap.add_argument("--event-credit-ms", default="", help="VGPU_MEMO_EVENT_CREDIT_MS for the cold and warm runs (a huge number: host writes unbudgeted, as before round sp38)")
+    ap.add_argument("--memo-budget", default="", help="VGPU_MEMO_BUDGET for the cold and warm runs of either mode ('inf': record every miss)")
     ap.add_argument("--lock", default="/tmp/pantheonsim-builder.lock", help="flock file wrapped around every run ('' for none)")
     ap.add_argument("--nice", action="store_true", default=True)
     ARGS = ap.parse_args()
@@ -174,7 +175,9 @@ def main():
             HELD[0] = True
         try:
             if ARGS.mode == "correctness":
-                inf = {"VGPU_MEMO_DIR": cache, "VGPU_MEMO_BUDGET": "inf"}
+                inf = {"VGPU_MEMO_DIR": cache, "VGPU_MEMO_BUDGET": ARGS.memo_budget or "inf"}   # (a finite budget here is the stress of the poisoning paths)
+                if ARGS.event_credit_ms:
+                    inf["VGPU_MEMO_EVENT_CREDIT_MS"] = ARGS.event_credit_ms
                 r["off"] = go(None)
                 if r["off"]["timeout"]:
                     r["note"] = "off timed out"
@@ -202,6 +205,8 @@ def main():
                             m = {"VGPU_MEMO_DIR": d}
                             if ARGS.memo_budget:
                                 m["VGPU_MEMO_BUDGET"] = ARGS.memo_budget
+                            if ARGS.event_credit_ms:
+                                m["VGPU_MEMO_EVENT_CREDIT_MS"] = ARGS.event_credit_ms
                             x = go(m)
                         reps[s].append(x)
                         if x["timeout"]:

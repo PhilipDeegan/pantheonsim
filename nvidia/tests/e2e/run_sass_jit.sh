@@ -305,6 +305,23 @@ if want modes && [[ -z ${VGPU_JIT_ONLY_RANDOM:-} && -x "$work/$prog.$arch" ]]; t
   fakecc="$work/slowcc"
   printf '#!/bin/sh\nif [ "$1" = --version ]; then echo slowcc; exit 0; fi\nif [ "$1" = -dumpmachine ]; then echo m; exit 0; fi\nsleep 30\n' > "$fakecc"; chmod +x "$fakecc"
   mode "a compile that times out" "VGPU_JIT_CXX=$fakecc" VGPU_JIT_TIMEOUT=1 "VGPU_JIT_CACHE=$work/jit-c4"
+
+  # The forms of the generated code (round sp38): the runs above and in the other stages are the default, the cheap form (rows in the register
+  # file, one body per region); the full form (VGPU_JIT_RESIDENCE=1 VGPU_JIT_SPECIALIZE=1: rows in locals, a second body for whole warps) is
+  # still a knob, and must print what the tier prints with regions running, as each part of it alone must.
+  form() {
+    local label=$1; shift
+    local out sf="$work/form.stats" line n
+    rm -f "$sf"
+    out="$(runit "$bin" $arch VGPU_TIER=1 VGPU_JIT=1 VGPU_JIT_THRESHOLD=1 VGPU_JIT_SYNC=1 VGPU_JIT_HOT_PERMILLE=0 VGPU_JIT_MAX_OPS=100000000 VGPU_JIT_MIN_REGION=2 VGPU_JIT_STATS=1 VGPU_JIT_STATS_FILE="$sf" "$@")"
+    if [[ "$out" != "$ref" ]]; then echo "FAIL $arch $prog ($label): output differs from the tier"; diff <(echo "$ref") <(echo "$out") | head -6 | sed 's/^/    /'; fails=1; return; fi
+    line="$(jit_line "$sf")"; n="$(jit_num "$line" 'region calls')"
+    if [[ -z $n || $n == 0 ]]; then echo "FAIL $arch $prog ($label): no generated region ran ($line)"; fails=1; return; fi
+    echo "ok   $arch $prog ($label)  (${line#jit: })"
+  }
+  form "the full form: residence and specialisation" VGPU_JIT_RESIDENCE=1 VGPU_JIT_SPECIALIZE=1 "VGPU_JIT_CACHE=$work/jit-f1"
+  form "residence only" VGPU_JIT_RESIDENCE=1 "VGPU_JIT_CACHE=$work/jit-f2"
+  form "specialisation only" VGPU_JIT_SPECIALIZE=1 "VGPU_JIT_CACHE=$work/jit-f3"
 fi
 
 [[ $fails == 0 ]] && echo "PASS" || echo "FAIL: the tier and the JIT differ"

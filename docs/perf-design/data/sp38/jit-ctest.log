@@ -1,0 +1,21 @@
+Test project /home/saqib/.cache/pantheonsim-sp38/build
+    Start  63: test_sass_chain_cont_jit
+1/8 Test  #63: test_sass_chain_cont_jit .........   Passed    7.27 sec
+    Start  64: test_sass_store_gate_jit
+2/8 Test  #64: test_sass_store_gate_jit .........   Passed    7.76 sec
+    Start  65: test_sass_alu_runs_jit
+3/8 Test  #65: test_sass_alu_runs_jit ...........   Passed  214.51 sec
+    Start 118: test_memo
+4/8 Test #118: test_memo ........................   Passed    0.21 sec
+    Start 166: test_tier
+5/8 Test #166: test_tier ........................   Passed    0.02 sec
+    Start 167: test_jit
+6/8 Test #167: test_jit .........................   Passed    3.03 sec
+    Start 168: test_jit_share
+7/8 Test #168: test_jit_share ...................   Passed    0.34 sec
+    Start 169: test_jit_resid
+8/8 Test #169: test_jit_resid ...................   Passed   23.07 sec
+
+100% tests passed, 0 tests failed out of 8
+
+Total Test time (real) = 256.22 sec

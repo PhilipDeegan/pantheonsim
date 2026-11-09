@@ -258,8 +258,12 @@ Config Config::from_env() {
   c.cache_dir = env("VGPU_JIT_CACHE");
   c.cxx = env("VGPU_JIT_CXX");
   c.extra_flags = env("VGPU_JIT_FLAGS");
-  if (const std::string r = env("VGPU_JIT_RESIDENCE"); r == "0") c.residence = false;
-  if (const std::string r = env("VGPU_JIT_SPECIALIZE"); r == "0") c.specialize = false;
+  // The product's defaults are the cheap form of the generated code (round sp38: the compile is 22 to 48 % shorter, the run time is the same
+  // or better); the members' own defaults stay the full form, which is what the generator's tests compare the cheap form against.
+  c.residence = false;
+  c.specialize = false;
+  if (const std::string r = env("VGPU_JIT_RESIDENCE"); !r.empty() && r != "0") c.residence = true;
+  if (const std::string r = env("VGPU_JIT_SPECIALIZE"); !r.empty() && r != "0") c.specialize = true;
   if (const std::string t = env("VGPU_JIT_TIMEOUT"); !t.empty()) c.timeout_s = static_cast<unsigned>(std::strtoul(t.c_str(), nullptr, 10));
   if (const std::string m = env("VGPU_JIT_MEM_MB"); !m.empty()) c.mem_mb = static_cast<unsigned>(std::strtoul(m.c_str(), nullptr, 10));
   return c;

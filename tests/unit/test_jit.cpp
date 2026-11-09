@@ -364,6 +364,57 @@ VTEST(jit_exceptions_unwind_through_the_generated_frames_with_and_without_fexcep
 
 // ---- the cache ----------------------------------------------------------------------------------------------------------------------------------
 
+// Round sp38: what the environment gives. The cheap form of the generated code (rows in the register file, one body per region) is the
+// default; 1 turns each part of the full form on, 0 and unset leave it off. The members' own defaults (the generator's tests rely on them
+// being the full form) are not what the product runs.
+VTEST(jit_the_product_default_is_the_cheap_form_and_the_knobs_turn_the_full_form_on) {
+  const char* const names[] = {"VGPU_JIT_RESIDENCE", "VGPU_JIT_SPECIALIZE"};
+  std::string saved[2];
+  bool had[2];
+  for (int i = 0; i < 2; ++i) {
+    const char* v = std::getenv(names[i]);
+    had[i] = v != nullptr;
+    if (v) saved[i] = v;
+    ::unsetenv(names[i]);
+  }
+  {
+    const jit::Config c = jit::Config::from_env();
+    VCHECK(!c.residence);
+    VCHECK(!c.specialize);
+  }
+  ::setenv("VGPU_JIT_RESIDENCE", "1", 1);
+  {
+    const jit::Config c = jit::Config::from_env();
+    VCHECK(c.residence);
+    VCHECK(!c.specialize);
+  }
+  ::setenv("VGPU_JIT_SPECIALIZE", "1", 1);
+  {
+    const jit::Config c = jit::Config::from_env();
+    VCHECK(c.residence);
+    VCHECK(c.specialize);
+  }
+  ::setenv("VGPU_JIT_RESIDENCE", "0", 1);
+  ::setenv("VGPU_JIT_SPECIALIZE", "0", 1);
+  {
+    const jit::Config c = jit::Config::from_env();
+    VCHECK(!c.residence);
+    VCHECK(!c.specialize);
+  }
+  ::setenv("VGPU_JIT_RESIDENCE", "", 1);
+  {
+    const jit::Config c = jit::Config::from_env();
+    VCHECK(!c.residence);
+  }
+  // A struct made without the environment is the full form (the generator tests' baseline) and the two forms are different units.
+  const jit::Config full;
+  VCHECK(full.residence && full.specialize);
+  for (int i = 0; i < 2; ++i) {
+    if (had[i]) ::setenv(names[i], saved[i].c_str(), 1);
+    else ::unsetenv(names[i]);
+  }
+}
+
 VTEST(jit_second_engine_hits_the_cache_without_compiling) {
   NEED_COMPILER();
   TmpDir d;
