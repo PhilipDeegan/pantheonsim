@@ -1,0 +1,92 @@
+name: PGO release build
+
+# A profile-guided build of the simulator's libraries, produced by scripts/pgo-build.sh (docs/pgo.md): instrumented build,
+# training over scripts/pgo/train-manifest.txt, the optimised build; then the held-out programs of
+# scripts/pgo/test-manifest.txt are timed against a plain build of the same tree and their counters and results compared.
+# Run it by hand: `gh workflow run pgo-release.yml --ref <tag or branch>`. It does nothing on pull requests and nothing
+# where the variables below are unset: it needs the host that has the training corpus and PyTorch (the ML runner).
+#
+#   ML_RUNS_ON  runner labels, as ci.yml's ml job (a JSON string or array)
+#   PGO_CORP    directory on that runner with the corpus (docs/pgo.md, "The corpus")
+#   PGO_PY      python with PyTorch for CUDA 13 on that runner
+#
+# The artifact is the profile-guided build's shim libraries and the timing tables. Nothing is published from here: a release
+# job takes the artifact (or runs scripts/pgo-build.sh itself) after the gate below is green.
+
+on:
+  workflow_dispatch:
+    inputs:
+      gate:
+        description: "run the speed and same-bits gate against a plain build after the PGO build (true/false)"
+        required: false
+        default: 'true'
+      runs:
+        description: "timed runs per program and build in the gate"
+        required: false
+        default: '5'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pgo:
+    name: PGO build, train on the corpus, gate on the held-out programs
+    if: vars.ML_RUNS_ON != '' && vars.PGO_CORP != ''
+    runs-on: ${{ fromJSON(vars.ML_RUNS_ON || '"ubuntu-24.04"') }}
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash   # -eo pipefail: a failing ab.py is not hidden by tee
+    env:
+      PGO_CORP: ${{ vars.PGO_CORP }}
+      PGO_PY: ${{ vars.PGO_PY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: This is the host with CUDA 13 and its PyTorch
+        run: ci/ml-runner-preflight.sh cuda13 torch13
+      - name: Manifests and the profile fingerprint logic
+        run: bash tests/lint/check_pgo_pipeline.sh
+      - name: The training programs are all there
+        run: scripts/pgo-build.sh check
+      - name: Instrumented build, training, optimised build (strict)
+        run: scripts/pgo-build.sh --build build-pgo --jobs "$(ci/jobs.sh -p release)" all
+      - name: A plain build of the same tree, for the gate
+        if: inputs.gate != 'false'
+        run: |
+          cmake -S . -B build-plain -DCMAKE_BUILD_TYPE=Release
+          targets=$(cmake --build build-plain --target help | sed -n 's/^\.\.\. //p;' | sed 's/ .*//' | grep -E '^vgpu[a-z0-9_]*$' | grep -v -E '^(vgpu|vgpunpp_objs|vgpunvcomp_cpu)$' | tr '\n' ' ')
+          cmake --build build-plain -j"$(ci/jobs.sh -p release)" --target $targets
+          cp -a build-plain build-plain-copy   # the A/A control: the noise floor of this runner
+      - name: Same bits (counters, kernel digest, final memory hash, output) at 1 and 4 threads
+        if: inputs.gate != 'false'
+        run: |
+          python3 -I scripts/pgo/ab.py bits --manifest scripts/pgo/test-manifest.txt \
+            --builds A=build-plain,A2=build-plain-copy,P=build-pgo --skip '^(pan|torch)/' --threads-list 1,4 \
+            --corp "$PGO_CORP" --py "$PGO_PY" --json bits.json | tee bits.txt
+      - name: "Speed on the held-out programs (gate: the geometric mean must not fall below 1.0)"
+        if: inputs.gate != 'false'
+        run: |
+          python3 -I scripts/pgo/ab.py time --manifest scripts/pgo/test-manifest.txt \
+            --builds A=build-plain,A2=build-plain-copy,P=build-pgo --skip '^pan/' --runs "${{ inputs.runs }}" \
+            --corp "$PGO_CORP" --py "$PGO_PY" --json time.json | tee time.txt
+          python3 -I - <<'PY'
+          import json, math, sys
+          rows = json.load(open("time.json"))["rows"]
+          r = [x["ratio"]["P"] for x in rows if "P" in x["ratio"] and not x["bad"]]
+          g = math.exp(sum(map(math.log, r)) / len(r))
+          print("geometric mean A/P over %d held-out programs: %.3fx" % (len(r), g))
+          sys.exit(0 if g >= 1.0 else 1)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pgo-release
+          path: |
+            build-pgo/shim
+            build-pgo/pgo/PROFILE-INFO
+            build-pgo.train.json
+            bits.txt
+            time.txt
+            time.json
+          if-no-files-found: ignore

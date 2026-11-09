@@ -2,12 +2,12 @@
 """Measure a PGO build against a plain one on the programs of a manifest (scripts/pgo/test-manifest.txt).
 
   ab.py time --manifest M --builds A=/path/a,A2=/path/a-copy,P=/path/pgo [--ref A] --runs 9 --cpus 9 --corp C --py PY
-  ab.py bits --manifest M --builds A=/path/a,A2=/path/a-copy,P=/path/pgo --threads 1,4 --corp C --py PY
+  ab.py bits --manifest M --builds A=/path/a,A2=/path/a-copy,P=/path/pgo --threads-list 1,4 --corp C --py PY
   both: [--only REGEX] [--skip REGEX] [--lock FILE] [--max-load 8] [--json FILE]
 
 time  Every program runs --warmup + --runs times per build, interleaved (the build order rotates every round so that no
       build always goes first), pinned to --cpus (one CPU for threads=1 entries, a CPU list for --threads-cpus runs).
-      Table: median CPU seconds (user+system; wall seconds with --metric wall) per build and the ratio REF/build, so a
+      Table: median CPU seconds (pantheon workloads: per 1e9 warp-instructions) (user+system; wall seconds with --metric wall) per build and the ratio REF/build, so a
       ratio above 1 means the build is faster than REF. Geometric mean per group and overall. Builds named like the REF
       with a "2" suffix (A2) are the A/A control: its ratio is the noise floor.
 bits  Every program runs once per build and thread count with VGPU_COUNTERS_FILE, VGPU_KERNEL_DIGEST and
@@ -25,6 +25,7 @@ import json
 import math
 import os
 import re
+import resource
 import shutil
 import signal
 import statistics
@@ -71,6 +72,8 @@ class Runner:
         paths = {}
         if collect:
             for k, v in (("VGPU_KERNEL_DIGEST", "digest"), ("VGPU_COUNTERS_FILE", "counters"), ("VGPU_MEMO_FINAL_HASH", "final")):
+                if collect == "counters" and v != "counters":
+                    continue
                 paths[v] = os.path.join(scratch, v + ".txt")
                 env[k] = paths[v]
         argv = [mf.subst(x, ctx) for x in e.command]
@@ -104,20 +107,35 @@ class Runner:
             fp = os.path.join(scratch, f)
             if os.path.isfile(fp) and f not in ("digest.txt", "counters.txt", "final.txt") and f != "output.dat" and e.cwd == "tmp":
                 extra += f.encode() + open(fp, "rb").read()
-        if collect:
+        if collect == "counters":
+            n = 0
+            for line in rd_lines(paths["counters"]):
+                m = re.search(r'"instructions":(\d+)', line)
+                if m:
+                    n += int(m.group(1))
+            res["instr"] = n
+        elif collect:
             def rd(k):
                 return open(paths[k], "rb").read() if os.path.exists(paths[k]) else b""
             res["digest"] = hashlib.sha256(rd("digest")).hexdigest()[:12]
             res["counters"] = hashlib.sha256(re.sub(rb'"launch":\d+,"pid":\d+,', b"", rd("counters"))).hexdigest()[:12]
             res["final"] = hashlib.sha256(rd("final")).hexdigest()[:12]
-        res["out"], res["checks"] = real().normalise(res["text"], extra)
+        # host timing a program prints is not a result: sweep.py's "(0.1 s)" after each check, the CUDA samples' "Time: 12.3 ms" and "TOPS: 0.8"
+        txt = re.sub(r"\((\d+(\.\d+)?) s\)", "(T s)", res["text"])
+        txt = re.sub(r"(Time|TOPS|TFLOPS): *\d+(\.\d+)?( ms)?", r"\1: T", txt)
+        res["out"], res["checks"] = real().normalise(txt, extra)
         shutil.rmtree(scratch, ignore_errors=True)
         return res
 
 
+def rd_lines(path):
+    return open(path, "r", errors="replace").read().splitlines() if os.path.exists(path) else []
+
+
 def cpu_children():
-    t = os.times()
-    return t.children_user + t.children_system
+    # getrusage has microsecond resolution; os.times() has 10 ms ticks, which reads a 20 ms start-up program as 0.000
+    r = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return r.ru_utime + r.ru_stime
 
 
 def select(a):
@@ -155,14 +173,20 @@ def cmd_time(a):
             order = names[r % len(names):] + names[:r % len(names)]
             for n in order:
                 c0 = cpu_children()
-                res = rn.run(e, builds[n], cpus, thr)
+                # a program that runs for a duration (the pantheon workloads) does a different amount of work per run:
+                # its figure is CPU seconds per 1e9 warp-instructions executed
+                res = rn.run(e, builds[n], cpus, thr, collect="counters" if e.id.startswith("pan/") else None)
                 c1 = cpu_children()
                 if res["rc"] != 0 or res["timeout"]:
                     bad.append("%s rc=%s%s" % (n, res["rc"], " TIMEOUT" if res["timeout"] else ""))
                     continue
                 if r >= a.warmup:
-                    samples[n].append(c1 - c0)
-                    walls[n].append(res["wall"])
+                    work = res["instr"] / 1e9 if "instr" in res else 1.0
+                    if work <= 0:
+                        bad.append("%s no instructions counted" % n)
+                        continue
+                    samples[n].append((c1 - c0) / work)
+                    walls[n].append(res["wall"] / work)
         metric = walls if a.metric == "wall" else samples
         med = {n: statistics.median(metric[n]) for n in names if metric[n]}
         row = {"id": e.id, "threads": thr or e.threads, "med": med, "n": {n: len(metric[n]) for n in names}, "bad": bad,

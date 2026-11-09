@@ -133,4 +133,4 @@ pan/pantheon/moe_router | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_S
 pan/pantheon/memory_pc_pingpong | sass | 1 | 1 | 60 | tmp | VGPU_VRAM_MB=1024 VGPU_MAX_STEPS=17179869184 | @CORP@/pbin/memory_pc_pingpong 0 3 2 --kernel_loops 2 --grid_size 4
 
 # --- PyTorch (needs a PyTorch venv, @PY@): eleven sweep groups, the `nn` group is held out (test-manifest.txt)
-torch/sweep/train-groups | raw | 1 | 1 | 3600 | tmp | VGPU_THREADS=1 VGPU_SWEEP_GROUPS=amp,attention,fft,graphs,linalg,losses,ops,optim,rnn,sdpa,sparse VGPU_SWEEP_TIER=quick OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 TRITON_CACHE_DIR=@TMP@/t TORCHINDUCTOR_CACHE_DIR=@TMP@/i | @BUILD@/vgpu run --gpu nvidia/rtx5090 --preload @PY@ @SRC@/nvidia/tests/pytorch/sweep.py
+torch/sweep/train-groups | raw | 1 | 1 | 3600 | tmp | VGPU_THREADS=1 VGPU_SWEEP_GROUPS=amp,attention,fft,graphs,linalg,losses,ops,optim,rnn,sdpa,sparse VGPU_SWEEP_TIER=quick OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 TRITON_CACHE_DIR=@TMP@/t TORCHINDUCTOR_CACHE_DIR=@TMP@/i | @BUILD@/vgpu run --gpu nvidia/rtx5090 --preload @PY@ @SRC@/scripts/pgo/run_sweep.py
