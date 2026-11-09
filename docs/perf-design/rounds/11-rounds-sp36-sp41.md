@@ -581,3 +581,80 @@ Unit suite on server2 (Release, g++ 13, `ctest -R '^test_'`, 376 tests): main d4
 * Fix 2's number is a stand-in-driver run: the card "executes" nothing, so verify reports every kernel as different; the cost being measured is the simulator's side of the gate, which does not depend on what the card did.
 * The proof for integer division covers 32-bit forms with one reciprocal estimate; 64-bit division (`I2F.U64.RP`, a `CALL` slow path) is a different sequence and was not looked at.
 * `idiv` and `sidiv` runs in the simulator show the simulator's execution of the idiom is exact; they say nothing about the card, which is what the experiment script is for.
+
+## Round sp44 (host-GPU card experiments)
+
+Branch `sp44-card-results` (main 27f09add merged with `hostgpu-round`, PR #557, head 0ba1a955; no source changed). The card experiments that Rounds sp42 and sp43 left open, run on one real A10G. Compact table: `data/sp44/results.tsv`.
+
+Rig: AWS g5.xlarge (A10G, driver 595.112.07, Ubuntu 24.04, 4 vCPU, g++ 13.3), instance i-09579237d1ff574ac, launched 22:01 UTC, terminated 23:25 UTC (about 1.4 h). Simulator built from a clean `git archive` of 0ba1a955, `RelWithDebInfo`, `-DVGPU_LTO=OFF`, targets `vgpucuda vgpucudart vgpu`. Toolkits: the exhaustive probe was built with nvcc 13.0.88 (PATH forced; the rig default is 13.2); the programs are the cached sm_86 binaries of sp42 (PolyBench/GPU, Rodinia, HeCBench, all built with nvcc 13.0, `-cudart shared`, copied from the local cache, not rebuilt); native `libcudart` 13.0 was never needed. Every run: `VGPU_GPU=nvidia/a10g VGPU_THREADS=4 VGPU_QUIET=1`, one process at a time on the rig.
+
+### B. Exhaustive MUFU probe (`tools/probes/hostgpu_mufu_card_experiment.sh`, stride 1, about 5 minutes)
+
+All four verdicts pass:
+
+```
+VERDICT div PASS (12 RESULT lines, differ=0, stride 1)
+VERDICT sqrtrn PASS (1 RESULT lines, differ=0, stride 1)
+VERDICT rcprn PASS (1 RESULT lines, differ=0, stride 1)
+VERDICT harness PASS
+```
+
+Every exact op tested all 4294967296 patterns with differ=0 (div: the 12 dividends 0x3f800000, 0x40400000, 0x3dcccccd, 0xc0200000, 0x7bf00000, 0x0a000000, 0x3f9e3779, 0x7f7fffff, 0x00000000, 0x7f800000, 0xff800000, 0x7fc00000 against every divisor). The harness's own mutation (one-ulp nudge) is seen by all three ops (differ 8128 to 16256 of 16711936 at stride 257; the three infinity/NaN dividends of div correctly show 0). The bare MUFU forms differ as expected:
+
+| op | differ of 2^32 | share | max ulp | first differing pattern (card / sim) |
+|---|---:|---:|---:|---|
+| rcp | 558,695,088 | 13.0% | 1 | 0x008005ac: 0x7e7ff4a8 / 0x7e7ff4a9 |
+| rsq | 461,534,510 | 10.7% | 2 | 0x00800004: 0x5efffffb / 0x5efffffc |
+| sqrt | 359,384,981 | 8.4% | 1 | 0x00801000: 0x200007ff / 0x20000800 |
+| ex2 | 189,046,181 | 4.4% | 2 | 0x33b8aa3c: 0x3f800000 / 0x3f800001 |
+| lg2 | 1,071,419,683 | 24.9% | 23,947,836 | 0x00800000: 0xc2fbffff / 0xc2fc0000 |
+
+The lg2 max_ulp is an absolute-ulp distance near results that cross zero (log2 of values near 1), not a 23-million-ulp error in the usual sense; the probe's metric is the integer distance of the two bit patterns. No exact op failed, so the exact set is unchanged. Consequence: integer division, `div.rn` (the `VGPU_HOST_GPU_DIV` idiom), `sqrt.rn` and `rcp.rn` are bit-exact on the A10G over every input the probe covers; the bare MUFU ops are not and stay out.
+
+### C. Start-cost A/B (`VGPU_HOST_GPU=exact`, old = `VGPU_HOST_GPU_START_COST=0`, new = default)
+
+Five interleaved runs per cell (long programs: old, new; short programs: plain simulator, old, new), process wall seconds. The plain simulator was not rerun for the four long programs (sp42: 320.9, 405.2, 600+, 110.3 s).
+
+| program | plain sim s | old median (min-max) | new median (min-max) | new vs old |
+|---|---:|---|---|---:|
+| base64e | (320.9) | 8.780 (8.772-8.874) | 8.745 (8.732-8.760) | -0.4% |
+| babelstream | (405.2) | 13.540 (13.501-13.631) | 13.527 (13.517-13.600) | -0.1% |
+| aligned-types | (600+) | 8.386 (8.383-8.405) | 8.329 (8.322-8.340) | -0.7% |
+| FDTD-2D | (110.3) | 4.774 (4.669-4.808) | 4.746 (4.654-4.893) | -0.6% |
+| bfs | 0.017 | 0.017 (0.017-0.020) | 0.017 (0.017-0.019) | 0 |
+| backprop | 0.048 | 0.276 (0.268-0.281) | 0.047 (0.046-0.047) | 5.9x faster |
+| gaussian | 0.022 | 0.246 (0.238-0.257) | 0.022 (0.022-0.022) | 11x faster |
+| pathfinder | 0.014 | 0.243 (0.241-0.249) | 0.014 (0.013-0.014) | 17x faster |
+
+Result: the long programs do not lose. The expected cost of about 0.25 s (driver started after 0.25 s of simulation instead of at the first launch) is not visible: the new rule is equal or 0.03 to 0.06 s faster, which is inside the run-to-run spread for base64e, babelstream and FDTD-2D and just outside it for aligned-types (spread 0.02 s). Why the delayed start costs nothing was not investigated (the driver start is begun in a thread and may overlap simulation; not checked). The short programs stop losing: backprop, gaussian and pathfinder go from 5.9x to 17x slower than the simulator to equal to it (within 1 ms). bfs shows no loss even with `VGPU_HOST_GPU_START_COST=0` (0.017 s in all three modes), unlike sp42's 0.25 s on main d462bc2f: the sp43 change that starts the driver only for a launch that is offloaded already covers it (no bfs launch is offloaded), so this A/B isolates only the cost threshold, not the whole sp43 start change. The programs' stdout was not compared in this table (the filter did not remove every timing line); stdout equality is in D and E.
+
+### D. Division idiom (`VGPU_HOST_GPU_DIV=1`) on the programs with float division
+
+B shows div PASS, so these runs apply. One run per cell (mandelbrot: five interleaved runs), wall seconds; "device" is the `GPU Time in seconds` the PolyBench programs print (the process wall hides it behind the CPU reference). Standard output with time lines removed is identical to the plain simulator in every mode of every program.
+
+| program | sim | exact | exact + DIV=1 | DIV vs sim | device sim / exact / DIV | verify=all in-set launches identical / different |
+|---|---:|---:|---:|---:|---|---|
+| ADI | 0.40 | 0.40 | 0.41 | 0.98x | 0.326 / 0.329 / 0.340 | 2049 / 0 |
+| LU | 30.86 | 11.15 | 11.20 | 2.76x | 30.18 / 10.37 / 10.44 | 4094 / 0 |
+| GRAMSCHM | 274.16 | 269.99 | 273.04 | 1.00x | 46.06 / 43.64 / 43.83 | 3011 (+1506 outside) / 0, run cut at 1500 s |
+| CORR | 63.60 | 63.40 | 63.66 | 1.00x | 23.77 / 23.98 / 23.99 | 2 (+1 outside) / 0, run cut at 400 s |
+| mandelbrot (HeCBench) | 1.197 | 1.196 | 0.99 | 1.21x | - | 2 / 0 |
+| lud (Rodinia) | 0.05 | 0.05 | 0.06 | 0.8x | - | 30 (+16 outside) / 0 |
+| lud (HeCBench) | 0.05 | 0.05 | 0.05 | 1.0x | - | 30 (+16 outside) / 0 |
+
+Verify mode correctness: no launch, in or outside the exact set, differed (`in_set_different` is 0 everywhere). The counts come from the per-launch `host_gpu: verify ... identical` lines, because the summary line is not printed under `VGPU_QUIET=1` (see Findings). GRAMSCHM and CORR verify did not finish inside their caps (each launch runs on both sides; the per-launch cost is the simulator's), so their counts are of the launches that completed.
+
+Which programs gain: only mandelbrot (five runs: sim 1.195-1.198, exact 1.195-1.250, DIV 0.984-0.999; the card runs its kernel in 0.12 ms against a 452 ms simulator estimate, total 6 ms with the push). LU's gain (2.76x) is from `exact` alone (`lu_kernel2`, offloaded in `exact` mode without DIV), DIV adds nothing. ADI, GRAMSCHM and CORR do not gain although DIV makes kernels eligible: the eligible launches are too short to repay a card round trip (`adi_kernel4` sim 0.12 ms against a 1.16 ms card path, `gramschmidt_kernel2` 0.15 ms against 4.3 ms; the log says "stays in the simulator"), `gramschmidt_kernel1` is refused for `MUFU.RSQ`, Rodinia `lud_diagonal` for `MUFU.RCP` and CORR's `std_kernel` for a `CALL.REL.NOINC 0x800` (a slow-path call, not a bare MUFU). `gramschmidt_kernel3` (36 ms in the simulator against a 4.3 ms card path) is the one launch the log shows as worth offloading by size, yet GRAMSCHM did not speed up; why was not investigated (the refused `kernel1` shares its buffers, which may force the data back each iteration; a guess, not measured).
+
+### E. Verify mode on 2DCONV (128 MiB live), with the start-cost fix
+
+Three interleaved runs of `VGPU_HOST_GPU=exact VGPU_HOST_GPU_VERIFY=1`: wall 13.48 s (13.45-13.52) with the default start cost, 13.49 s (13.44-13.68) with `VGPU_HOST_GPU_START_COST=0`, against 0.96 s (0.96 each) for the plain simulator: verify costs 14x the plain run here, finishes, and the start-cost rule does not matter for it. Summary (run without `VGPU_QUIET`): `host_gpu: 128.0 MiB went to the card, 0.0 MiB came back`, `host_gpu_verify: in_set_identical=1 in_set_different=0 other_identical=0 other_different=0`. In sp42 this program's verify did not finish in 150 s (finding 6); sp43's fix makes it 13.5 s on a real card.
+
+### Findings and caveats
+
+* One observation, not fixed: with `VGPU_QUIET=1` the end-of-run summary lines (`host_gpu_verify: in_set_identical=...` and `host_gpu: N launches ran on the card`) are not printed, although `VGPU_HOST_GPU_VERIFY` was requested; the per-launch verify lines are. Repro on the rig: `VGPU_GPU=nvidia/a10g VGPU_HOST_GPU=exact VGPU_HOST_GPU_VERIFY=1 VGPU_QUIET=1 ./2DCONV 2>&1 >/dev/null | tail` prints nothing; without `VGPU_QUIET=1` it prints both lines. The card experiment script's follow-up text ("read the last two lines") needs the variable unset. No result above is affected (counted from the per-launch lines).
+* No exact op failed; no verify run found a difference; no bug in the exact set was found.
+* One run per cell in D (five for mandelbrot): the 2.76x of LU and the 1.21x of mandelbrot are stable by the repeats and by sp42 (LU 11.42 s), the others are single runs of unchanged times. The plain simulator was not rerun for the long programs of C.
+* The probe was built with toolkit 13.0.88 (card results of div, sqrtrn and rcprn do not depend on it: the idiom is the card's own division sequence, compiled in the probe); the 13.2 toolkit on the rig was not used for any program. Whether nvcc 13.2 emits a different division sequence was not tested.
+* Other cards (sm_75 to sm_120) were not run; the probe's answer is the A10G's (sm_86).
+* Not run: PolyBench 2DCONV outside of E, the other 56 programs of sp42, the second half of the experiment script's list for adam, mask, md5hash, matrixT (HeCBench) and hotspot, srad_v2 (Rodinia), which need their reduced arguments; the idiom's ops on them are covered by B.
