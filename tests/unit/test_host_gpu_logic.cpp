@@ -1,6 +1,7 @@
 // The host-GPU mode's decisions that need no card: which kernels may run on it with the simulator's bits, the chunk residency
 // protocol, and the size rule (include/vgpu/host_gpu.hpp). The part that drives the real GPU is run by
 // nvidia/tests/e2e/run_host_gpu.sh, on a machine with a card.
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <random>
@@ -116,6 +117,86 @@ VTEST(residency_keeps_both_sides_coherent) {
       }
     }
   }
+}
+
+// The counts are kept by every change of a chunk, not recounted; the gate's fast path trusts `access_changes_state` to skip only what is a no-op.
+namespace {
+void check_counts(const Residency& r) {
+  uint64_t n[3] = {0, 0, 0};
+  for (uint64_t c = 0; c < r.chunks(); ++c) ++n[static_cast<unsigned>(r.at(c))];
+  VCHECK_EQ(r.count(Where::Host), n[0]);
+  VCHECK_EQ(r.count(Where::Card), n[1]);
+  VCHECK_EQ(r.count(Where::Both), n[2]);
+  VCHECK_EQ(r.card_valid(), n[1] + n[2]);
+  VCHECK_EQ(r.host_chunks().size(), n[0]);
+}
+bool same_states(const Residency& a, const Residency& b) {
+  for (uint64_t c = 0; c < a.chunks(); ++c)
+    if (a.at(c) != b.at(c)) return false;
+  return true;
+}
+}  // namespace
+
+VTEST(residency_counts_match_a_recount_after_every_operation) {
+  for (uint32_t seed = 1; seed <= 300; ++seed) {
+    std::mt19937 rng(seed);
+    const uint64_t n = 1 + seed % 17;
+    Residency r(n);
+    check_counts(r);
+    for (int step = 0; step < 300; ++step) {
+      const uint64_t a = rng() % n, b = a + rng() % (n - a);
+      switch (rng() % 9) {
+        case 0: r.sim_write(a, b, rng() % 2); break;
+        case 1: r.sim_read(a, b); break;
+        case 2: r.card_prepare(); break;
+        case 3: r.card_launched(); break;
+        case 4: r.card_launched_writing(a, b); break;
+        case 5: r.sim_launch(); break;
+        case 6: r.set(a, static_cast<Where>(rng() % 3)); break;
+        case 7: r.sim_read(a, b + 3); break;   // past the end: clamped
+        default: r.sim_write(a, b + 3, true); break;
+      }
+      check_counts(r);
+    }
+  }
+}
+
+VTEST(access_changes_state_is_exactly_whether_the_gate_would_do_anything) {   // a skipped access must be one that the full path would leave alone
+  for (uint32_t seed = 1; seed <= 300; ++seed) {
+    std::mt19937 rng(seed);
+    const uint64_t n = 1 + seed % 11;
+    Residency r(n);
+    for (int step = 0; step < 200; ++step) {
+      switch (rng() % 4) {
+        case 0: r.card_launched(); break;
+        case 1: r.set(rng() % n, static_cast<Where>(rng() % 3)); break;
+        case 2: r.card_prepare(); break;
+        default: break;
+      }
+      const uint64_t a = rng() % n, b = a + rng() % (n - a);
+      for (bool write : {false, true}) {
+        Residency full = r;
+        const std::vector<uint64_t> pulled = write ? full.sim_write(a, b, false) : full.sim_read(a, b);
+        const bool changes = !pulled.empty() || !same_states(full, r);
+        VCHECK_EQ(r.access_changes_state(a, b, write), changes);
+      }
+    }
+  }
+}
+
+VTEST(residency_queries_do_not_grow_with_the_allocation) {   // the gate asked for the counts after every access: 2 x 1 M chunks scanned each time
+  Residency r(1u << 20);   // 64 GiB of chunks
+  r.card_launched();
+  r.sim_read(0, 3);
+  const auto t0 = std::chrono::steady_clock::now();
+  uint64_t sink = 0;
+  for (uint64_t i = 0; i < 200000; ++i) {
+    sink += r.card_valid() + r.count(Where::Card) + (r.access_changes_state(i, i, false) ? 1 : 0);
+    r.sim_read(i % 8, i % 8);
+  }
+  const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  VCHECK(sink > 0);
+  VCHECK(s < 2.0);   // microseconds in all; a scan of the chunks took more than 20 s for this many queries
 }
 
 VTEST(chunk_runs_group_adjacent_chunks) {
@@ -446,16 +527,94 @@ VTEST(one_sample_allowance_is_per_kernel) {
   VCHECK(t.samples("never_seen") == 0);
 }
 
-VTEST(driver_start_waits_for_a_launch_of_enough_warps) {
-  VCHECK(!start_worthwhile(1, 32));                         // one warp
-  VCHECK(!start_worthwhile(2, 256));                        // 16 warps
-  VCHECK(!start_worthwhile(31, 32));
-  VCHECK(start_worthwhile(32, 32));                         // exactly kStartMinWarps
-  VCHECK(start_worthwhile(4, 256));                         // 32 warps
-  VCHECK(start_worthwhile(1, 1024));                        // one block of 32 warps
-  VCHECK(start_worthwhile(1, 1000));                     // 1000 threads round up to 32 warps
-  VCHECK(!start_worthwhile(0, 256));                        // an empty grid
-  VCHECK(start_worthwhile(1ull << 40, 33));                 // a huge grid does not overflow
+// ---- the driver start is charged by the offload decision (sp43; docs/performance.md "Round sp43") ----------------------------------------------
+// An estimate that passes the plain rule by a wide margin: 50 ms of simulation, 1 MiB each way.
+static Estimate fifty_ms() {
+  Estimate e;
+  e.sim_s = 0.05;
+  e.push_bytes = e.pull_bytes = 1u << 20;
+  return e;
+}
+
+VTEST(the_start_cost_is_the_measured_one) {   // 0.23 s on an A10G (Round sp42), rounded up; a change needs a new measurement
+  Costs c;
+  VCHECK(c.start_cost_s == 0.25);
+}
+
+VTEST(a_launch_that_cannot_repay_the_start_does_not_start_the_driver) {   // Rodinia: 5 to 50 ms of simulation in the whole program, 0.04x to 0.29x with the start
+  Costs c;
+  VCHECK(should_offload(fifty_ms(), c));                                   // worth a card with the driver up ...
+  VCHECK(!should_offload_with_start(fifty_ms(), c, false, 0.0));           // ... not before it is paid for
+  VCHECK(should_offload_with_start(fifty_ms(), c, true, 0.0));             // and plainly so once it is up
+}
+
+VTEST(one_large_launch_repays_the_start_at_once) {   // PolyBench SYRK: 4 s of simulation in one launch
+  Costs c;
+  Estimate e;
+  e.sim_s = 4.0;
+  e.push_bytes = e.pull_bytes = 8u << 20;
+  VCHECK(should_offload_with_start(e, c, false, 0.0));
+  e.sim_s = 0.4;   // (the margin: 0.4 s is less than twice the 0.25 s start plus the copies)
+  VCHECK(!should_offload_with_start(e, c, false, 0.0));
+  e.sim_s = 0.6;
+  VCHECK(should_offload_with_start(e, c, false, 0.0));
+}
+
+VTEST(the_start_is_bought_when_as_much_was_spent_renting) {   // ski rental: a thousand launches of 50 ms, the driver starts after 0.25 s of them
+  Costs c;
+  VCHECK(!should_offload_with_start(fifty_ms(), c, false, 0.0));
+  VCHECK(!should_offload_with_start(fifty_ms(), c, false, c.start_cost_s * 0.99));
+  VCHECK(should_offload_with_start(fifty_ms(), c, false, c.start_cost_s));
+  VCHECK(should_offload_with_start(fifty_ms(), c, false, 10.0));
+}
+
+VTEST(spent_time_never_sends_a_launch_the_plain_rule_refuses) {   // a tiny launch of a program that spent minutes elsewhere stays in the simulator
+  Costs c;
+  Estimate e;
+  e.sim_s = 150e-6;   // under the floor
+  VCHECK(!should_offload_with_start(e, c, false, 1000.0));
+  VCHECK(!should_offload_with_start(e, c, true, 1000.0));
+  e.sim_s = 0.01;     // 10 ms against a GiB to move each way
+  e.push_bytes = e.pull_bytes = 1ull << 30;
+  VCHECK(!should_offload_with_start(e, c, false, 1000.0));
+}
+
+VTEST(a_start_cost_of_zero_is_the_rule_before_sp43) {   // VGPU_HOST_GPU_START_COST=0
+  Costs c;
+  c.start_cost_s = 0;
+  for (double s : {50e-6, 0.001, 0.05, 4.0}) {
+    Estimate e = fifty_ms();
+    e.sim_s = s;
+    VCHECK_EQ(should_offload_with_start(e, c, false, 0.0), should_offload(e, c));
+  }
+}
+
+VTEST(with_the_driver_up_the_decision_is_the_plain_rule) {   // for any account of spent time
+  Costs c;
+  for (double s : {50e-6, 0.001, 0.05, 4.0})
+    for (double spent : {0.0, 0.1, 5.0}) {
+      Estimate e = fifty_ms();
+      e.sim_s = s;
+      VCHECK_EQ(should_offload_with_start(e, c, true, spent), should_offload(e, c));
+    }
+}
+
+VTEST(the_start_is_part_of_the_card_path) {
+  Costs c;
+  Estimate e = fifty_ms();
+  const double warm = card_path_seconds(e, c);
+  e.start_s = 0.25;
+  VCHECK(card_path_seconds(e, c) > warm + 0.2499 && card_path_seconds(e, c) < warm + 0.2501);
+}
+
+VTEST(the_first_launch_rule_pays_the_start_too) {   // the static estimate of the gemm shape is 5 ms
+  Costs c;
+  VCHECK(first_launch_offload(gemm_shape(), c));                    // (default: the driver is up)
+  VCHECK(!first_launch_offload(gemm_shape(), c, false, 0.0));       // a first launch of 5 ms estimated cannot start a driver
+  FirstLaunch f = gemm_shape();
+  f.static_instrs = 60000;                                          // 1000x the code: 5 s estimated
+  VCHECK(first_launch_offload(f, c, false, 0.0));                   // that launch repays it
+  VCHECK(first_launch_offload(gemm_shape(), c, false, c.start_cost_s));   // or the program has spent as much in the simulator already
 }
 
 // ---- the division idiom (host_gpu.hpp division_idiom_only), on the shape ptxas 13.0 gave `a / b` for sm_86 (cuobjdump of an own kernel) ----
