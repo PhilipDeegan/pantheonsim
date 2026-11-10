@@ -839,6 +839,7 @@ class Parser {
     parse_body(fn);
     FinalizeOptions passes;
     passes.contract_mul_add = true;   // ptxas contracts; no other frontend does (builder.hpp)
+    passes.drop_dead_wmma_loads = true;   // and removes a wmma.load nothing reads
     finalize_function(fn, passes);
     current_kernel_.clear();
     cur_fn_ = nullptr;
@@ -2365,7 +2366,6 @@ class Parser {
         if (shape == WmmaShape{8, 8, 4}) return t == WmmaType::F64;
         return t == WmmaType::S32;
       };
-      const bool legacy_shape = shape == WmmaShape{16, 16, 16} || shape == WmmaShape{16, 16, 8};
       auto arity = [&](char f, WmmaType t, size_t have) -> bool { return wmma_geom(f, shape, t).regs == have; };
       // The stride is optional: the matrix's own leading dimension otherwise.
       auto stride_or_default = [&](char f, WmmaType t, MatLayout lay) -> Operand {
@@ -2390,10 +2390,7 @@ class Parser {
         if ((t == WmmaType::S4 || t == WmmaType::U4 || t == WmmaType::B1) &&
             op.layout != (frag == 'a' ? MatLayout::Row : MatLayout::Col))
           return unsupported("sub-byte and single-bit wmma loads A row-major and B column-major");
-        // The layouts this simulator has always used stay as they were.
-        if (frag == 'c') op.generic = !(legacy_shape && t == WmmaType::F32);
-        else op.generic = !((shape == WmmaShape{16, 16, 16} && (t == WmmaType::F16 || t == WmmaType::BF16)) ||
-                            t == WmmaType::TF32);
+        op.generic = true;
         op.f32 = frag == 'c';
         op.elem = t == WmmaType::BF16 ? WmmaElem::BF16 : t == WmmaType::TF32 ? WmmaElem::TF32 : WmmaElem::F16;
         op.dsts = parse_reg_vector_any();
@@ -2412,7 +2409,7 @@ class Parser {
         op.space = space;
         op.shape = shape;
         op.type = types[0];
-        op.generic = !(legacy_shape && op.type == WmmaType::F32);
+        op.generic = true;
         op.addr = parse_addr(fn);
         expect_punct(",");
         for (auto& r : parse_reg_vector_any()) op.src.push_back(Operand{RegOperand{r}});
@@ -2473,9 +2470,7 @@ class Parser {
         op.satfinite = satfinite;
         op.b1_and = b1_and;
         op.rnd = rnd;
-        op.generic = !((shape == WmmaShape{16, 16, 16} && (fp16 || at == WmmaType::BF16) &&
-                        op.ctype == WmmaType::F32 && op.dtype == WmmaType::F32) ||
-                       at == WmmaType::TF32);
+        op.generic = true;
         op.elem = at == WmmaType::BF16 ? WmmaElem::BF16 : at == WmmaType::TF32 ? WmmaElem::TF32 : WmmaElem::F16;
         op.d = parse_reg_vector_any();
         expect_punct(",");
@@ -4455,6 +4450,7 @@ class Parser {
       bool carry_out = false;
       bool nan_propagate = false;
       bool sat = false, xorsign_abs = false, ftz = false, relu = false;
+      bool abs_seen = false, xorsign_seen = false;
       bool wide = false, lo = false, hi = false;
       FRound frnd = FRound::Nearest;
       bool frnd_explicit = false;
@@ -4486,7 +4482,7 @@ class Parser {
         else if (p == "NaN") nan_propagate = true;
         // .xorsign.abs takes the magnitude and xors the signs; a semantic
         // change rather than an accuracy one, so it is carried to execution.
-        else if (p == "xorsign" || p == "abs") xorsign_abs = true;
+        else if (p == "xorsign" || p == "abs") { xorsign_abs = true; if (p == "abs") abs_seen = true; else xorsign_seen = true; }
         // .sat clamps: floats into [0,1], add/sub.s32 into the s32 range.
         else if (p == "sat") sat = true;
         // min/max{.relu}.s32 (PTX ISA 8.0, sm_90): the result, or 0 when it is negative.
@@ -4576,6 +4572,31 @@ class Parser {
             {"min", FloatBinOp::Min}, {"max", FloatBinOp::Max}, {"div", FloatBinOp::Div}};
         auto it = fops.find(base_op);
         if (it == fops.end()) return unsupported("float op '" + base_op + "'");
+        if ((base_op == "min" || base_op == "max") && ty.bits == 32 && (abs_seen && !xorsign_seen)) {
+          // min/max{.ftz}{.NaN}{.abs}.f32 d, a, b, c (PTX ISA 8.8, sm_100): three inputs; a bare .abs is this form's.
+          OpFloatMinMax3 m3;
+          m3.is_min = base_op == "min";
+          m3.nan_propagate = nan_propagate;
+          m3.ftz = ftz;
+          m3.abs = true;
+          int sm = 0;
+          std::sscanf(target_.c_str(), "sm_%d", &sm);
+          if (sm < 100)
+            fail(ins.line, opcode + " requires an sm_100 or later target; this module targets " +
+                               (target_.empty() ? std::string("nothing") : target_));
+          m3.dst = expect_reg_operand("destination");
+          expect_punct(",");
+          m3.a = parse_operand();
+          expect_punct(",");
+          m3.b = parse_operand();
+          expect_punct(",");
+          m3.c = parse_operand();
+          ins.op = std::move(m3);
+          expect_punct(";");
+          ins.text = reconstruct_from(start_tok);
+          ins.opcode_id = intern_opcode(parts[0]);
+          return ins;
+        }
         OpFloatBin op;
         op.round = frnd;
         op.round_explicit = frnd_explicit;
@@ -4591,7 +4612,27 @@ class Parser {
         op.a = parse_operand();
         expect_punct(",");
         op.b = parse_operand();
-        ins.op = op;
+        if ((base_op == "min" || base_op == "max") && ty.bits == 32 && peek_punct(",")) {
+          // min/max{.ftz}{.NaN}.f32 d, a, b, c (PTX ISA 8.8, sm_100) without .abs.
+          if (xorsign_abs) return unsupported(opcode + " with three inputs takes .abs only");
+          int sm = 0;
+          std::sscanf(target_.c_str(), "sm_%d", &sm);
+          if (sm < 100)
+            fail(ins.line, opcode + " requires an sm_100 or later target; this module targets " +
+                               (target_.empty() ? std::string("nothing") : target_));
+          next();
+          OpFloatMinMax3 m3;
+          m3.is_min = base_op == "min";
+          m3.nan_propagate = nan_propagate;
+          m3.ftz = ftz;
+          m3.dst = op.dst;
+          m3.a = op.a;
+          m3.b = op.b;
+          m3.c = parse_operand();
+          ins.op = std::move(m3);
+        } else {
+          ins.op = op;
+        }
       } else if (wide) {
         // .wide doubles the operand width: 16-bit sources give a 32-bit result,
         // 32-bit give 64. Quantized kernels use the 16-bit form for byte-pair

@@ -263,4 +263,31 @@ void mark_nan_order(EntryFn& fn) {
   }
 }
 
+size_t drop_dead_wmma_loads(EntryFn& fn) {
+  auto& body = fn.body;
+  std::unordered_set<uint32_t> read;
+  std::vector<uint32_t> defs, uses;
+  bool any = false;
+  for (const Instr& ins : body) {
+    if (std::holds_alternative<OpWmmaLoad>(ins.op)) any = true;
+    defs.clear();
+    uses.clear();
+    instr_registers(ins, defs, uses);
+    read.insert(uses.begin(), uses.end());
+  }
+  if (!any) return 0;
+  size_t dropped = 0;
+  for (Instr& ins : body) {
+    const auto* ld = std::get_if<OpWmmaLoad>(&ins.op);
+    if (!ld || ld->dsts.empty()) continue;
+    bool dead = true;
+    for (const Reg& r : ld->dsts)
+      if (r.id == kNoReg || read.count(key(r))) dead = false;
+    if (!dead) continue;
+    ins.op = OpNop{};
+    ++dropped;
+  }
+  return dropped;
+}
+
 }  // namespace vgpu::ptx
