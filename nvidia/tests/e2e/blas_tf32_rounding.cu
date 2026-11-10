@@ -285,6 +285,8 @@ int main() {
     CHECK(bad == 0, "beta*C under TF32: C was changed (%zu elements)", bad);
   }
 
+  cublasLtDestroy(c.lt);
+  cublasDestroy(c.h);
   std::printf("%d checks, %d failed\n", g_checks, g_fail);
   std::printf(g_fail ? "FAIL\n" : "PASS\n");
   return g_fail != 0;
