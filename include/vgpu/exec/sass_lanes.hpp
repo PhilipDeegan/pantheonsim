@@ -81,14 +81,6 @@ inline Mask pick_group(const uint64_t* pc, Mask run, uint64_t& lo) {
 void set_pcs_partial(uint64_t* pc, Mask group, uint64_t v);
 void select_pcs(uint64_t* pc, Mask group, Mask take, uint64_t target, uint64_t next);
 
-namespace testing {
-// The three functions above as one level's code runs them (Base: the plain loops; Avx2; Avx512: eight lanes to a 512-bit step), whatever level is in
-// use: false, and nothing done, where the host cannot run the level. For the test that runs one against the other (tests/unit/test_lanes512.cpp).
-bool pick_group_at(simd::Level l, const uint64_t* pc, Mask run, uint64_t& lo, Mask& group);
-bool set_pcs_at(simd::Level l, uint64_t* pc, Mask group, uint64_t v);
-bool select_pcs_at(simd::Level l, uint64_t* pc, Mask group, Mask take, uint64_t target, uint64_t next);
-}  // namespace testing
-
 // The lanes of `ex` start to wait with `kind` on `arg`.
 template <class W, class K>
 inline void wait(W& w, Mask ex, K kind, unsigned arg) {

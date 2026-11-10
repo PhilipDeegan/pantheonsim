@@ -450,13 +450,12 @@ bool bank_window_k(const uint32_t* offs, uint32_t m, uint32_t bytes, uint32_t& o
 }  // namespace avx2_impl
 #pragma GCC pop_options
 
-// The AVX-512 level: the tile kernels at 512 bits (kernels512.inc) and the 32-lane ALU kernels of the SASS tier sixteen lanes to a step
-// (lanes512.inc), under the target pragma for the units they use; the other entries of the Avx512 table are the Avx2 ones.
+// The AVX-512 level: the tile kernels at 512 bits (kernels512.inc), under the target pragma for the units they use; the other entries of the
+// Avx512 table are the Avx2 ones.
 #pragma GCC push_options
 #pragma GCC target("avx2,fma,f16c,avx512f,avx512bw,avx512dq,avx512vl,avx512vnni")
 namespace avx512_impl {
 #include "kernels512.inc"
-#include "lanes512.inc"
 }  // namespace avx512_impl
 #pragma GCC pop_options
 #endif
@@ -648,7 +647,7 @@ const Kernels kAvx2Lazy = {Level::Avx2,       lazy_f16_to_f32,   lazy_f32_to_f16
                        avx2_impl::prmt0_k, avx2_impl::dcmp_k, avx2_impl::hfma2_bf_m_k,
                        avx2_impl::tile_f32_k, avx2_impl::tile_i32_k, avx2_impl::tile_f64_k, avx2_impl::tile_f32c_k, avx2_impl::f2f_widen_k, avx2_impl::f2f_narrow_k, avx2_impl::i2d_k};
 
-// The Avx512 tables: each Avx2 one with the tile kernels and the 32-lane ALU kernels of lanes512.inc replaced by the 512-bit forms.
+// The Avx512 tables: each Avx2 one with the three tile kernels replaced by the 512-bit forms.
 Kernels make_avx512(const Kernels& base) {
   Kernels k = base;
   k.level = Level::Avx512;
@@ -656,18 +655,6 @@ Kernels make_avx512(const Kernels& base) {
   k.tile_i32 = avx512_impl::tile_i32_k;
   k.tile_f64 = avx512_impl::tile_f64_k;
   k.tile_f32c = avx512_impl::tile_f32c_k;
-  k.iadd3 = avx512_impl::iadd3_k;
-  k.imad = avx512_impl::imad_k;
-  k.lop3 = avx512_impl::lop3_k;
-  k.ffma = avx512_impl::ffma_k;
-  k.fadd = avx512_impl::fadd_k;
-  k.fmul = avx512_impl::fmul_k;
-  k.icmp_mask = avx512_impl::icmp_mask_k;
-  k.blend_m = avx512_impl::blend_m_k;
-  k.iadd3x = avx512_impl::iadd3x_k;
-  k.dop_m = avx512_impl::dop_m_k;
-  k.imad_wide = avx512_impl::imad_wide_k;
-  k.mufu = avx512_impl::mufu_k;
   return k;
 }
 const Kernels kAvx512NoF16c = make_avx512(kAvx2NoF16c), kAvx512 = make_avx512(kAvx2), kAvx512Lazy = make_avx512(kAvx2Lazy);
@@ -747,30 +734,14 @@ bool f64_bin_lanes_avx2(unsigned, uint64_t*, const uint64_t*, const uint64_t*) {
 #endif
 
 namespace testing {
-WarpRowsFn warp_rows_at(Level l) {
-#ifdef VGPU_SIMD_X86
-  if (l == Level::Avx512 && cpu_has_avx512()) return avx512_impl::warp_rows_k;
-  if (l == Level::Avx2 && cpu_has_avx2()) return avx2_impl::warp_rows_k;
-#endif
-  (void)l;
-  return nullptr;
-}
-WarpRunFn warp_run_at(Level l) {
-#ifdef VGPU_SIMD_X86
-  if (l == Level::Avx512 && cpu_has_avx512()) return avx512_impl::warp_run_k;
-  if (l == Level::Avx2 && cpu_has_avx2()) return avx2_impl::warp_run_k;
-#endif
-  (void)l;
-  return nullptr;
-}
 void use_sector_window_kernel(bool on) {
 #ifdef VGPU_SIMD_X86
   detail::g_sector_window = on && level() == Level::Avx2 ? avx2_impl::sector_window_k : nullptr;
   detail::g_bank_window = on && level() == Level::Avx2 ? avx2_impl::bank_window_k : nullptr;
   detail::g_sector_up = on && level() == Level::Avx2 ? avx2_impl::sector_up_k : nullptr;
   detail::g_bank_offsets = on && level() == Level::Avx2 ? avx2_impl::bank_offsets_k : nullptr;
-  detail::g_warp_rows = on && level() == Level::Avx2 ? (use_avx512() ? avx512_impl::warp_rows_k : avx2_impl::warp_rows_k) : nullptr;
-  detail::g_warp_run = on && level() == Level::Avx2 ? (use_avx512() ? avx512_impl::warp_run_k : avx2_impl::warp_run_k) : nullptr;
+  detail::g_warp_rows = on && level() == Level::Avx2 ? avx2_impl::warp_rows_k : nullptr;
+  detail::g_warp_run = on && level() == Level::Avx2 ? avx2_impl::warp_run_k : nullptr;
 #else
   (void)on;
 #endif
