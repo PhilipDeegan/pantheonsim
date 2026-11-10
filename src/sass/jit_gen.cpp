@@ -550,7 +550,7 @@ std::string gen_op_body(const OpFacts& o, RowCtx& rc) {
     case Form::Fsel:   // h_fsel
       decl_src(w, o.s[0], 0, true);
       decl_src(w, o.s[1], 1, true);
-      w.f("    u32 r[32]; for (unsigned l = 0; l < 32; ++l) r[l] = A1[l];\n    blend_m_k(r, A0, %s);\n", pm(w, o.p, pa, sizeof pa));
+      w.f("    u32 r[32]; cprow(r, A1);\n    blend_m_k(r, A0, %s);\n", pm(w, o.p, pa, sizeof pa));
       store(w, o.dst, "r");
       break;
     case Form::Ffma:   // h_ffma (no directed rounding: that stays an escape)
@@ -594,7 +594,7 @@ std::string gen_op_body(const OpFacts& o, RowCtx& rc) {
     case Form::Sel:   // h_sel: b where the predicate is clear, a where it holds
       decl_src(w, o.s[0], 0, false);
       decl_src(w, o.s[1], 1, false);
-      w.f("    u32 r[32]; for (unsigned l = 0; l < 32; ++l) r[l] = A1[l];\n    blend_m_k(r, A0, %s);\n", pm(w, o.p, pa, sizeof pa));
+      w.f("    u32 r[32]; cprow(r, A1);\n    blend_m_k(r, A0, %s);\n", pm(w, o.p, pa, sizeof pa));
       store(w, o.dst, "r");
       break;
     case Form::Plop3: {   // h_plop3: for each lane the table bit the three predicates select, into two predicates

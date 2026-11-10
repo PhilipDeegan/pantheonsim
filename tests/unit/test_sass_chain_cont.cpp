@@ -308,6 +308,74 @@ std::vector<Insn> joined_loops_kernel(unsigned iters_a, unsigned iters_b, unsign
   return c;
 }
 
+// An if and its else inside a loop (round sp53: BSYNC, which tier 2 with linking runs inside generated code). Every iteration the warp joins barrier B0, the
+// lanes of lane id >= `ge` branch to the else part (above the tail), the others fall through the then part into the join, a BSYNC B0, and wait there; the
+// chain then runs the else group, which branches back to the join, completes the barrier and releases everyone: the joined warp counts the iteration and
+// branches back. So a diverged warp runs the BSYNC twice an iteration: once to wait (the next group is another one, standing elsewhere) and once to release
+// (the next group is the joined lanes at the next op). With `ge` 0 or above 31 the warp never splits and the BSYNC releases at once. Both parts update one
+// shared word, so with two warps the place where a 4096-call turn ends decides which updates are lost: the BSYNC's call must be charged as the chain's.
+// With `side` below 32 the lanes of lane id >= `side` never enter the loop: they branch to a loop of their own above everything else (`side_iters` times
+// the same update) before the first BSSY, so they are no lanes of the barrier, and while the others go round the diamond they are runnable lanes that stand
+// elsewhere: after every BSYNC the group that goes on has other lanes above it (the link bit, their lowest place), each of its branches back counts
+// towards the spin rule, and the 64th lets the side loop in.
+std::vector<Insn> diamond_loop_kernel(unsigned iters, unsigned ge, unsigned s2rs, unsigned side = 99, unsigned side_iters = 0) {
+  std::vector<Insn> c;
+  c.push_back(s2r_tid(0));
+  c.push_back(make(0x000fc60000000f00ull, 0x0000580000007a02ull | uint64_t{12} << 16, "MOV R12, c[0x0][0x160]"));
+  c.push_back(make(0x000fc60000000f00ull, 0x0000590000007a02ull | uint64_t{13} << 16, "MOV R13, c[0x0][0x164]"));
+  c.push_back(imad_wide_i(14, 0, kStride, 12));
+  c.push_back(s2r_lane(4));
+  c.push_back(movi(5, iters));
+  c.push_back(isetp_ge(4, side));
+  const size_t aside = c.size();
+  c.push_back(exit_());   // (placeholder: the branch to the side loop)
+  const int top = static_cast<int>(c.size());
+  const size_t enter = c.size();
+  c.push_back(exit_());   // (placeholder: the BSSY)
+  c.push_back(isetp_ge(4, ge));
+  const size_t split = c.size();
+  c.push_back(exit_());   // (placeholder: the branch to the else part)
+  const auto part = [&](uint32_t add) {
+    c.push_back(ldg(1, 12));
+    for (unsigned i = 0; i < s2rs; ++i) c.push_back(s2r_lane(2));
+    c.push_back(iadd3i(1, 1, add, kRZ));
+    c.push_back(stg(12, 1, 0));
+  };
+  part(1);   // then
+  const int join = static_cast<int>(c.size());
+  c.push_back(bsync(0));
+  Insn dec = iadd3i(5, 5, 0xffffffffu, kRZ);
+  dec.text = "IADD3 R5, R5, -0x1, RZ";
+  c.push_back(dec);
+  c.push_back(isetp_ge(5, 1));
+  c.push_back(bra_p0(static_cast<int>(c.size()), top));
+  const int tail = static_cast<int>(c.size());
+  c.push_back(cs2r_clock(3));
+  c.push_back(stg(14, 3, 4));
+  c.push_back(stg(14, 2, 8));
+  c.push_back(exit_());
+  const int else_ = static_cast<int>(c.size());
+  part(2);   // else
+  c.push_back(isetp_ge(4, 0));   // (every lane: the branch back to the join is taken by the whole group)
+  c.push_back(bra_p0(static_cast<int>(c.size()), join));
+  const int side_setup = static_cast<int>(c.size());
+  c.push_back(movi(5, side_iters));
+  {
+    const int side_top = static_cast<int>(c.size());
+    part(3);
+    c.push_back(dec);
+    c.push_back(isetp_ge(5, 1));
+    c.push_back(bra_p0(static_cast<int>(c.size()), side_top));
+  }
+  c.push_back(isetp_ge(4, 0));
+  c.push_back(bra_p0(static_cast<int>(c.size()), tail));
+  c.push_back(exit_());   // (never reached: a section's last instruction is not a straight one)
+  c[aside] = bra_p0(static_cast<int>(aside), side_setup);
+  c[enter] = bssy(0, static_cast<int>(enter), join);
+  c[split] = bra_p0(static_cast<int>(split), else_);
+  return c;
+}
+
 // CALL.REL.NOINC <the instruction at index `to`> and RET.REL.NODEC Rr (no text: the test checks what they decode to).
 Insn call_rel(int from, int to) {
   const int64_t off = int64_t{16} * (to - from - 1);
@@ -516,11 +584,46 @@ VTEST(the_groups_of_a_diverged_warp_loop_apart_and_meet_where_the_chain_picks_th
     compare(call_kernel(40, 0, 1, fn_low), 32, "calls, the warp never splits" + m);
     compare(call_kernel(40, 30, 1, fn_low), 40, "calls, a warp and a part of one" + m);
   }
+  // An if and its else in a loop: the BSYNC waits and releases every iteration (round sp53).
+  for (unsigned s2rs : {1u, 2u}) {
+    compare(diamond_loop_kernel(40, 16, s2rs), 32, "diamond, the warp in halves, " + std::to_string(s2rs) + " S2Rs");
+    compare(diamond_loop_kernel(40, 0, s2rs), 32, "diamond, every lane in the else part, " + std::to_string(s2rs) + " S2Rs");
+    compare(diamond_loop_kernel(40, 99, s2rs), 32, "diamond, every lane in the then part, " + std::to_string(s2rs) + " S2Rs");
+    compare(diamond_loop_kernel(40, 31, s2rs), 32, "diamond, one lane in the else part, " + std::to_string(s2rs) + " S2Rs");
+  }
+  compare(diamond_loop_kernel(900, 16, 2), 64, "diamond, two warps, turns end inside the loop");
+  compare(diamond_loop_kernel(900, 5, 1), 128, "diamond, four warps");
+  compare(diamond_loop_kernel(60, 16, 1), 40, "diamond, a warp and a part of one");
+  compare(diamond_loop_kernel(60, 4, 1), 20, "diamond, a part of a warp");
+  // ... with a third group in a loop of its own above the diamond: other lanes can run after every BSYNC.
+  for (unsigned s2rs : {1u, 2u}) {
+    compare(diamond_loop_kernel(40, 8, s2rs, 24, 30), 32, "diamond beside a side loop, " + std::to_string(s2rs) + " S2Rs");
+    compare(diamond_loop_kernel(200, 8, s2rs, 24, 150), 32, "diamond beside a side loop, the spin rule lets it in, " + std::to_string(s2rs) + " S2Rs");
+    compare(diamond_loop_kernel(200, 0, s2rs, 16, 150), 32, "diamond never split, beside a side loop, " + std::to_string(s2rs) + " S2Rs");
+  }
+  compare(diamond_loop_kernel(700, 8, 2, 24, 500), 64, "diamond beside a side loop, two warps");
+  compare(diamond_loop_kernel(90, 8, 1, 24, 60), 40, "diamond beside a side loop, a warp and a part of one");
   // With tier 2 and linking asked for (ctest test_sass_chain_cont_jit_link), the generated code must have taken the chain's part: a run in which nothing was
   // linked would compare equal too. (Counted only with VGPU_JIT_STATS; no compiler on PATH: nothing ran as generated code.)
   if (sass::jit::requested() && sass::jit::link_requested() && sass::jit::stats_on() && sass::jit::stats().regions_run.load() > 0) {
     std::printf("  linked inside generated code: %llu branches and register-only ops\n", static_cast<unsigned long long>(sass::jit::stats().linked.load()));
     VCHECK(sass::jit::stats().linked.load() > 1000);
+    // The loop rule (round sp53): a section with a loop and no BSSY, BSYNC, CALL or RET is generated without linking. The kernels above that loop without a
+    // barrier are such sections (two_loops_kernel, which diverges by a plain branch as no compiler's code does, among them: the legs that check linking in
+    // it run with VGPU_JIT_LINK_RULE=0); the joined, the calling and the diamond kernels are not, and must still have been linked (the checks around this one).
+    {
+      const char* rule = std::getenv("VGPU_JIT_LINK_RULE");
+      const unsigned long long declined = sass::jit::stats().link_declined.load();
+      std::printf("  sections left unlinked by the loop rule: %llu\n", declined);
+      if (rule && rule[0] == '0') VCHECK_EQ(declined, 0ull);
+      else VCHECK(declined >= 10);
+    }
+    if (!(std::getenv("VGPU_JIT_LINK_BSYNC") && std::getenv("VGPU_JIT_LINK_BSYNC")[0] == '0')) {
+      std::printf("  BSYNCs run inside generated code: %llu (%llu went on with another group, %llu ended the pass)\n", static_cast<unsigned long long>(sass::jit::stats().bsyncs.load()),
+                  static_cast<unsigned long long>(sass::jit::stats().bsync_groups.load()), static_cast<unsigned long long>(sass::jit::stats().bsync_over.load()));
+      VCHECK(sass::jit::stats().bsyncs.load() > 1000);
+      VCHECK(sass::jit::stats().bsync_groups.load() > 500);
+    }
   }
 }
 

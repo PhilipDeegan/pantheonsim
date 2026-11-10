@@ -60,34 +60,43 @@ using namespace jk::jk_kernels;
   return t;
 }
 
+// A row of 32 words copied: four 32-byte moves, written out. Not a loop (round sp53): the compiler recognises a loop of copies as one memcpy of
+// 128 bytes, and in a block it takes for a cold one it expands that memcpy as `rep movsl`. In a large function its guess of what is cold is poor
+// (SYR2K's inner loop with linking: ten result rows a pass of the loop were copied that way), the string instruction costs tens of cycles to start, and
+// the wide loads of the row that follow in the tier's handlers do not get their bytes forwarded from it: 3 % of that program's run. (The old loop is
+// kept for the mutation check of the test that reads the object: VGPU_JIT_ROW_LOOP, which the generator defines for VGPU_JIT_MUTANT=row_loop.)
+[[gnu::always_inline]] inline void cprow(u32* d, const u32* s) {
+#ifdef VGPU_JIT_ROW_LOOP
+  for (unsigned i = 0; i < 32; i += 8) {
+    V8u v;
+    std::memcpy(&v, s + i, sizeof v);
+    std::memcpy(d + i, &v, sizeof v);
+  }
+#else
+  V8u a, b, c, e;
+  std::memcpy(&a, s, sizeof a);
+  std::memcpy(&b, s + 8, sizeof b);
+  std::memcpy(&c, s + 16, sizeof c);
+  std::memcpy(&e, s + 24, sizeof e);
+  std::memcpy(d, &a, sizeof a);
+  std::memcpy(d + 8, &b, sizeof b);
+  std::memcpy(d + 16, &c, sizeof c);
+  std::memcpy(d + 24, &e, sizeof e);
+#endif
+}
+
 // A result row to the destination register for the executing lanes (tier_store): the whole row, or a blend of the lanes.
 [[gnu::always_inline]] inline void store_row(u32* d, u32 ex, const u32* r) {
   if (ex == 0xffffffffu) {
-    for (unsigned i = 0; i < 32; i += 8) {
-      V8u v;
-      std::memcpy(&v, r + i, sizeof v);
-      std::memcpy(d + i, &v, sizeof v);
-    }
+    cprow(d, r);
   } else {
     blend_m_k(d, r, ex);
   }
 }
 
 // The register file's row and a local copy of it (register residence).
-[[gnu::always_inline]] inline void ldrow(u32* x, const u32* r) {
-  for (unsigned i = 0; i < 32; i += 8) {
-    V8u v;
-    std::memcpy(&v, r + i, sizeof v);
-    std::memcpy(x + i, &v, sizeof v);
-  }
-}
-[[gnu::always_inline]] inline void strow(u32* r, const u32* x) {
-  for (unsigned i = 0; i < 32; i += 8) {
-    V8u v;
-    std::memcpy(&v, x + i, sizeof v);
-    std::memcpy(r + i, &v, sizeof v);
-  }
-}
+[[gnu::always_inline]] inline void ldrow(u32* x, const u32* r) { cprow(x, r); }
+[[gnu::always_inline]] inline void strow(u32* r, const u32* x) { cprow(r, x); }
 
 // Fused runs (round sp48): a run of register-only ops is computed block by block of eight lanes, every op of the run on one block before the
 // next block, so that a value a later op of the run reads is in a host register and not in a 128-byte row in memory. These are the kernels of
