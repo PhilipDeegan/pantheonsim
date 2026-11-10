@@ -174,6 +174,7 @@ struct Result {
 struct Env {
   MemoryManager mem{1 << 24};
   DeviceProfile prof = load_gpu("nvidia/a10");   // sm_86
+  uint64_t max_steps = 0;   // a warp's instruction budget for the launches (0: the default)
   std::shared_ptr<sass::Module> load(const std::vector<Insn>& code) {
     for (size_t i = 0; i < code.size(); ++i) {
       const sass::Instr ins = sass::decode(code[i].w, 16 * i, 86);
@@ -192,6 +193,7 @@ struct Env {
     exec::LaunchConfig cfg;
     cfg.grid = {blocks, 1, 1};
     cfg.block = {kThreads, 1, 1};
+    if (max_steps) cfg.max_steps = max_steps;
     std::vector<uint8_t> arg(8);
     std::memcpy(arg.data(), &buf, 8);
     Result r;
@@ -240,9 +242,10 @@ void same_counters(const exec::LaunchStats& a, const exec::LaunchStats& b, const
 
 // The kernel in order, then with VGPU_EXACT_THREADS = 2, 3, 4 and 8 (three launches each, and each on a module of its own so that
 // no launch is held back by an earlier stop): the same words, the same counters, the same error, and the trial ending as `commits` says.
-Result same_as_in_order(const std::vector<Insn>& code, uint32_t blocks, bool commits, const std::string& name) {
+Result same_as_in_order(const std::vector<Insn>& code, uint32_t blocks, bool commits, const std::string& name, uint64_t max_steps = 0) {
   Restore restore;
   Env e;
+  e.max_steps = max_steps;
   in_order();
   const Result ref = e.run(*e.load(code), blocks);
   VCHECK_EQ(ref.counts.trials, uint64_t{0});
@@ -295,6 +298,14 @@ VTEST(a_launch_that_faults_leaves_what_the_run_in_order_leaves) {
   VCHECK_CONTAINS(r.error, "device memory write at buf+2^28");
   // In order: block 0 ran, block 1 stored its words and then faulted, no later block ran. (A trial runs later blocks too: their words must be put back.)
   for (uint32_t i = 2 * kThreads; i < 300 * kThreads; ++i) VCHECK_EQ(r.words[i], 3 * i + 7);
+}
+
+VTEST(a_launch_whose_blocks_fail_without_touching_memory_fails_as_the_run_in_order_does) {
+  // A budget of 8 instructions a warp, three short of the kernel's end: every block fails after its loads and before its store, at no access
+  // the shadow would stop. The trial must not be kept (a failed block is a stop), and the launch must report what the run in order reports.
+  const Result r = same_as_in_order(independent(), 300, /*commits=*/false, "step budget", 8);
+  VCHECK(!r.error.empty());
+  for (uint32_t i = 0; i < 300 * kThreads; ++i) VCHECK_EQ(r.words[i], 3 * i + 7);
 }
 
 VTEST(a_kernel_that_reads_its_sm_number_on_a_grid_larger_than_the_device_is_stopped) {
