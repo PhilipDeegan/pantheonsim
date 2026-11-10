@@ -581,3 +581,39 @@ Unit suite on server2 (Release, g++ 13, `ctest -R '^test_'`, 376 tests): main d4
 * Fix 2's number is a stand-in-driver run: the card "executes" nothing, so verify reports every kernel as different; the cost being measured is the simulator's side of the gate, which does not depend on what the card did.
 * The proof for integer division covers 32-bit forms with one reciprocal estimate; 64-bit division (`I2F.U64.RP`, a `CALL` slow path) is a different sequence and was not looked at.
 * `idiv` and `sidiv` runs in the simulator show the simulator's execution of the idiom is exact; they say nothing about the card, which is what the experiment script is for.
+
+## Round sp46 (survey of the worst simulator-to-card ratios): measured, no lever cleared the bar, nothing built (branch `sp46-survey`, base `origin/main` 7b90cee5)
+
+Question: from the cached suites (PolyBench/GPU, Rodinia, HeCBench reduced, CUDA Samples that pass), which programs are furthest from the card in wall time, where does their time go, and is there a lever not already measured out (per-instruction levers, PGO, store forwarding, register-file clear, PTX/AMD counting)? Bar: at least 5 % geometric mean or 1.3x on a class of workloads, bit-identical.
+
+Setup: 124 programs run on the simulator (Release, no LTO, `-g1 -fno-omit-frame-pointer`, `VGPU_THREADS=1`, `VGPU_GPU=nvidia/rtx3060`, SASS, one run each, 70 s timeout, server2 cpu 14, whole sweep under one hold of the builder lock; server2's load average was 9 to 70 from other sessions, so the simulator seconds are single runs and noisy by tens of percent) and natively on the local RTX 3060 (CUDA 13.0 runtime, best of 2, process start about 0.2 s included). Ratio = simulator wall / max(native wall, 0.05 s). Programs whose time is the host's own CPU reference check (CORR, COVAR, GRAMSCHM, 2MM, ratio about 1) the 8 simulator timeouts (2MM among them) and the programs over 60 s (aidw-cuda 85 s, FDTD-2D 71 s) are out of the table; the survey is the 38 programs with a ratio above 1 that finished in 60 s or less. Per-program numbers: `data/sp46/all-programs.tsv`; the top 30 with the class of the first 15: `data/sp46/results.tsv`; the harness scripts are beside them.
+
+| # | program | sim s | card s | ratio | where the time goes |
+|---:|---|---:|---:|---:|---|
+| 1 | radixSortThrust | 27.8 | 0.41 | 67 | per-instruction (`step_warp` 17 %, `exec_mem` 9 %, handlers), shared-memory bank counting 7 % |
+| 2 | alignedTypes | 26.8 | 0.72 | 38 | memory model: `run_out` 17 %, `h_global` 20 %, `load_batch` 8 %, `store_strided` 5 % |
+| 3 | simpleHyperQ | 9.8 | 0.31 | 31 | per-instruction: a `clock64` spin loop (compare/add/setp 75 %) |
+| 4 | LU (PolyBench) | 21.5 | 0.87 | 25 | block set-up `init_block` 9 % and `memset` 7 %, rest per-instruction |
+| 5 | segmentationTreeThrust | 13.6 | 0.57 | 24 | counting: bank-pass table 14 % and widened 10 %, `step_warp` 20 % |
+| 6 | transpose | 5.8 | 0.26 | 22 | per-instruction and counting (not profiled here; see sp41) |
+| 7 | interval | 13.4 | 0.62 | 22 | per-instruction, divergence (not profiled) |
+| 8 | reduction | 8.6 | 0.41 | 21 | per-instruction (not profiled) |
+| 9 | shmembench-cuda | 4.2 | 0.21 | 20 | shared-memory model (not profiled) |
+| 10 | mergeSort | 6.2 | 0.31 | 20 | per-instruction, bank counting 10 % (sp41) |
+| 11 | jacobiCudaGraphs | 15.7 | 0.82 | 19 | graph launches plus per-instruction (not profiled) |
+| 12 | convolutionSeparable | 8.7 | 0.57 | 15 | per-instruction (not profiled) |
+| 13 | atomicAggregate-cuda | 3.2 | 0.21 | 15 | atomics (not profiled) |
+| 14 | gaussian (Rodinia) | 3.1 | 0.21 | 15 | launch overhead, two tiny launches per column (not profiled) |
+| 15 | MC_SingleAsianOptionP | 1.9 | 0.16 | 12 | per-instruction (not profiled) |
+
+Sampling profiles (a SIGPROF preload, 1 ms, instruction pointers symbolised against the library's symbol table, `data/sp46/profiles/`) exist for ranks 1 to 5 only. A queued second batch (mergeSort, sortingNetworks, histogram, reduction, transpose, interval, convolutionSeparable, jacobiCudaGraphs, shmembench, gaussian) never got the builder lock on server2 (another session's job held it for over 80 minutes), so ranks 6 to 15 are classified from the program's nature and earlier rounds, not measured; treat them as unverified. (A preload must be applied after `taskset`/`env`: `ITIMER_PROF` survives `exec`, and a first attempt that preloaded the sampler into `taskset` was killed by its own timer.)
+
+Reading: ranks 1 to 5 are all in the simulator's own interpretation and memory path, 60 to 90 % of the samples in `step_warp`, the tier handlers, the SIMD kernels and `exec_mem`. Nothing is in the host runtime, JIT/compile or API path. The three non-interpretation shares seen:
+
+* Block set-up for tiny blocks (LU): `init_block` plus `memset` is 16 % of LU. sp40 already measured the register-file clear ceiling at 4.6 % on LU and 1.02x pooled; the rest of `init_block` is not separately measured. Not a class lever: it applies to launches of very small grids, one program here.
+* Shared-memory bank counting for scans and sorts (segmentationTreeThrust 24 %, radixSortThrust 7 %, mergeSort 10 % in sp41): the shape memo and the AVX2 window kernel are in place; the `sass_bank_passes_table` fallback is still 14 % of segmentationTreeThrust, so some warps in that program miss every closed form, kernel and memo (accesses wider than 16 bytes or spread over more than 128 words are the candidates; not instrumented). Ceiling if the fallback went to zero: 1.17x on that one program, about 1.07x on radixSortThrust-like programs, nothing on the other 35.
+* `run_out`/`run_in` (`src/core/memory.cpp`), the 8-byte relaxed-atomic copy loop for contiguous runs: 17 % of alignedTypes, 1.6 % of segmentationTreeThrust. A 32-byte vector copy would be a few times faster, but a vector load is not a per-element relaxed atomic (TSan would flag it and a racing host thread could see torn 8-byte words in principle), so it is not a bit-identical change under the project's race rules. Ceiling about 1.1x on one program.
+
+A spin loop fast-forward (simpleHyperQ's `clock64` delay) would be a 3x on that program but needs the instruction counters and the clock register to be advanced analytically per lane for a loop the kernel defines; it applies to one program of 124 (and to `clock`-style Samples only).
+
+Verdict: no lever with a class-wide 5 % geometric mean or 1.3x exists in this corpus beyond what the earlier rounds measured out. The remaining ratios (20 to 60x) are the cost of interpreting a warp's instruction stream, which is where sp37, sp40 and sp41 already looked. No source change was made, so there are no new tests or mutants. Candidates for a later round, with their ceilings above: instrument which warps reach `sass_bank_passes_table` in the Thrust programs; a `run_out` that stays an atomic per 8 bytes but unrolls and prefetches. Not unresolved but worth knowing: the timed numbers of this round are single runs under heavy shared load (server2 load 9 to 70; the builder lock queue was over an hour long), so a ratio can be off by 30 %; the ranking of the first five, which differ by 1.5x or more from the sixth, is not in doubt.
