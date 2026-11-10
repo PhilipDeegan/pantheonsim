@@ -781,6 +781,11 @@ class Runner {
   // ---- per-block ----
   void run_block(Block& blk);
   bool block_round(Block& blk, int slice);
+  // VGPU_EXACT_THREADS: the launch's blocks on `threads` host threads, on trial (vgpu/memory.hpp, "exact parallel launches").
+  // True: the trial committed, and memory and stats_ are those of the blocks run in order. False: nothing was changed (a trial that
+  // was stopped has been undone) and the caller runs the blocks in order.
+  bool run_exact(unsigned threads, uint64_t units);
+  bool exact_trial_ = false;   // a trial is running: what depends on the host thread (the SM number of a big grid) stops it
   uint64_t fingerprint(const Block& blk) const;
   bool break_warpsync_standoff(Block& blk);
   bool break_bsync_standoff(Block& blk);
@@ -1271,6 +1276,10 @@ uint32_t Runner::sreg(const Block& blk, const Warp& w, unsigned idx, unsigned la
       const uint64_t blocks = uint64_t{cfg_.grid[0]} * cfg_.grid[1] * cfg_.grid[2];
       if (cfg_.cooperative || blocks <= sms) return static_cast<uint32_t>(linear % sms);
       const uint64_t size = clustered_ ? csize_ : 1;
+      if (exact_trial_) {   // (the number below is the host thread's: in order it is thread 0's for every block)
+        mem_.spec_stop("the kernel read its SM number on a grid larger than the device");
+        throw MemoryManager::SpecStop{};
+      }
       memo::g_smid_by_worker.store(true, std::memory_order_relaxed);
       return static_cast<uint32_t>((uint64_t{blk.worker} * size + blk.rank) % sms);
     }
@@ -1545,7 +1554,7 @@ exec::LaunchStats Runner::run() {
       }
     }
   };
-  unsigned threads = 1;
+  unsigned threads = 1, exact = 1;
   if (!cfg_.cooperative) {
     if (const char* v = env_.threads; v && *v) threads = static_cast<unsigned>(std::max(1, std::atoi(v)));
     else {
@@ -1569,6 +1578,13 @@ exec::LaunchStats Runner::run() {
     // as the PTX engine caps its own.
     if (const uint32_t sms = profile_.limits.multiprocessors)
       threads = std::min<unsigned>(threads, std::max<unsigned>(1, sms / static_cast<unsigned>(clustered_ ? csize_ : 1)));
+    // VGPU_EXACT_THREADS=N beside VGPU_THREADS=1 (docs/exact-threads.md): the blocks still give the bits of running in order, and
+    // a launch that a trial proves independent of the order uses N host threads. Asked for only where the order was asked for.
+    if (const char* x = env_.exact_threads; x && *x && env_.threads && *env_.threads && std::atoi(env_.threads) <= 1) {
+      exact = static_cast<unsigned>(std::max(1, std::atoi(x)));
+      exact = static_cast<unsigned>(std::min<uint64_t>(exact, units));
+      if (const uint32_t sms = profile_.limits.multiprocessors) exact = std::min<unsigned>(exact, sms);
+    }
   }
   // Blocks that may wait on one another (vgpu/exec/lockstep.hpp): a kernel with a loop that polls
   // global memory runs the blocks the device holds at once together, taking turns.
@@ -1647,8 +1663,19 @@ exec::LaunchStats Runner::run() {
     if (shape.workers <= 1) resident(0);
     else exec::run_parallel(shape.workers, resident);
   } else if (threads <= 1) {
-    solo = true;
-    worker(0);
+    bool done = false;
+    if (exact > 1) {
+      // (the width rule of the launches below: a launch too small to pay for a hand-off stays on this thread)
+      exec::LaunchWidth width(&k_, units, exact);
+      done = exact > 1 && run_exact(exact, units);
+      if (!done) {
+        solo = true;
+        worker(0);
+      }
+    } else {
+      solo = true;
+      worker(0);
+    }
   } else {
     // A small grid keeps to few threads (vgpu/exec/worker_pool.hpp, LaunchWidth); blocks run the same on any.
     exec::LaunchWidth width(&k_, units, threads);
@@ -1819,6 +1846,101 @@ static std::string stall_summary(const Block& blk) {
     }
   }
   return out;
+}
+
+namespace {
+std::atomic<uint64_t> g_exact_trials{0}, g_exact_committed{0}, g_exact_stopped{0};
+
+// VGPU_EXACT_LOG=<file>: a line per launch that asked for a trial (kernel, blocks, threads, what happened, why, bytes kept for
+// undoing, 4 KiB pages touched).
+[[gnu::cold, gnu::noinline]] void exact_log(const char* path, const std::string& kernel, uint64_t units, unsigned threads, const char* what,
+                                            const char* why, uint64_t kept, uint64_t pages) {
+  static std::mutex mu;
+  std::lock_guard<std::mutex> g(mu);
+  if (FILE* f = std::fopen(path, "a")) {
+    std::fprintf(f, "%s\t%llu\t%u\t%s\t%s\t%llu\t%llu\n", kernel.c_str(), static_cast<unsigned long long>(units), threads, what, why,
+                 static_cast<unsigned long long>(kept), static_cast<unsigned long long>(pages));
+    std::fclose(f);
+  }
+}
+}  // namespace
+
+[[gnu::cold, gnu::noinline]] bool Runner::run_exact(unsigned threads, uint64_t units) {
+  const char* log = env_.exact_log && *env_.exact_log ? env_.exact_log : nullptr;
+  const auto skip = [&](const char* why) {
+    if (log) exact_log(log, k_.name, units, threads, "in order", why, 0, 0);
+    return false;
+  };
+  // What a trial cannot stand in for. Each is a launch the order of blocks is visible in by some road other than device memory, or
+  // one whose blocks are not handed out one by one.
+  if (clustered_) return skip("clusters");
+  if (units >= 0x7FFFFFF0ull) return skip("too many blocks");
+  if (!m_.cubin.externs.empty()) return skip("the module calls device runtime functions (printf, malloc, ...)");
+  if (m_.device_launches) return skip("the module launches kernels");
+  if (cfg_.textures) return skip("textures or surfaces are bound");
+  const auto set = [](const char* v) { return v && *v && !(v[0] == '0' && !v[1]); };
+  if (set(env_.sass_trace) || set(env_.trace) || set(env_.race) || tier_stats_) return skip("a trace, the race detector or tier statistics are on");
+  if (!mem_.spec_possible()) return skip("the device's memory cannot be shadowed (mapped, shared or card-backed memory, an armed fault, the result cache)");
+  {
+    std::lock_guard<std::mutex> g(m_.polling_mu);
+    auto& hold = m_.exact_hold[k_.name];
+    if (hold.second == 0) hold.second = 1;
+    if (hold.first > 0) {
+      hold.first -= 1;
+      return skip("an earlier trial of this kernel was stopped");
+    }
+  }
+  std::vector<exec::LaunchStats> sums(threads);
+  std::atomic<uint64_t>& next = next_unit_;
+  mem_.spec_begin(threads);
+  exact_trial_ = true;
+  const auto body = [&](unsigned t) {
+    PooledBlock held;
+    exec::LaunchStats mine;
+    mem_.spec_enter(t);
+    for (;;) {
+      const uint64_t i = next.fetch_add(1);
+      if (i >= units || mem_.spec_stopped()) break;
+      try {
+        Block& blk = *held.block;
+        mem_.spec_block(i);
+        init_block(blk, i);
+        blk.worker = t;
+        while (block_round(blk, 4096))
+          if (mem_.spec_stopped()) throw MemoryManager::SpecStop{};   // (another block's stop: this one may be waiting on what will never come)
+        mine.add(blk.st);
+      } catch (...) {
+        // Whatever it was (a stop, a fault of the kernel's, a limit), the launch in order meets it again if it is real.
+        mem_.spec_stop("a block failed");
+        held.block.reset();   // (left in the middle of a block: not for the pool)
+        break;
+      }
+    }
+    mem_.spec_leave();
+    sums[t] = std::move(mine);
+  };
+  exec::run_parallel(threads, body);
+  exact_trial_ = false;
+  const MemoryManager::SpecOutcome out = mem_.spec_end();
+  g_exact_trials.fetch_add(1, std::memory_order_relaxed);
+  (out.committed ? g_exact_committed : g_exact_stopped).fetch_add(1, std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> g(m_.polling_mu);
+    auto& hold = m_.exact_hold[k_.name];
+    if (out.committed) {
+      hold = {0, 1};
+    } else {
+      hold.first = hold.second;
+      hold.second = std::min<uint32_t>(hold.second * 2, 4096);
+    }
+  }
+  if (log) exact_log(log, k_.name, units, threads, out.committed ? "committed" : "stopped", out.why, out.kept_bytes, out.shadow_pages);
+  if (!out.committed) {
+    next.store(0);   // every block again, in order
+    return false;
+  }
+  for (const exec::LaunchStats& s : sums) stats_.add(s);   // (integer sums: the order of adding changes nothing)
+  return true;
 }
 
 void Runner::run_block(Block& blk) {
@@ -2246,6 +2368,11 @@ void ChildRunner::operator()(Child& c, Launches& out) {
 }
 
 }  // namespace
+
+ExactCounts exact_counts() {
+  return {g_exact_trials.load(std::memory_order_relaxed), g_exact_committed.load(std::memory_order_relaxed),
+          g_exact_stopped.load(std::memory_order_relaxed)};
+}
 
 exec::LaunchStats launch(const Module& m, const std::string& kernel, const exec::LaunchConfig& cfg,
                          const std::vector<std::vector<uint8_t>>& args, MemoryManager& mem,

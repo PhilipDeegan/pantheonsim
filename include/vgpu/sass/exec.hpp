@@ -97,6 +97,10 @@ struct Module {
   // launches, from its code and the functions it calls.
   mutable std::mutex polling_mu;
   mutable std::map<std::string, unsigned> polling;   // 0, or kPollLoad / kPollAtomic (src/sass/exec.cpp)
+  // VGPU_EXACT_THREADS (docs/exact-threads.md): a kernel whose trial was stopped is run in order for `first` launches before it is
+  // tried again, and waits `second` launches after the next stop (twice as many each time, 4096 at most; a trial that commits puts
+  // it back to 1). Under polling_mu. Which launches are tried moves time only: a launch leaves the same bits tried or not.
+  mutable std::map<std::string, std::pair<uint32_t, uint32_t>> exact_hold;
 
   // What a launch of a kernel finds out about it from the module, the same every time: which constant banks are backed by device
   // memory, where and how big (a bank is named by 5 bits of an instruction), the kernel's own bank 0 template and where its code
@@ -159,6 +163,13 @@ std::string unsupported(const uint8_t* image, size_t size);
 uint64_t unsupported_cache_hits();
 
 // Runs one kernel of a loaded module over the grid.
+// VGPU_EXACT_THREADS: how many launches of this process were tried on several threads, and how the trials ended (for tests and
+// reports; the counts change no result).
+struct ExactCounts {
+  uint64_t trials = 0, committed = 0, stopped = 0;
+};
+ExactCounts exact_counts();
+
 exec::LaunchStats launch(const Module& m, const std::string& kernel, const exec::LaunchConfig& cfg,
                          const std::vector<std::vector<uint8_t>>& args, MemoryManager& mem,
                          const DeviceProfile& profile);
