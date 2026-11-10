@@ -57,4 +57,14 @@ inline uint32_t fdiv_rn(uint32_t a, uint32_t b) {
   return q != q ? 0x7fffffffu : std::bit_cast<uint32_t>(q);
 }
 
+// The IEEE square root and reciprocal as the host computes them (correctly rounded, subnormals kept, the NaN canonical): what sqrt.rn.f32 and rcp.rn.f32 must give.
+inline uint32_t fsqrt_rn(uint32_t a) {
+  const float q = std::sqrt(std::bit_cast<float>(a));
+  return q != q ? 0x7fffffffu : std::bit_cast<uint32_t>(q);
+}
+inline uint32_t frcp_rn(uint32_t a) {
+  const float q = 1.0f / std::bit_cast<float>(a);
+  return q != q ? 0x7fffffffu : std::bit_cast<uint32_t>(q);
+}
+
 }  // namespace vgpu::hostgpu::ref
