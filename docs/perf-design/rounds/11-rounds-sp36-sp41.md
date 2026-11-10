@@ -581,3 +581,48 @@ Unit suite on server2 (Release, g++ 13, `ctest -R '^test_'`, 376 tests): main d4
 * Fix 2's number is a stand-in-driver run: the card "executes" nothing, so verify reports every kernel as different; the cost being measured is the simulator's side of the gate, which does not depend on what the card did.
 * The proof for integer division covers 32-bit forms with one reciprocal estimate; 64-bit division (`I2F.U64.RP`, a `CALL` slow path) is a different sequence and was not looked at.
 * `idiv` and `sidiv` runs in the simulator show the simulator's execution of the idiom is exact; they say nothing about the card, which is what the experiment script is for.
+
+## Round sp45 (verify-mode host side)
+
+Two items, both measured on server2 (Zen 5, 4 simulator threads, `-O3` without LTO, stand-in driver with `STUB_CARD_OK=1` so verify believes each launch ran on the card; the program's result is the simulator's whatever the card did). `perf` is not allowed on server2 (`perf_event_paranoid` 4, no root), so the profile is a SIGPROF sampler preloaded into the program (1 ms, instruction pointer, symbolised against the library's symbol table): a sample set, not a call graph.
+
+### 1. The summary under `VGPU_QUIET=1`
+
+`print_summary` returned at once under `VGPU_QUIET=1`, so `VGPU_HOST_GPU_VERIFY=1` and `VGPU_HOST_GPU_LOG=1` runs lost the two lines they exist for (`host_gpu: N launches ran on the card ...`, `host_gpu_verify: in_set_identical=...`). It now prints when verify or the log is asked for, quiet or not; quiet alone still prints nothing, and a driver that could not start still prints nothing (it already said "mode off"). Test: `e2e_host_gpu_stub` step 9 (quiet alone: no summary; quiet with LOG: the launches line; quiet with VERIFY: both lines, and the output equals the mode-off output). Mutation: restoring `if (quiet()) return;` fails the three summary checks.
+
+### 2. Where verify's host-side time went (2DCONV, 128 MiB live, `VGPU_HOST_GPU_VERIFY=1`)
+
+Plain simulation 0.41 s; sp43's verify 3.8 to 5.2 s here (the 7 s of sp43 was a slower run on the same box; the first run of a series is the slow one). Samples of the sp43 build: the gate's `std::shared_mutex` (lock, unlock and the map walk in `gate_access`) 48%, the memory manager's table lock taken twice per access (`find_ordinary_miss` finds the card-valid allocation and returns "miss" under the lock, then `resolve()` takes the lock and looks it up again) 35%, the simulator's own scalar path the rest. Switching the gate off (experiment only) took the run to 2.25 s, so the gate was about 2 s of the 4.
+
+Changes, each measured in turn (verify wall, 2DCONV): sp43 3.9 to 5.1 s, then
+
+| step | verify wall |
+|---|---:|
+| gate lock `std::shared_mutex` replaced by `BigReaderLock` (per-thread reader slots) | 2.69 s |
+| a thread remembers up to four settled chunks (`GateMemory`), answered from the lock's generation with no lock and no map walk | 2.36 s |
+| the scalar path asks the gate itself for the card-valid allocation its lookup found (one table lock per access, not two) | 2.17 s |
+| and remembers that allocation per thread under the table lock's epoch (no table lock, no map) | 1.65 s |
+
+What is left (1.65 s against 0.41 plain) is the simulator's per-lane scalar path: while an allocation has a card copy the batched and hot-location fast paths are off by design, and the profile is `exec_mem`, `mem_read`, `load_scalar`, `resolve_scalar` with the locks at 5%.
+
+Why it is safe. `GateMemory` only skips accesses the gate would have left alone: a settled chunk (a read finds it not the card's alone, a write finds it the simulator's alone) stays settled during a launch because every transition goes toward settled; every other change (a launch on the card, the simulator's launch start, a free, a table sync) is made in an exclusive section, and `GateLock` changes its generation at the start (odd) and the end of each one, so a remembered answer is void while one is open and after it. The memory manager's card entry is checked on every hit for `card_valid != 0` (the gate is still asked every access) and is voided by the table epoch as the lookup memory's ways are. The default path (no card gate: `card_resident_ == 0`) takes the code it took before; `find_ordinary` gained a defaulted parameter and the plain runs are unchanged (below).
+
+Interleaved runs, base = the head of `hostgpu-round`, new = this branch (5 pairs each, seconds; the program's output with its timing lines removed was identical in every pair, and the per-launch verify results and exit codes were the same):
+
+| case | base (median, range) | new (median, range) | ratio |
+|---|---:|---:|---:|
+| 2DCONV verify (128 MiB) | 4.79 (4.73-7.99) | 1.63 (1.63-1.76) | 2.9x |
+| 3DCONV verify | 16.64 (16.53-17.81) | 13.46 (13.28-13.67) | 1.24x |
+| ATAX verify | 17.93 (17.81-21.11) | 4.17 (4.15-4.27) | 4.3x |
+| 2DCONV plain | 0.412 (0.407-0.425) | 0.408 (0.406-0.410) | 1.0x |
+| 3DCONV plain | 0.200 (0.198-0.207) | 0.205 (0.198-0.210) | 1.0x (noise) |
+
+Single runs of other programs, base to new, verify: BICG 1.81 to 0.66 s; `VGPU_HOST_GPU_VERIFY=all` is the same as `1` on these. Programs that did not finish in 150 s in both (2MM verify) were not compared.
+
+Tests (unit, wired into CI as `test_host_gpu_track`): `a_thread_that_remembers_settled_chunks_does_what_the_locking_gate_does` (20 seeds x 4,000 steps of random accesses and exclusive sections against a copy with the memory off: pulls, updates, slot and every chunk state equal after every step), `the_generation_changes_with_every_exclusive_section_and_is_odd_inside_one`, `a_scalar_access_to_a_card_valid_allocation_asks_the_gate_every_time_and_reads_the_right_bytes` (gate called once per access to a card-valid allocation including runs on one allocation, none after the copy goes away, an error after a free). Mutants, all caught: no generation change (2 tests fail), a remembered chunk always write-settled (1), the memory manager's card entry skipping the gate (1), the card entry not voided by the epoch (1).
+
+### Caveats
+
+* The card was a stand-in: verify's comparison is not exercised for real here (the sp44 A10G run is the card evidence); what is shown is the host side's cost and that the outputs did not move.
+* Not run on a real card or in the TSan job locally (no tests on WSL); `GateMemory` is a `thread_local` zero-initialised struct and the new atomics are acquire/release, so TSan has nothing plain to flag, but CI is the check.
+* The remaining gap to plain simulation would need the batched and hot-location paths to work with a card copy, a hot-path change in `MemoryManager` that was not attempted.
