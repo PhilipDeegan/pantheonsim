@@ -779,7 +779,7 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool
           put("    const int64_t x = c->bsync(c, %uu, ex, group);\n", i);
           count(o);   // (with the group that ran it: before the group changes)
           flush();
-          put("    if (x == INT64_MIN) {\n      c->over = 1u;\n");
+          s += "    if (x == INT64_MIN) {\n      c->over = 1u;\n";
           leave(std::to_string(i + 1), "      ");
           s += "    }\n";
           s += std::string("    ") + (mutant("link_bsync_charge") ? "" : "--*c->budget; ++*c->extra; ") + "n0 = 0;\n";
