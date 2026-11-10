@@ -19,3 +19,6 @@ failed_block_not_a_stop          SURVIVED
 no_hold_after_a_stop             killed by default, tier0, fastpath0
 tried_without_blocks_in_order    SURVIVED
 (no mutant)                      passes
+--- after the merge of origin/main 7b90cee5, with the test a_launch_whose_blocks_fail_without_touching_memory_fails_as_the_run_in_order_does (server3) ---
+failed_block_not_a_stop          killed by default, tier0, fastpath0
+(no mutant)                      passes

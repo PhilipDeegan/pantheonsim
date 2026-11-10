@@ -1,0 +1,16 @@
+tsan build rc=0
+/dev/mapper/ubuntu--vg-ubuntu--lv   26G   14G   11G  55% /
+test_exact_threads [X=1] rc=0 reports=0 11/11 tests passed
+test_exact_threads [VGPU_TIER=0] rc=0 reports=0 11/11 tests passed
+test_exact_threads [VGPU_FASTPATH=0] rc=0 reports=0 11/11 tests passed
+test_memory [X=1] rc=0 reports=0 80/80 tests passed
+test_memfast [X=1] rc=0 reports=0 15/15 tests passed
+test_memalloc [X=1] rc=0 reports=0 18/18 tests passed
+test_memrmw [X=1] rc=0 reports=0 10/10 tests passed
+test_memhot_sp8 [X=1] rc=0 reports=0 4/4 tests passed
+test_load_batch16 [X=1] rc=0 reports=0 3/3 tests passed
+test_memcopy_direct [X=1] rc=0 reports=0 6/6 tests passed
+test_memrmw_lockfree [X=1] rc=0 reports=0 6/6 tests passed
+test_memcount_forms [X=1] rc=0 reports=0 10/10 tests passed
+test_atom_rmw [X=1] rc=0 reports=0 1/1 tests passed
+PHASE_B_DONE
