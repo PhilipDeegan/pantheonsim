@@ -1,0 +1,13 @@
+polybench/SYRK               thr=1 work       same  out/counters/digest/rc/counter-lines/digest-lines ref=('70ae2cc8', '82d8fb6a', '738df747', 0, 1, 1) var=('70ae2cc8', '82d8fb6a', '738df747', 0, 1, 1)
+polybench/SYRK               thr=1 work@avx2  same  out/counters/digest/rc/counter-lines/digest-lines ref=('70ae2cc8', '82d8fb6a', '738df747', 0, 1, 1) var=('70ae2cc8', '82d8fb6a', '738df747', 0, 1, 1)
+polybench/SYR2K              thr=1 work       same  out/counters/digest/rc/counter-lines/digest-lines ref=('70ae2cc8', '1b49ce52', 'db5595e3', 0, 1, 1) var=('70ae2cc8', '1b49ce52', 'db5595e3', 0, 1, 1)
+polybench/SYR2K              thr=1 work@avx2  same  out/counters/digest/rc/counter-lines/digest-lines ref=('70ae2cc8', '1b49ce52', 'db5595e3', 0, 1, 1) var=('70ae2cc8', '1b49ce52', 'db5595e3', 0, 1, 1)
+hecbench/black-scholes-cuda  thr=1 work       DIFFERENT  out/counters/digest/rc/counter-lines/digest-lines ref=('3c02cec0', '9ba2c526', '0ce648e2', 0, 1, 1) var=('12d231f2', '9ba2c526', '0ce648e2', 0, 1, 1)
+hecbench/black-scholes-cuda  thr=1 work@avx2  DIFFERENT  out/counters/digest/rc/counter-lines/digest-lines ref=('3c02cec0', '9ba2c526', '0ce648e2', 0, 1, 1) var=('13769e87', '9ba2c526', '0ce648e2', 0, 1, 1)
+rodinia/gaussian             thr=1 work       same  out/counters/digest/rc/counter-lines/digest-lines ref=('2ef02e71', '550d607f', '86e31195', 0, 1022, 1022) var=('2ef02e71', '550d607f', '86e31195', 0, 1022, 1022)
+rodinia/gaussian             thr=1 work@avx2  same  out/counters/digest/rc/counter-lines/digest-lines ref=('2ef02e71', '550d607f', '86e31195', 0, 1022, 1022) var=('2ef02e71', '550d607f', '86e31195', 0, 1022, 1022)
+hecbench/radixsort2-cuda     thr=1 work       same  out/counters/digest/rc/counter-lines/digest-lines ref=('645304b1', 'b48c2be0', 'dfff5606', 0, 600, 600) var=('645304b1', 'b48c2be0', 'dfff5606', 0, 600, 600)
+hecbench/radixsort2-cuda     thr=1 work@avx2  same  out/counters/digest/rc/counter-lines/digest-lines ref=('645304b1', 'b48c2be0', 'dfff5606', 0, 600, 600) var=('645304b1', 'b48c2be0', 'dfff5606', 0, 600, 600)
+rodinia/lavaMD               thr=1 work       DIFFERENT  out/counters/digest/rc/counter-lines/digest-lines ref=('40c048a2', '6ae2e1cb', '23a45d91', 0, 1, 1) var=('3b78d81b', '6ae2e1cb', '23a45d91', 0, 1, 1)
+rodinia/lavaMD               thr=1 work@avx2  DIFFERENT  out/counters/digest/rc/counter-lines/digest-lines ref=('40c048a2', '6ae2e1cb', '23a45d91', 0, 1, 1) var=('36b71397', '6ae2e1cb', '23a45d91', 0, 1, 1)
+DIFFERENCES: 4

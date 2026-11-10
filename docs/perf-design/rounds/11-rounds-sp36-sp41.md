@@ -988,3 +988,94 @@ The bar set beforehand was 5 % or more on at least three compute-bound programs.
 * How many of the executed ops ran in fused runs was not counted (the statistics have no counter for it and the cache keeps no source).
 * Not measured for the fused form: the cold run (a run is written twice, so the compile is larger), the full form (`VGPU_JIT_RESIDENCE=1`: fused runs are off there), AVX-512 (16 lanes a register), the seven `e2e_sass_jit` shards with `VGPU_JIT_FUSE=1`, a sanitizer build, a build without the mutation hooks, g++-12. The unit test and the five programs' same-bits comparison are what holds the patch.
 * Cleanup: the scratch tree of this round on server3 (`~/.cache/sp48`) was removed by exact path.
+## Round sp50 (16-lane AVX-512 forms of the SASS lane kernels): ceiling measured, built with the same bits, measured on Zen 5, one program over the bar, not kept (branch `sp50-avx512`, base `origin/main` 27f09add)
+
+Question: the 32-lane kernels the SASS tier calls for every arithmetic instruction (`src/simd/kernels.inc`, `avx2_impl`) take a warp as four steps of eight lanes. The AVX-512 table that is the default on a host with AVX-512 F/BW/DQ/VL and VNNI replaces only the tensor-core tile kernels (rounds sp3, sp8, sp12, sp13, sp26, sp27); every other entry of it is the AVX2 kernel. Would 16-lane forms of the lane kernels, with mask registers for the lane masks, pay on a CPU with full-width 512-bit units? Rule set beforehand: keep the change only if at least three real programs gain 5 % or more.
+
+What earlier rounds had measured: no round had tried 512-bit lane kernels (the AVX-512 work was all on the tensor-core kernels, where one instruction is thousands of operations). Round sp40 is the nearest: IBS on this host put the lane kernels at about 2 % of the operations each (`icmp_mask_k` 2.2 %, `ibin_m_k` 2.2 %, `blend_m_k` 2.1 %, `iadd3x_k` 2.1 % on mergeSort) and found that removing 60 to 70 % of the failed store-to-load forwards in them moved no cycles. That is a warning about what the samples inside these kernels are, not a measurement of this lever, so it was built and measured.
+
+Setup: server2 (Ryzen 9 9950X, Zen 5, full-width 512-bit units; `lscpu`: avx512f, bw, cd, dq, vl, ifma, vbmi, vbmi2, vnni, bitalg, vpopcntdq, bf16, vp2intersect), Release with LTO and `-g`, GCC 13.3, `VGPU_GPU=nvidia/rtx3060`, SASS engine, `VGPU_THREADS=1`, cpu 14, `nice -n 19`, one process at a time under the shared builder lock (from 04:25 also under a 4 GB memory cap), prebuilt programs of `tools/bench/real` (PolyBench/GPU, Rodinia, HeCBench). `perf` is not allowed there: shares are from the `SIGPROF` sampler of `tools/bench-amd/profile` at 1000 Hz of CPU time. server3 (Ryzen 7 PRO 8840U, Zen 4, the same flags without vp2intersect; 512-bit operations run as two halves) ran the five-round timing with the libraries built on server2, once server2 had no memory to spare (section 3).
+
+### 1. Ceiling: the share of CPU time inside the AVX2 kernels (base build, self time)
+
+| program | samples | all AVX2 kernels | table lane kernels | scheduler lanes (`pick_group_avx2`, `set_pcs_avx2`, `select_pcs_avx2`) | address and counting kernels (`warp_rows_k`, `warp_run_k`, sectors, banks) | the largest |
+|---|---:|---:|---:|---:|---:|---|
+| rodinia/lavaMD | 1,361 | 49.5 % | 46.5 % | 1.1 % | 1.8 % | `dop_avx2_t` (binary64 add, mul, fma) 37.3 %, `dop_m_k` 8.2 % |
+| hecbench/black-scholes-cuda | 16,275 | 32.3 % | 22.6 % | 8.5 % | 1.2 % | `pick_group_avx2` 7.0 %, `blend_m_k` 6.8 %, `ffma_k` 5.3 %, `mufu_k` 2.5 %, `iadd3_k` 1.6 %, `icmp_mask_k` 1.3 %, `set_pcs_avx2` 1.3 % |
+| polybench/SYRK | 4,198 | 18.0 % | 8.5 % | 0 | 9.6 % | `warp_rows_k` 6.5 %, `fmul_k` 5.1 %, `warp_run_k` 3.1 %, `ffma_k` 1.7 % |
+| hecbench/radixsort2-cuda | 1,653 | 15.7 % | 12.2 % | 1.0 % | 2.5 % | `icmp_mask_k` 3.2 %, `lop3_k` 2.7 %, `lane_unary_k` 1.8 %, `shf_k` 1.5 % |
+| polybench/SYR2K | 7,981 | 15.5 % | 9.8 % | 0 | 5.7 % | `fmul_k` 5.4 %, `warp_rows_k` 3.4 %, `warp_run_k` 2.3 %, `iadd3x_k` 1.7 %, `imad_wide` 1.2 % |
+| rodinia/gaussian | 3,261 | 14.5 % | 12.6 % | 0.5 % | 1.5 % | `blend_m_k` 4.2 %, `imad_k` 2.7 %, `icmp_mask_k` 2.1 %, `iadd3_k` 1.5 %, `imad_wide` 1.2 % |
+
+So the ceiling, if every sample inside a kernel were an operation that a wider vector halves, is 7 to 25 % of the wall time, and the whole share (kernels free) 14 to 49 %. (polybench/LU was meant to be the seventh program; it dies of `SIGPROF` under the sampler, exit status -27, with no samples written, and was left out of the timing as well: not explained.) Full tables: `docs/perf-design/data/sp50/profile-base/`.
+
+### 2. What was built (all of it switched by the kernel table: `VGPU_SIMD=avx2` gives the 256-bit code, and a host without AVX-512 never reaches the new code)
+
+`src/simd/lanes512.inc` (included by `simd.cpp` in `avx512_impl`, under the target pragma the tile kernels already had; `make_avx512` puts the entries in the Avx512 table) and three functions in `src/simd/lanes.cpp`:
+
+* `iadd3`, `imad`, `fadd`, `fmul`, `ffma`: two 16-lane steps; the canonical NaN through a compare into a mask register and a masked move. `ffma` is `vfmadd` as in the AVX2 kernel, the others are never fused (contraction is off for the unit).
+* `lop3`: `vpternlogd` with the table as its immediate for the 19 tables the AVX2 kernel has as expressions, the sum of minterms for the rest.
+* `icmp_mask`: the compare writes the lane bits to a mask register (no `movmskps`, no sign flip for the unsigned forms).
+* `blend_m`: a masked load over the old row and a whole-row store (not a masked store: the next kernel loads the row whole).
+* `iadd3x`: the carries out as mask registers (each of the three 32-bit additions wrapped or not), instead of four widened 64-bit sums per eight lanes.
+* `imad_wide`: the even lanes multiplied where they are and the odd lanes after a shift (`vpmuludq` / `vpmuldq`), the addend's words put beside each other with a blend: 14 vector operations per 16 lanes where the AVX2 kernel has 24 per 16.
+* `mufu` (RCP, RSQ, SQRT): eight doubles to a vector.
+* `dop_m` (binary64 add, mul, fma on register pairs): the low and high words of 16 lanes interleaved into two vectors of eight doubles by two-source permutes; the NaN rule (`simd::dop_nan` on the operands as the registers hold them) on the rare path, as before.
+* `warp_rows`, `warp_run` (the addresses of a full warp's global access): eight 64-bit lanes to a step, and sixteen 32-bit ones.
+* `pick_group_diverged`, `set_pcs_partial`, `select_pcs`: eight addresses to a step, the lane masks as mask registers, an unsigned 64-bit minimum (the AVX2 code flips sign bits for a signed compare). The addresses are still loaded 16 bytes at a time, for the reason the AVX2 code gives.
+
+Not built: `ibin_m`, `shf`, `lane_unary`, `fcmp_mask`, `ffma_x` / `fadd_x` / `fmul_x`, `i2f`, `f2i`, `fmnmx`, `prmt0`, `dcmp`, the sector and bank counting kernels (each under 2 % of every program above).
+
+### 3. Results
+
+A = `origin/main` 27f09add, A2 = a second copy of A's two shim libraries (the A/A control), W = this branch at its default (the 512-bit kernels), W2 = the same libraries with `VGPU_SIMD=avx2` (the same binary on the 256-bit kernels: placement held equal). Whole-process wall seconds, the four variants interleaved (order reversed every other round), one lock hold for the run.
+
+**Zen 5 (server2), the host the question is about: one round only.** The five-round run could not be made: from 04:46 on the host had under 8 GB of memory available (production Postgres), and the rule in force from 04:25 forbids a run below that; the run was queued three times and skipped each time by its own memory gate. What exists is the pilot round taken at 03:57 (load 3 to 8 at run start), one run per cell:
+
+| program | A s | A2 s | W s | W2 s | A/W | A2/W | W2/W | A/A2 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| polybench/SYRK | 4.319 | 4.138 | 4.152 | 4.123 | 1.040 | 0.997 | 0.993 | 1.044 |
+| polybench/SYR2K | 8.072 | 7.820 | 7.743 | 7.987 | 1.042 | 1.010 | 1.032 | 1.032 |
+| hecbench/black-scholes-cuda | 16.990 | 16.890 | 16.203 | 17.166 | 1.049 | 1.042 | 1.059 | 1.006 |
+| rodinia/gaussian | 3.175 | 3.170 | 3.146 | 3.202 | 1.009 | 1.008 | 1.018 | 1.002 |
+| hecbench/radixsort2-cuda | 1.629 | 1.635 | 1.608 | 1.654 | 1.013 | 1.017 | 1.029 | 0.996 |
+| rodinia/lavaMD | 1.334 | 1.346 | 1.218 | 1.322 | 1.095 | 1.105 | 1.085 | 0.991 |
+
+One run a cell is not a measurement by this project's rule (five interleaved runs, medians), and the A/A column shows why: the first program's first run differs from its copy by 4.4 %. Read with that: lavaMD about 1.09 to 1.10, black-scholes about 1.04 to 1.06, the other four inside the A/A spread.
+
+**Zen 4 (server3, 512-bit operations as two halves; the same binaries, stripped; cpu 13, load 1.0 to 3.5): five rounds, medians, (max - min) / median in brackets.**
+
+| program | A s | A2 s | W s | W2 s | **A/W** | A2/W | W2/W | A/A2 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| polybench/SYRK | 5.339 (1.3 %) | 5.365 (1.0 %) | 5.319 (5.2 %) | 5.409 (2.3 %) | **1.004** | 1.009 | 1.017 | 0.995 |
+| polybench/SYR2K | 10.347 (6.8 %) | 10.235 (1.4 %) | 10.258 (1.5 %) | 10.381 (4.9 %) | **1.009** | 0.998 | 1.012 | 1.011 |
+| hecbench/black-scholes-cuda | 20.147 (7.2 %) | 20.239 (2.2 %) | 19.631 (2.1 %) | 20.125 (1.9 %) | **1.026** | 1.031 | 1.025 | 0.995 |
+| rodinia/gaussian | 3.586 (1.7 %) | 3.579 (3.5 %) | 3.611 (1.4 %) | 3.605 (1.3 %) | **0.993** | 0.991 | 0.998 | 1.002 |
+| hecbench/radixsort2-cuda | 2.005 (3.0 %) | 2.008 (0.2 %) | 1.988 (2.4 %) | 2.003 (0.9 %) | **1.008** | 1.010 | 1.008 | 0.998 |
+| rodinia/lavaMD | 1.748 (35.6 %) | 1.757 (3.9 %) | 1.506 (2.2 %) | 1.759 (4.6 %) | **1.161** | 1.167 | 1.168 | 0.995 |
+
+A/A is within 1.1 % in every row. One program gains more than 5 % (lavaMD, 16 %: binary64 arithmetic, where a 256-bit step is four lanes), black-scholes gains 2.6 %, and the other four are inside the A/A spread (gaussian 0.7 % slower, the same as its W2, so not the kernels). No row shows a frequency or licence cost on this host.
+
+Same bits: on server2, `VGPU_COUNTERS_FILE`, `VGPU_KERNEL_DIGEST`, the exit status and the filtered output of SYRK and SYR2K equal A's for W and W2 (the check was stopped there to change the driver's locking, and its full rerun at one and four threads is part of the run the memory gate skipped). On server3, one thread: counters, kernel digests and exit status equal A's for all six programs, W and W2; the filtered output is equal for four, and for black-scholes and lavaMD it differs in every run, W2 from W as well (those two print their kernel and processing times in milliseconds, which the filter does not remove: two runs of A differ in the same two lines of black-scholes, and A against W in those two lines only). Files: `docs/perf-design/data/sp50/` (`ab-zen4-server3.json`, `ab-zen4-server3.txt`, `same-bits-zen4-server3.txt`, `ab-zen5-server2-pilot-1-round.json`, the drivers `ab.py` and `profile.py`).
+
+Why the ceiling of section 1 does not arrive: the 512-bit forms run about half the vector operations, but the samples inside the kernels are mostly not those operations. A kernel such as `fmul_k` is eight loads, four multiplies, four compares and four stores; 5 % of SYR2K cannot be four multiplies. The time is the kernel waiting for its source rows (rows the load handler or the previous kernel has just written, round sp40's failed forwards; rows a gather has just fetched) and the call itself, and neither is shorter at 16 lanes. `dop_m` is the exception because its AVX2 form really is long (unpacks and shuffles around four-lane double vectors, eight steps a warp). A profile of the branch to confirm this share by share was queued with the Zen 5 run and did not run, so this paragraph is an inference from the kernels' length and from round sp40, not a measurement.
+
+### 4. Tests and mutants
+
+`tests/unit/test_lanes512.cpp` (`vgpu_unit_test(test_lanes512)`, framework-free, `SKIP_REGULAR_EXPRESSION "^SKIP:"`): on a host that runs both tables it asks for them by level (`simd::kernels_for(Level::Avx2)` and `(Level::Avx512)`, `simd::testing::warp_rows_at` / `warp_run_at`, `sasslanes::testing::pick_group_at` / `set_pcs_at` / `select_pcs_at`, all new) and runs every 512-bit form against the 256-bit one and against a definition written lane by lane in the test: random rows, 38 edge words (carries, signs, quiet and signalling NaNs with signs and payloads, infinities, subnormals, the largest and smallest normals), each edge word in each lane of the float kernels, the four rounding modes for `ffma`, `fadd`, `fmul`, `mufu` and `dop_m`, all 256 `lop3` tables, the six comparisons signed and unsigned at 32 and 64 lanes, masks of every shape, result rows that are source rows, rows at three alignments with guard words on both sides, the `dop_m` NaN rule with every modifier (the test requires more than 1,000 lanes through it), warps on and off a stride with the low word and all 64 bits wrapping, addresses at both ends of the range for the scheduler functions. The first case checks that the Avx512 table's entries are not the AVX2 functions, so the rest cannot be the AVX2 code against itself. On a host without AVX-512 F/BW/DQ/VL/VNNI the executable prints `SKIP: ...` and CTest reports the test as skipped, not as passed. `VGPU_SIMD=avx2` (which existed) forces the 256-bit code everywhere; `test_simd`, `test_tier` and `test_sass_alu_runs` are registered a second time with it (`*_lanes_avx2`), because on a host with AVX-512 their default run would otherwise only reach the 512-bit kernels. `test_simd`'s `f16c_check_is_lazy_and_selects_what_it_did` compared the table in use with the Avx2 table's `iadd3` and `ffma`; it now compares with the table of the level in use.
+
+Run on server2 (Zen 5): `test_lanes512` 13/13; `test_simd` 30/30 at `VGPU_SIMD=avx2` and 29/30 at the default and `avx512` before the change to the case above (that case); `test_simd_dispatch` 3/3 at the three settings. Run on server3 (Zen 4, a Release build of commit `df002f21` without LTO), each at the default, `VGPU_SIMD=avx2` and `VGPU_SIMD=avx512`: `test_lanes512` 13/13, `test_simd` 30/30, `test_tier` 9/9, `test_sass_alu_runs` 6/6, `test_simd_dispatch` 3/3; `check_hot_unit_layout.py` passes (6 objects on 64-byte function boundaries).
+
+Mutants (`docs/perf-design/data/sp50/mutants.py`, one textual change each, `test_lanes512` rebuilt and run; results in `mutants.txt`): **37 of 37 killed**, at least two in every kernel. Among them the ones a looser test would miss: `ffma` and `dop_m`'s fma as a multiply then an add (not fused), `fadd` and `mufu` rounded to nearest whatever the rounding mode, the NaN as 0x7fc00000, `dop_m`'s NaN rule applied after the modifiers or leaving out the addend, -x applied before |x|, a subnormal `mufu` result not flushed, `pick_group` with a signed minimum or with the lanes that do not run in it, `warp_run` letting a carry through when there is no high row, the Avx512 table keeping the AVX2 `ffma`, and `warp_rows_at(Avx512)` handing out the AVX2 kernel.
+
+### 5. Verdict, caveats, what is left
+
+**Not kept.** The rule was 5 % on at least three programs; one program reaches it (lavaMD 1.16 on Zen 4, about 1.09 to 1.10 in the single Zen 5 round), black-scholes gains 2.6 % (Zen 4) to perhaps 5 % (Zen 5, one round), and SYRK, SYR2K, gaussian and radixsort2 gain nothing measurable. The implementation and its test are commit `df002f21` of the branch (complete, same bits, 37 of 37 mutants killed); the commit after this section's removes them again, so the branch's head carries only this section and its data.
+
+Caveats and what is left:
+* **The Zen 5 number is one round.** If the five-round run is wanted, `ab.py --variants base,base2,work,work@avx2 --reps 5` on server2 once it has memory; the Zen 4 table suggests the verdict would not change (only black-scholes is near the bar).
+* **`dop_m` alone is the part worth a second look**: it is the whole of lavaMD's gain, it is one kernel (about 80 lines), and programs that compute in binary64 are common outside these corpora. It was not measured on its own, and one program is not a case; HeCBench `aop-cuda` (binary64, 1.4 s) would be the second data point.
+* Not run on the branch: the rest of the test suite (only the five tests named above), `test_tier` and `test_sass_alu_runs` on the Zen 5 (they ran on the Zen 4), the sanitizer builds, a g++-12 compile, hosted CI (nothing was pushed), and a host without AVX-512 (the skip path of `test_lanes512` was not seen to run).
+* polybench/LU dies of `SIGPROF` under the sampler (exit status -27 after about 20 s, no samples file); the other six programs do not. Not looked into.
+* The JIT (off by default) compiles `kernels.inc` at the level the host's compiler reports and was not touched: generated code keeps the 256-bit lane kernels either way.
+* No Intel host was measured.
