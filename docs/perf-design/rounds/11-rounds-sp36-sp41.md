@@ -1145,3 +1145,253 @@ What the round leaves for the next one:
 * Three programs are not deterministic from run to run on the tier itself (`same-bits-tier-twice.log`): backprop's and silu's kernel digests differ between two tier runs, and bh at 4 threads differs in counters and digest (why was not looked for). For these the comparison is the output, the exit status and (backprop, silu) the counters.
 * `same-bits-short.log` holds the last 80 of the 97 lines of its run (the script printed through `tail -80`): the 17 lines cut are gaussian's and hotspot's and one of SYRK's, and the run's own total, 20 differences, is the 20 lines of the three programs above.
 * Cleanup: the scratch tree of this round on server3 (`~/.cache/sp52`) and the one started on server2 (not used: under 8 GB available there) were removed by exact path.
+
+## Round sp53 (linking, the follow-up): why SYR2K lost, BSYNC inside generated code, what the linked compile costs (branch `sp53-link-followup`, base `sp52-region-linking` 1fce4fd5)
+
+Question: round sp52 kept linking (`VGPU_JIT_LINK=1`) as an opt-in and left three things: (1) SYR2K loses 3 % with it, reproducibly, for a reason not found; (2) BSYNC is the largest exit left in every diverged program; (3) the linked object compiles up to 2.7 times as long, and where the time goes was not separated. This round takes them in that order: find the cause of (1) without a profiler that needs root and remove it, or decline linking by a rule where it cannot help; make BSYNC an op of a region with every counter and the scheduler's order kept, and keep it only if it gains 5 % or more on at least three programs with none below 0.995; break (3) down and cut it if a cheap fix exists.
+
+Host and protocol are round sp52's: server3 (Ryzen 7 PRO 8840U, g++ 13.3), shared with other sessions, every build, test and timed run under `flock /tmp/pantheonsim-builder.lock`, `nice -n 19`, `-j3`; builds Release, `-g1`, without LTO, with the mutation hooks compiled in; the prebuilt sm_86 programs of `tools/bench/real`, `VGPU_GPU=nvidia/rtx3060`, one thread, `taskset -c 6`, `VGPU_JIT=1 VGPU_JIT_THRESHOLD=100000 VGPU_JIT_SYNC=1`, a private warm cache a side, the JIT's statistics off in timed runs, sides interleaved, 5 runs a side, medians of whole-process wall seconds, a second side with the settings of the first as the control. Scripts and data: `docs/perf-design/data/sp53/`.
+
+### 0. A wrong result of round sp52's linking, found by CI: rows trusted across a stop op
+
+While this round ran, the CI of round sp52's pull request failed in `e2e_sass_jit_shard_modes` on every toolkit leg: `sm_86 sass_tier (linking, the full form): output differs from the tier`, the `ldsm` kernel at 64 and 128 threads (linking in the cheap form, and the full form without linking, pass). Neither host of these rounds has nvcc, so the shard had never run with linking (round sp52's caveats said so); it was found from the generator.
+
+**The cause.** With linking the selected regions of a section are merged into one function around `stop` ops (the ops between them that the run loop runs: here the `BAR.SYNC` after the kernel's first loop, and the LDSMs). Where straight code falls into a stop op the generator wrote what was pending and left, but it synchronised its account of register residence without forgetting it (`rc.sync(s, false)`): the rows and predicates it held in local copies before the stop op were still marked valid for the code after it. That code is a new entry of the merged function, reached only through the entry table, where no local copy has been loaded: with `VGPU_JIT_RESIDENCE=1` it read uninitialised local rows for every register the earlier part had touched. `k_ldsm` is exactly that shape (a loop, a barrier, straight code that uses the registers of the code before it), and it runs only with more than one warp a block. Without residence there are no local copies and the text is the same with or without the fix, which is why the cheap form, the default and every measurement of rounds sp52 and sp53 are not affected. Specialisation is not part of it: the failing stage has both knobs, and in the new test residence alone shows it.
+
+**The fix** is one argument: after a stop op no row is trusted (`rc.sync(s, true)` in `Engine::source`, as at every other entry).
+
+**The test** that should have existed: `jit_every_combination_of_linking_fusing_residence_and_specialisation_equals_the_plain_form` (`tests/unit/test_jit_resid.cpp`, ctest `test_jit_resid`). Regions that mix generated ALU ops, escapes, stores, branches, cont ops, every op linking adds (BSSY, EXIT, CALL, RET, and this round's BSYNC) and stop ops are compiled in all sixteen combinations of the four knobs; for linking off and on, each of the seven other forms is called with the same trial as the plainest one (no residence, no specialisation, no fused runs) and must leave the same registers, predicates, counters, turn, spin count, log of escapes and host calls, lanes' addresses, group, others' place, stopping place and run restart. A quarter of the trials enter at the op after a stop op, and the test fails if too few did, if too few ran into a stop op, or if too few linked runs went on past a branch or cont op. The differential tests before it took the knobs one or two at a time, and the one that had linking, residence and stop ops together (round sp52's) had only escapes in its regions, so nothing was ever resident. On the fixed build its 10,080 comparisons are equal (3 units; 262 reference runs entered after a stop op, 171 ran into one, 652 linked runs went on past a branch or cont op); with the bug put back (`VGPU_JIT_MUTANT=res_stop_keep`) 266 of them differ, the first one residence against the plain form with registers, predicates and the log different (`matrix.log`; in the test's regions the stop ops are there whatever the linking setting, so the mutant shows with linking off too; in the product stop ops exist only in merged regions).
+
+The bug also shows on a real program these hosts can run: with it put back, bilateral in the linked full form gives a wrong output and bh does not end, and with the fix both equal the tier ("Same bits" below). What this does not do is run CI's own stage: `linking, the full form` of `e2e_sass_jit_shard_modes` needs nvcc and has to confirm the fix in CI.
+
+### 1. SYR2K's loss with linking
+
+Round sp52 left SYR2K 2 to 3 % slower with `VGPU_JIT_LINK=1` (0.967 to 0.978 in four measurements) and its twin SYRK unchanged, with three guesses ruled out and no profiler on the host (`perf_event_paranoid` is 4 on server3 and was not changed).
+
+**The tools.** Three things stand in for `perf` (`scripts/`): a sampler to preload (`sigprof.c`: a `SIGPROF` every millisecond of CPU time, the interrupted address recorded, the samples written at exit as module, offset and count; preloaded after `taskset env`, so that it is the program and not `taskset` that is sampled), read by function, by two runs side by side and address by address; `aslr.py`, which runs two settings with address-space randomisation off and the stack moved by an environment variable of a chosen size; and `stepcount.c`, an instruction counter for a fixed piece of work: it interposes `dlopen`, puts a breakpoint at every region function of the generated object, lets a number of region calls go by, and then runs the thread with the trap flag set, counting every instruction by its address until a given number of region calls have begun (a microsecond an instruction, so it counts a few blocks of a kernel, not a run). The compiler's part was read from the objects with `objdump`, and the generator's from the kept sources (`VGPU_JIT_KEEP=1`).
+
+**What the samples said.** One profiled run a side of the round-sp52 build (9,114 samples unlinked, 9,393 linked): the generated code holds 12 % of the samples and has 58 of the 279 more; the rest of the difference is in the simulator's memory functions, which do exactly the same work on both sides: `run_allocation` +58 (77 to 135), `load_batch` +50, `warp_rows_k` +45, `run_in` +28, `store_run` +22. Address by address, `run_in`'s samples sit on the 8-byte loads of the source row of a store (14 to 42 at the instruction after the load): the callee was waiting for bytes the generated code had just written. So the question became what the linked function does differently when it writes a register row.
+
+**Not a matter of placement.** With randomisation off and the stack moved by 0 to 2,048 bytes in ten steps the unlinked side took 9.03 to 9.22 s and the linked side 9.23 to 9.48 s at every step (`aslr-syr2k-off.json`): the difference is in the objects, not in where a run happens to put its stack.
+
+**The generated text is the same.** The loop of SYR2K's kernel (95 ops, eight unrolled steps of four loads, five float ops and a store) is 1,082 lines of generated C++ on both sides, identical once the op numbers are shifted; the sides differ in the branch back (the linked form's tests and its split block), in what stands before and after the loop in the same function (with linking the bounds test, its EXIT and the kernel's last two ops are in the function), and in two locals. What differs is what the compiler makes of the same text in a larger function, in two places:
+
+1. **Row copies as `rep movsl`.** `store_row` copied a result row with a loop of four 32-byte moves. The compiler recognises such a loop as one `memcpy` of 128 bytes, and in a block it takes for a cold one it expands that `memcpy` for size: `rep movsl`, out of line. The linked object of SYR2K held 20 of them, the unlinked one none; ten of the twenty are the result rows of the loop's float ops (the compiler's guess of what is cold is poor in a function of 11,000 instructions: these blocks run 128 times a warp), each a string instruction that costs tens of cycles to start and whose bytes the loads that follow in the tier's handlers wait for.
+2. **Escapes called out of line.** `run_op`, the three lines that call the tier's handler of an op, was `static inline`. In the unlinked object 41 of its 42 calls were inlined: each escape an indirect call of its own, with one target. In the linked object 16 of the 42 were calls of an out-of-line `run_op`, which ends in one indirect jump that all of them share (the function's growth limit: it is one function where there were two).
+
+`scripts/bisect.sh` shows that it is the size of the function and not any one linking feature (the objects of SYR2K, round sp52's row copy; `VGPU_JIT_LINK_MERGE=0` and `VGPU_JIT_LINK_EXIT=0` are diagnostic switches of this round; `bisect-syr2k.txt`):
+
+| variant | functions | instructions | `rep movs` |
+|---|---:|---:|---:|
+| unlinked | 2 | 10,791 | 0 |
+| linked | 1 | 11,465 | 20 |
+| linked, regions not merged (the EXIT joins the two regions all the same) | 1 | 11,465 | 20 |
+| linked, the EXIT not a region's op (two regions, merged) | 1 | 11,349 | 15 |
+| linked, neither (two functions with linking's code at their branches) | 2 | 10,895 | 0 |
+
+In-code splits (round sp52's `link_nosplit`), the store gate and the links of diverged warps (SYR2K's warps never diverge) are not part of it.
+
+**The two fixes** (both in the text every generated object is made of, linked or not):
+
+* `cprow` (`src/sass/jit_rt.h`): a row is copied by four 32-byte moves written out, not by a loop; `store_row`, `ldrow`, `strow` and the row copies of SEL and FSEL use it. SYR2K's objects hold no string instruction afterwards. This is worth more than the loss that led to it, and to both sides (`ab-syr2k-bisect.json`): the unlinked SYR2K goes from 9.217 to 8.905 s (**1.035**) and the linked one from 9.425 to 9.122 s (1.033), because the four moves are also better code than the compiler's inline expansion of its `memcpy` in the blocks it took for hot ones (the generated code's share of the samples falls from 1,063 to 672 of some 9,000; the objects are 6 to 7 % shorter). The gap between the sides stayed (0.976).
+* The helpers the generator writes into each source (`run_op`, `b0w`, `pmask`, `setp`) are `always_inline`, as those of `jit_rt.h` already were: every escape is an indirect call from its own place, whatever the size of the function. Linked SYR2K 8.951 to 8.883 s, unlinked unchanged (`ab-syr2k-inline.json`).
+
+**What the two fixes leave, counted exactly.** After them the linked SYR2K still measured 1 to 2 % behind the unlinked one, and SYRK with it (`ab-syr2k-inline.json`: SYR2K 8.806 and 8.708 s unlinked, 8.883 s linked; SYRK 4.689 and 4.700 s against 4.739 s), which is the size of the noise between two sides of one setting on this host (see the results below). `stepcount.so` settles what a timing of five runs cannot: over whole warps of the kernel (16 unlinked, 9 linked; `stepcount-syr2k.txt`) every function of the simulator executes the same number of instructions a warp on both sides, to the instruction (`MemoryManager::load_batch`: 1,898,496 a warp, both), and the generated code executes **425,821 instructions a warp unlinked and 456,816 linked: 7.3 % more**, 0.66 % of all the instructions of a warp. All of the difference is moves between registers and the stack frame: 7,857 instructions with a stack operand a warp unlinked, 37,608 linked (232 more in each pass of the loop, two or three an op). The same 95 ops in a function that also holds the kernel's head and tail, the linked branches' tests and two more live values (`fl`, `olo`; `group` and its lane count are variables there, not parameters) get a worse register allocation: the compiler keeps values of the loop in the frame that it kept in registers. That is not a mistake of the generator's that a line can fix, and it is what any kernel of this shape pays for being linked: one that has nothing to gain.
+
+(The count also showed that with linking a warp of SYR2K makes a third region call that runs nothing: the final EXIT, which lanes take, is an entry of the linked region, the generated code leaves before it, and the loop asks the region once more at that entry before it runs the EXIT itself. The statistics had it as "nothing run": 32,759 of SYR2K's calls in round sp52's counts. It costs a call of some hundred instructions a warp and is left as it is.)
+
+**The loop rule.** A section that has a loop (a branch to a lower address) and none of BSSY, BSYNC, CALL and RET is generated without linking (`link_rule_declines` in `src/sass/jit.cpp`; `UnitSpec::nolink`; `VGPU_JIT_LINK_RULE=0` turns the rule off). The reasoning: without a BSSY a compiler's kernel has no branch that can split a warp, so linking's work in diverged warps, at BSSY and BSYNC and at calls never applies; what is left is the untaken EXIT of the bounds test, one region call a warp, and with a loop a warp runs thousands of instructions (SYRK 2,965 warp instructions a region call, SYR2K 6,093) where a kernel without one runs ten to forty (LU, gaussian, the JACOBIs: these stay linked, and gain 6 to 14 %). The decision is made from the section's instructions before anything runs, costs one pass over its ops, and a declined section's text, object and selection are exactly those of a run without `VGPU_JIT_LINK`: its time is the unlinked time by construction. Its effect on the 18 programs (`exits-linked-18.json`, the count of sections left unlinked): one section of SYRK and one of SYR2K, none in the other sixteen programs; SYRK and SYR2K make the region calls of the unlinked run again (0.10 M, of 1,977 and 4,062 warp instructions), and every other program's counts are what they were.
+
+### 2. BSYNC as a region's op
+
+Round sp52 left BSYNC as the largest exit of every diverged program (59 % of black-scholes' remaining region calls, 94 % of bilateral's, 72 % of bh's and silu's): the group arrives at the join of an if and its else, the generated code stops, the loop runs the BSYNC, its chain picks the next group and calls generated code again. This part makes the BSYNC an op of the region (`OpFacts::hostctl` 4). It was built and measured as a part of linking; after the measurement it is an opt-in of its own, `VGPU_JIT_LINK_BSYNC=1` beside `VGPU_JIT_LINK=1`, for the reason in the results below.
+
+**What the generated code does.** Before the op it asks what it asks before every op the chain decides: the chain bit or the link bit is up, and the turn has a call left; if not, it leaves with nothing done and the loop runs the BSYNC. Else it calls the host (`Ctx::bsync`, `jit_bsync` in `src/sass/tier_ops.inc`), which does the loop's own lines for a BSYNC and then the chain's pick:
+
+* the group's lanes are set to the BSYNC's address (the loop sets them when its pass has moved; here always, which is the same state), the lanes the guard lets run wait at the barrier (`tier_bsync`: the barrier is released at once when they complete it, and every lane that waited at it goes on), the lanes the guard kept out go on to the next op;
+* then, as the chain does: the runnable lanes of the warp at the lowest address (`pick_group`) are the next pass's group. The host hands back that group (`Ctx::group`), the op it stands at (the return value and `Ctx::pcs_at`, region-relative) and the lowest place of the runnable lanes outside it (`Ctx::olo`), or `kNoOthers` when there are none;
+* when no lane of the warp can run, or the lowest stands outside the section, the chain starts no pass: the host says `kBsyncOver`, the generated code counts the op, sets `Ctx::over` and leaves, and the loop returns as it does when its chain says no (the turn is not charged).
+
+The generated code counts the BSYNC with the group that ran it, charges the turn one call (`budget`, `extra`), restarts the 256-op run, takes the new group and its lane count, takes the chain bit when no other lane can run and the link bit and the others' place when some can, and goes on at the op the group stands at through the table of the region's entries (the `DISPATCH` label a RET already used; an op that is no entry, or outside the region, is where it leaves, and the loop goes on there with the new group). So all three outcomes of a BSYNC stay inside generated code: **the release** (the last group arrives, the barrier is complete, the joined lanes go on at the next op), **the lanes the guard kept out going on alone**, and **the wait** (the group that arrives first waits, and the group the chain picks next, which stood waiting its turn at a higher address, runs from where it stands). The spin rule is untouched (a BSYNC is no branch; the spin count is the warp's and is neither read nor written here), and what comes after is under the same rules as before: the next branch compares its target with the new `olo`.
+
+On the host's side a region call that ran a BSYNC comes back like one that ran a split: the loop takes `Ctx::group` and the op its lanes' addresses were set to (`JitFrame::regroup`, also when the group is the same lanes, because their addresses have moved), and it takes the pass for a diverged warp's (`lstate` 1, `olo`) or, when `olo` is `kNoOthers`, for the warp's only runnable lanes (`cstate` 1). The context grew by two fields (`bsync`, `over`: ABI 5, generator 6; the metadata word of an op has `hostctl` in three bits).
+
+**Why it is exact.** The host's call is the loop's code for the op followed by the chain's own pick, so the group, the place and the order of everything that follows are the loop's by construction; the conditions under which the generated code may take the chain's part are the ones it already had (the chain or link bit, a call left), and each "no" leaves before the op. Counters: the op is counted once, with the lanes that ran it, before the group changes; the turn is charged exactly when the chain would have charged it.
+
+**What it removes** (the statistics of warm runs, `scripts/count.py`; `exits-linked-nobsync.json` is linking without it and reproduces round sp52's counts to the last call, `exits-linked.json` has BSYNC as a region's op):
+
+| program | region calls M: BSYNC the loop's | a region's op | ratio | warp instructions a call: before | after | BSYNCs run by generated code M | of them with another group next M | region calls that still end at a BSYNC M |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| hecbench/black-scholes-cuda | 67.18 | 29.68 | 2.26 | 16.7 | 40.1 | 59.37 | 18.75 | 0.00 |
+| hecbench/bilateral-cuda | 2.45 | 1.26 | 1.94 | 32.2 | 63.7 | 2.81 | 0.00 | 0.70 |
+| hecbench/bh-cuda | 2.05 | 1.18 | 1.73 | 20.7 | 40.5 | 1.76 | 0.01 | 0.00 |
+| hecbench/silu-cuda | 1.11 | 0.32 | 3.44 | 24.8 | 91.7 | 1.17 | 0.00 | 0.00 |
+| rodinia/hotspot | 1.92 | 1.92 | 1.00 | 33.8 | 34.4 | 1.02 | 0.89 | 0.00 |
+| hecbench/aop-cuda | 0.19 | 0.18 | 1.06 | 37.3 | 59.0 | 0.19 | 0.00 | 0.00 |
+| rodinia/lud | 0.72 | 0.72 | 1.00 | 27.4 | 27.7 | 0.06 | 0.00 | 0.00 |
+| hecbench/bitonic-sort-cuda | 0.42 | 0.73 | 0.57 | 40.3 | 23.8 | 0.17 | 0.00 | 0.00 |
+| rodinia/pathfinder | 0.74 | 0.74 | 1.00 | 11.6 | 11.7 | 0.02 | 0.00 | 0.00 |
+| rodinia/gaussian | 8.49 | 8.48 | 1.00 | 18.1 | 18.1 | 0.01 | 0.00 | 0.00 |
+
+* black-scholes makes 2.26 times fewer region calls (67.2 M to 29.7 M; 115.6 M without linking) and a call now runs 40 warp instructions where it ran 8 before linking. Of its 59.4 M BSYNCs, 18.7 M go on with other lanes than the group that ran them (the wait that hands over to the other half, and the release that joins the halves); the rest leave the group as it was (a warp that did not split releases at once). What is left: a CALL or RET (15.6 M) and a uniform branch (15.6 M) that land above another group, and the store gate.
+* silu's calls fall 3.4 times (what is left is the store gate and the final EXIT: a warp's life), bilateral's and bh's about 2 times. Bilateral keeps 0.70 M region calls that end at a BSYNC, in warps that are not diverged and with ops run before it (a BSYNC that is in no compiled region; which one was not looked for); bh's remaining exits are ops of the interpreter.
+* hotspot's count does not move: the calls that ended at a BSYNC now end at a block barrier (barriers: 30 % of its calls before, 60 % now), which linking does not touch.
+* bitonic-sort makes more region calls than before (0.42 M to 0.73 M, of 24 instructions instead of 40): 0.27 M calls now end at the store gate where none did (with the BSYNC an op of the region, the store that follows it is reached inside generated code, which leaves at the gate; the tier used to meet it). The instructions run in regions are the same (17.4 M against 16.9 M); the time is below.
+* No BSYNC ended a pass (`bsyncs-pass-over` is 0 in every program): in these programs some lane can always run after one.
+
+### 3. The cold compile of the linked object
+
+Round sp52 measured the linked compile at up to 2.7 times the unlinked one and did not say where the time goes. `scripts/compile_cost.sh` separates it: each program runs once on an empty cache in five variants with the generated sources kept (`VGPU_JIT_KEEP=1`), and every source is then compiled again three times with the engine's own command line (the median of user + system seconds; one compiler at a time, the machine lock held). The variants: unlinked; linked; linked with one function a region, as without linking (`VGPU_JIT_LINK_MERGE=0`); linked without the code of in-code splits (the mutant `link_nosplit`); linked without BSYNC as a region's op. The build is the one of the row copy's fix, with BSYNC on with linking (`compile-cost.txt`; "linked, BSYNC not a region's op" is what `VGPU_JIT_LINK=1` alone compiles after this round):
+
+| program | variant | objects | source lines | instructions in the objects | compile s | against unlinked |
+|---|---|---:|---:|---:|---:|---:|
+| hecbench/black-scholes-cuda | unlinked | 1 | 9,413 | 39,870 | 3.39 | 1.00 |
+| | linked, one function a region | 1 | 13,836 | 59,079 | 7.75 | 2.29 |
+| | linked (merged) | 1 | 13,757 | 58,098 | 11.68 | 3.45 |
+| | linked, no split blocks | 1 | 12,983 | 55,901 | 11.50 | 3.39 |
+| | linked, BSYNC not a region's op | 1 | 12,847 | 56,069 | 10.41 | 3.07 |
+| hecbench/bilateral-cuda | unlinked | 3 | 19,769 | 92,232 | 8.45 | 1.00 |
+| | linked, one function a region | 3 | 25,846 | 112,371 | 15.32 | 1.81 |
+| | linked (merged) | 3 | 25,725 | 110,419 | 20.92 | 2.48 |
+| | linked, no split blocks | 3 | 24,504 | 106,944 | 20.53 | 2.43 |
+| | linked, BSYNC not a region's op | 3 | 24,163 | 106,570 | 16.83 | 1.99 |
+| rodinia/hotspot | unlinked | 1 | 4,546 | 16,392 | 1.84 | 1.00 |
+| | linked, one function a region | 1 | 6,585 | 23,613 | 3.12 | 1.70 |
+| | linked (merged) | 1 | 6,515 | 23,180 | 4.06 | 2.21 |
+| | linked, no split blocks | 1 | 6,136 | 22,125 | 3.96 | 2.15 |
+| | linked, BSYNC not a region's op | 1 | 6,484 | 23,104 | 4.04 | 2.20 |
+
+What it says:
+
+* **A little more than half of the extra time is more code, the rest is the merged function.** With linking the regions hold ops they did not hold before (BSSY, the EXITs, CALL and RET, here BSYNC) and so run on where they used to end: the source is 30 to 46 % longer and the objects hold 20 to 46 % more instructions. Compiled as one function a region that is 1.7 to 2.3 times the unlinked compile; black-scholes: 4.4 of its 8.3 extra seconds. Merging the same text into one function adds the other 3.9 s (bilateral 5.6 of 12.5 s, hotspot 0.9 of 2.2 s): the compiler's passes are more than linear in the size of a function, and the per-line cost goes from 0.36 ms (unlinked) to 0.56 ms (linked, a function a region: its regions are longer too) to 0.85 ms (merged).
+* **The code of a branch that splits the group is not it**: without the split blocks the compile is 1 to 3 % shorter.
+* **BSYNC as a region's op costs compile time too**: 12 % on black-scholes (10.41 to 11.68 s), 24 % on bilateral (16.83 to 20.92 s), nothing on hotspot.
+* The compiler's own account (`-ftime-report` of black-scholes' sources) has no single pass to remove: of 12.4 s in the merged function, parsing is 1.1 s, the inlining passes 1.9 s, and the rest is spread over some forty passes of which the largest are "alias stmt walking" (1.1 s; 0.2 s unlinked), RTL PRE (0.8 s), the liveness problems (0.7 s) and jump threading (0.5 s).
+
+**Is there a cheap cut?** A flag would be one. `scripts/flag_sweep.sh` compiles black-scholes' merged source with the engine's command line and one flag set more at a time (`flag-sweep-black-scholes.txt`; the faster of two compiles):
+
+| added flags | compile s | instructions in the object |
+|---|---:|---:|
+| none | 11.61 | 58,098 |
+| `-fno-tree-pre` | 11.63 | 58,098 |
+| `-fno-gcse` | 9.57 | 57,531 |
+| `-fno-thread-jumps` | 10.68 | 58,521 |
+| `--param=sccvn-max-alias-queries-per-access=50` | 10.69 | 58,118 |
+| `--param=dse-max-alias-queries-per-store=32` | 11.56 | 58,098 |
+| `-fno-tree-dse -fno-dse` | 11.36 | 58,365 |
+| `-fno-tree-loop-distribute-patterns` | 11.57 | 58,078 |
+| `-fno-schedule-insns2` | 11.39 | 58,098 |
+| `-fno-ipa-cp -fno-ipa-sra -fno-ipa-icf` | 11.56 | 58,096 |
+| `-fno-tree-pre -fno-gcse -fno-thread-jumps --param=sccvn-max-alias-queries-per-access=50` | 7.92 | 58,445 |
+
+Three of them together take a third off the compile (11.61 to 7.92 s). They are not free at run time: a side of the A/B below ran linked with `VGPU_JIT_FLAGS="-fno-gcse -fno-thread-jumps --param=sccvn-max-alias-queries-per-access=50"` on eight programs (`ab-18.json`, the fifth side; "linked" here is the side with BSYNC, the build it was run on), and the code these flags give is slower on five of them:
+
+| program | linked s | linked, with the three flags s | linked / with the flags |
+|---|---:|---:|---:|
+| rodinia/gaussian | 3.132 | 3.243 | 0.966 |
+| rodinia/hotspot | 0.743 | 0.755 | 0.984 |
+| polybench/JACOBI1D | 0.806 | 0.825 | 0.977 |
+| polybench/JACOBI2D | 0.446 | 0.454 | 0.982 |
+| polybench/3DCONV | 0.579 | 0.586 | 0.988 |
+| polybench/2DCONV | 0.638 | 0.636 | 1.003 |
+| polybench/SYRK | 4.711 | 4.715 | 0.999 |
+| polybench/SYR2K | 9.017 | 8.907 | 1.012 |
+
+**So nothing was changed in the compile.** A flag set that trades a third of a compile that happens once for 1 to 3 % of every run after it is the wrong trade for a tier whose point is the steady state, and the flags were not tried one by one at run time (each is a column of the A/B). What the breakdown says for whoever takes it up: the cost is the size of the functions, so the lever is structural (round sp52's "one function a region and a dispatcher between them" would give back the 3.9 s of merging on black-scholes, not the 4.4 s of more code), and the compile is in the background outside tests, so it delays the gain and costs a core, not the program.
+
+### Tests and mutants
+
+Every change of the round is held by a test that ctest runs on hosted CI (no card, no nvcc; like the other JIT tests they need a host C++ compiler and are skipped in sanitizer builds), and each test was shown to fail under a mutant of what it holds (`-DVGPU_JIT_MUTANTS=ON`, `VGPU_JIT_MUTANT=<name>`; `scripts/mutants.sh`).
+
+* **BSYNC, the generator** (`jit_linked_regions_equal_the_unlinked_code_and_the_run_loop_between_its_calls`, `tests/unit/test_jit_resid.cpp`, ctest `test_jit_resid`): the differential test of round sp52, with a BSYNC among the ops of its random regions (18 % of the cont ops). The host's answer is drawn (`link_bsync`): the pass is over; or the same group, a group that holds it, a part of it, or other lanes altogether; at the next op, at an entry of the region, or anywhere in or around it; with no other lane able to run, or the others' lowest place above the new place or anywhere. The unlinked side plays the loop (`loop_step`): the op counted with the lanes that ran it, no charge when the pass is over, else the turn charged, the group, the chain or link bit and the others' place taken from the answer. Compared as before (registers, predicates, every counter, the turn's calls, the spin count, the log of escapes and host calls in order, the lanes' addresses, the group at the end, where it stopped and where the 256-op run restarted), and in addition `Ctx::over` and the others' place the code ends with. Floors: more than 50 BSYNCs gone on after, more than 30 with another group, more than 20 runs that linked on after one, more than 5 that ended the pass (172, 95, 53 and 14 in 4,320 runs, 0 differences), and the text of the BSYNC is in the source exactly when linking is on.
+* **BSYNC, the host** (`the_groups_of_a_diverged_warp_loop_apart_and_meet_where_the_chain_picks_them`, `tests/unit/test_sass_chain_cont.cpp`; ctest `test_sass_chain_cont_jit_link`, which asks for it with `VGPU_JIT_LINK_BSYNC=1`): a new hand-assembled sm_86 kernel, `diamond_loop_kernel`: an if and its else inside a loop, every iteration a BSSY, a split by lane id, the then part falling into the BSYNC (it waits: the chain's next group is the else part, which stands elsewhere), the else part branching back to it (it completes the barrier: the joined warp goes on). Variants: the warp in halves, one lane apart, never split either way; two and four warps with one shared word, so that the place where a 4,096-call turn ends decides which updates are lost; a warp and a part of one; and with a third group of lanes that never enters the diamond and loops above it, so that after every BSYNC other lanes can run (the link bit, their place, the spin rule letting them in). Words, every launch counter and the clock readings against the interpreter; and the BSYNCs must have been run by generated code (`jit::stats().bsyncs` above 1,000, of them above 500 with another group: 16,025 and 15,314). A new leg, `test_sass_chain_cont_jit_link_nobsync`, runs the same kernels with linking as it is by default.
+* **The row copies and the escapes** (`jit_generated_code_copies_rows_with_vector_moves_not_string_instructions`, `test_jit_resid`): a kernel of SYR2K's shape (the bounds test and its EXIT, a loop of eight steps of four loads, five float ops and a store, the branch back, the final EXIT) is compiled in the cheap form with and without linking and the objects are read with `objdump`: no `rep movs` or `rep stos`, and no call of an out-of-line `run_op`. (Skipped without `objdump`. It is a check of what one compiler makes of the text, so its mutants are evidence for g++ 13, the compiler of the measurements; with another compiler the pristine text must still pass.)
+* **The loop rule** (the same SASS-level test, new ctest leg `test_sass_chain_cont_jit_link_rule`, which runs with the rule; the four `_jit_link` legs of round sp52 and the `_nobsync` leg set `VGPU_JIT_LINK_RULE=0`, because several of their hand-written kernels loop without a barrier, `two_loops_kernel`, which diverges by a plain branch as no compiler's code does, among them): with the rule the sections left unlinked are counted (`jit::stats().link_declined`: at least 10, the kernels that loop without BSSY, BSYNC, CALL or RET; 25 in the run) while the joined, calling and diamond kernels must still have been linked (the floors above); with `VGPU_JIT_LINK_RULE=0` none may be declined.
+
+Mutants (the pristine build passes every test; every mutant fails the test that holds what it breaks; `mutants.log`, the build before the loop rule):
+
+| mutant | what is wrong | unit test (linked) | object test (rows) | SASS test (`_jit_link`) |
+|---|---|---|---|---|
+| `link_bsync_budget` | a BSYNC is run when the turn has no call left | fails | passes | passes |
+| `link_bsync_charge` | the turn is not charged for the chain's part after a BSYNC | fails | passes | fails (the two-warp diamond's shared word: 2,700 against 3,928) |
+| `link_bsync_group` | the generated code goes on with the group it had | fails | passes | fails (a shared word: 5 against 12) |
+| `link_bsync_glanes` | the lane count is not worked out again (counters) | fails | passes | fails (a counter word: 1,744 against 1,792) |
+| `link_bsync_olo` | the others' lowest place is not taken from the host's answer | fails | passes | passes |
+| `link_bsync_fl` | the chain or link bit is not set from the answer (the spin rule afterwards) | fails | passes | passes |
+| `host_bsync_olo` | the host says no other lane can run after a BSYNC | passes (not the generator's) | passes | fails (the diamond beside a side loop: 729 against 946) |
+| `host_bsync_pcs` | the host does not set the group's addresses before the BSYNC | passes (not the generator's) | passes | fails (the joined loops: 10 against 12) |
+| `row_loop` | the row copy is round sp52's loop | passes | fails: 8 + 8 `rep movs` in the two objects | passes |
+| `escape_outline` | the helpers are `static inline` as before | (not run) | fails: 6 + 11 calls of an out-of-line `run_op` (`mutants-escape.log`) | (not run) |
+
+The loop rule's two mutants (`mutants-rule.log`, the final build): `link_rule_never` (the rule declines nothing) passes the leg without the rule and fails the leg with it (0 sections left unlinked where at least 10 are asked for); `link_rule_always` (every section declined) fails both (nothing is linked).
+
+The pristine builds: `tests.log` (the build with the loop rule and BSYNC on with linking: `test_jit` 25 tests, `test_jit_share` 6, `test_jit_resid` 6, and the four run-loop tests plain, with the JIT and with the JIT and linking, and `test_sass_chain_cont` with the rule: sixteen legs, all pass) and `tests-final.log` (the final build, where BSYNC is an opt-in: `test_jit`, `test_jit_resid` and the three linking legs of `test_sass_chain_cont`, all pass; with BSYNC asked for 47,188 ops linked in diverged warps and 16,025 BSYNCs run in generated code; without it 5,556 ops linked and none of the BSYNCs; with the rule 25 sections left unlinked and 44,459 ops linked).
+
+### Results (warm cache, 5 interleaved runs a side, medians of whole-process wall seconds, spread = (max - min) / median)
+
+Sides of one build: JIT; JIT again (the control: the same settings, its own cache); linked (`VGPU_JIT_LINK=1`, BSYNC the run loop's: what the variable is after this round); linked + BSYNC (`VGPU_JIT_LINK_BSYNC=1` as well). "JIT" includes the two fixes of part 1, which change every generated object: against round sp52's JIT the unlinked SYR2K is 1.035 faster (above), so the ratios are within this round's builds, as round sp52's were within its own. Three builds were measured, the later two differing from the first only in what they decide before generating (the loop rule; BSYNC's default): eight programs on the build of the fixes and BSYNC (`ab-18.json`), nine on the build with the loop rule (`ab-18-b.json`), LU, SYRK and SYR2K on the final one (`ab-18-b.json`, `ab-rule.json`). Table by `scripts/table18.py` (`ab-tables.md`):
+
+| program | JIT s (spread) | JIT again s (spread) | linked s (spread) | **JIT / linked** | control JIT / JIT again | linked + BSYNC s (spread) | linked / linked + BSYNC | JIT / linked + BSYNC | outputs |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| hecbench/black-scholes-cuda | 19.295 (2%) | 19.157 (1%) | 15.699 (1%) | **1.229** | 1.007 | 15.035 (1%) | 1.044 | 1.283 | same |
+| polybench/LU | 23.638 (1%) | 23.855 (8%) | 22.361 (8%) | **1.057** | 0.991 | 22.344 (5%) | 1.001 | 1.058 | same |
+| rodinia/gaussian | 3.350 (2%) | 3.348 (1%) | 3.138 (1%) | **1.068** | 1.000 | 3.132 (1%) | 1.002 | 1.069 | same |
+| rodinia/hotspot | 0.841 (2%) | 0.858 (3%) | 0.744 (1%) | **1.130** | 0.981 | 0.743 (2%) | 1.001 | 1.131 | same |
+| polybench/SYRK | 4.715 (2%) | 4.742 (2%) | 4.703 (3%) | **1.003** | 0.994 | (no BSYNC in it) | - | - | same |
+| polybench/SYR2K | 8.862 (2%) | 8.833 (4%) | 8.910 (7%) | **0.995** | 1.003 | (no BSYNC in it) | - | - | same |
+| polybench/JACOBI1D | 0.912 (8%) | 0.911 (1%) | 0.797 (1%) | **1.144** | 1.002 | 0.806 (2%) | 0.989 | 1.132 | same |
+| polybench/JACOBI2D | 0.479 (1%) | 0.478 (4%) | 0.447 (2%) | **1.070** | 1.001 | 0.446 (1%) | 1.003 | 1.073 | same |
+| polybench/3DCONV | 0.590 (1%) | 0.589 (1%) | 0.580 (1%) | **1.017** | 1.002 | 0.579 (2%) | 1.001 | 1.018 | same |
+| polybench/2DCONV | 0.651 (3%) | 0.652 (2%) | 0.640 (3%) | **1.018** | 0.999 | 0.638 (2%) | 1.003 | 1.021 | same |
+| rodinia/lud | 2.895 (1%) | 2.902 (0%) | 2.890 (0%) | **1.002** | 0.998 | 2.917 (1%) | 0.991 | 0.992 | same |
+| rodinia/backprop | 0.507 (27%) | 0.505 (0%) | 0.507 (1%) | **1.001** | 1.005 | 0.511 (1%) | 0.991 | 0.992 | same |
+| rodinia/pathfinder | 0.513 (4%) | 0.520 (3%) | 0.520 (4%) | **0.987** | 0.988 | 0.525 (3%) | 0.991 | 0.979 | same |
+| hecbench/bilateral-cuda | 1.030 (1%) | 1.036 (6%) | 0.913 (1%) | **1.128** | 0.994 | 0.918 (0%) | 0.995 | 1.122 | same |
+| hecbench/bh-cuda | 0.593 (2%) | 0.592 (1%) | 0.573 (30%) | **1.035** | 1.002 | 0.545 (1%) | 1.051 | 1.088 | same |
+| hecbench/silu-cuda | 0.364 (4%) | 0.366 (2%) | 0.338 (1%) | **1.077** | 0.996 | 0.315 (2%) | 1.073 | 1.156 | same |
+| hecbench/aop-cuda | 1.797 (1%) | 1.801 (1%) | 1.804 (2%) | **0.996** | 0.998 | 1.798 (2%) | 1.003 | 1.000 | same |
+| hecbench/bitonic-sort-cuda | 0.202 (1%) | 0.201 (2%) | 0.189 (3%) | **1.065** | 1.002 | 0.200 (1%) | 0.945 | 1.006 | same |
+
+geometric mean JIT / linked: **1.0549** over 18 programs (0.987 to 1.229); control: 0.9979 (0.981 to 1.007); linked / linked + BSYNC over 16 programs: 1.0048 (0.945 to 1.073); JIT / linked + BSYNC: 1.0673
+
+| program | JIT s (spread) | JIT again s (spread) | linked (left unlinked by the rule) s (spread) | linked, `VGPU_JIT_LINK_RULE=0` s (spread) | JIT / linked | JIT / linked, rule off | control |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| polybench/SYR2K | 8.862 (2%) | 8.833 (4%) | 8.910 (7%) | 8.876 (3%) | 0.995 | 0.998 | 1.003 |
+| polybench/SYRK | 4.715 (2%) | 4.742 (2%) | 4.703 (3%) | 4.706 (2%) | 1.003 | 1.002 | 0.994 |
+
+Reading it:
+
+* **SYR2K is where the JIT is: 0.995 (8.862 against 8.910 s, that side with a spread of 7 %; control 1.003), and SYRK 1.003**: the loop rule leaves both unlinked, and their generated text is the unlinked text. With the rule off (`VGPU_JIT_LINK_RULE=0`) the two fixes alone put the linked SYR2K at 0.998 and SYRK at 1.002 in the same batch (second table); earlier measurements of the same code gave 0.991 and 0.977 for SYR2K, against round sp52's 0.967 to 0.978 before the fixes. The resolution of a five-run median on this host is no better than a per cent or two: in the first batch SYR2K's two linked sides ran the same object (it has no BSYNC) and measured 8.811 and 9.017 s, 2.3 % apart, and JACOBI1D's two 1.1 % apart. What is certain is the instruction count (0.66 % more with linking), and that the rule takes the kernel out of the question.
+* **Linking as it is now**: **nine programs gain 5 % or more** (black-scholes 1.229, JACOBI1D 1.144, hotspot 1.130, bilateral 1.128, silu 1.077, JACOBI2D 1.070, gaussian 1.068, bitonic-sort 1.065, LU 1.057), the geometric mean of the 18 is 1.055 (control 0.998), as in round sp52 (1.051), **and no program is below its control.** The lowest are pathfinder 0.987 (control 0.988: its two JIT sides are 0.513 and 0.520 s) and aop 0.996 (control 0.998).
+* **BSYNC as a region's op does not clear its bar.** It gains 5 % or more on two programs, silu (1.073: 0.338 to 0.315 s) and bh (1.051: 0.573 to 0.545 s, the first of these a side with one disturbed run), and 4.4 % on black-scholes (15.70 to 15.04 s; 1.283 against the JIT where linking alone is 1.229). It loses 5.5 % on bitonic-sort (0.189 to 0.200 s: the region calls it adds at the store gate, above) and measures 0.991 on lud, backprop and pathfinder and 0.995 on bilateral, which is inside the noise shown above but below the 0.995 the round asked of every program. The bar was 5 % on three programs with none below 0.995: **it is not on by default.** It stays in the tree as an opt-in of its own, `VGPU_JIT_LINK_BSYNC=1`, with its tests, because it is exact, the three diverged programs it was built for do gain, and the losses have a visible cause that is not BSYNC itself: every function that holds a BSYNC gets the entry table's label (`DISPATCH`) as a way into each of its stretches, and the regions on both sides of the BSYNC become one, so the compiler has a larger function with more paths (the same effect as SYR2K's, part 1), and in bitonic-sort the store gate moves into generated code. Two things would be tried next: going on at the next op directly when the group that goes on stands there (the release and the lanes kept out: most BSYNCs) and leaving for the other cases, so that no entry table is needed; and not making a BSYNC a region's op in a section whose warps mostly leave generated code at barriers. (Whether to keep an opt-in that missed its bar in the tree at all is a decision for the review: it is one commit's worth of code, switched by one function.)
+
+### Same bits
+
+`scripts/verify.py` on the final build, reference: the tier. Variants: the JIT, the JIT with linking, the JIT with linking and `VGPU_JIT_LINK_BSYNC=1`, each on a cold and then a warm cache; compared: the normalised output, `VGPU_COUNTERS_FILE` (every launch), `VGPU_KERNEL_DIGEST` and the exit status, at 1 and 4 threads (`same-bits.log`).
+
+Thirteen programs, three variants, cold and warm, two thread counts: 156 comparisons. **126 are equal in all four things**: ten programs in every variant at both thread counts (gaussian, hotspot, SYR2K, JACOBI1D, lud, pathfinder, bilateral, aop, bitonic-sort, black-scholes), and bh at one thread. The other 30 are the three programs that round sp52 showed not to be deterministic on the tier itself: backprop and silu differ in the kernel digest only (output, counters and exit status equal in all 24 comparisons), and bh at 4 threads in counters and digest (output and exit status equal). They differ for the JIT without linking exactly as with it and with BSYNC.
+
+The full form with linking on real programs, which is what the wrong result of part 0 needed and what no measurement of either round had run (`same-bits-full-form.log`): hotspot, lud, pathfinder and bilateral at 1 and 4 threads, cold and warm, and bh at one thread, with `VGPU_JIT_LINK=1 VGPU_JIT_RESIDENCE=1 VGPU_JIT_SPECIALIZE=1` and with `VGPU_JIT_LINK_BSYNC=1` on top: **36 of 36 equal to the tier** in output, counters, digest and exit status. The same form with the bug of part 0 put back (`VGPU_JIT_MUTANT=res_stop_keep`) is equal on hotspot, lud and pathfinder, **gives another output, other counters and another digest on bilateral in all four runs**, and does not end on bh (stopped after 8 minutes of a 0.6 s program; the run was ended there, so aop and bh at 4 threads are not in the log). That is the wrong result of CI's stage on a program these hosts can run, and its absence with the fix.
+
+The A/B compares the normalised output of every run of every side: equal on all 18 programs (the `outputs` column).
+
+### Verdict
+
+* **The wrong result CI found (part 0): a real bug of round sp52's merging with register residence, one argument wrong in the generator; fixed, and held by a test of all sixteen forms that fails with the bug put back.** It is confirmed here by the generator's test and on real programs in the full form (bilateral: wrong output with the bug put back, the tier's with the fix); the failing CI stage itself has to confirm it.
+* **SYR2K (part 1): found, fixed where it could be, and ruled out where it could not.** The loss was the compiler's treatment of the generated text in a large function: row copies turned into `rep movsl` in blocks taken for cold (fixed for every object: 1.035 on SYR2K with or without linking), escapes called out of line (fixed), and a worse register allocation for the same loop (7.3 % more instructions in the generated code, 0.66 % in all; not fixable in the generator). The loop rule leaves sections like it unlinked.
+* **BSYNC (part 2): built, exact, measured, below the bar; an opt-in of its own** (`VGPU_JIT_LINK_BSYNC=1`), not part of `VGPU_JIT_LINK=1`.
+* **The linked compile (part 3): broken down; no cheap fix found.** A little more than half of the extra time is more code in the regions and the rest the merged function's size; the compiler flags that take a third off cost 1 to 3 % at run time and were not taken.
+* `VGPU_JIT_LINK=1` stays an opt-in. Of round sp52's three reasons the first is gone (SYR2K); the second (the `e2e_sass_jit` shards with linking have not run: no nvcc on the hosts of these rounds) and the third (the first run pays a longer compile) stand.
+
+### Caveats and what is not solid
+
+* One machine, shared with two to three other sessions that were building and measuring through the same lock all afternoon; every timing is 5 interleaved runs in one hold of the lock. Two sides that run the same object differed by up to 2.3 % (SYR2K) in one batch: ratios within 1 to 2 % of 1 are not resolved by this protocol, and several statements above rest on that being so (the linked SYR2K with the rule off; the 0.991s of BSYNC).
+* The table is of three builds (above). They differ in decisions taken before the generator runs, and the rule's count shows which sections it touches, but the eight programs of the first batch were not timed again on the final build.
+* The instruction counts are of SYR2K only, two windows (16 and 9 warps), one object a side; "a worse register allocation" is read from the kinds of the instructions (stack operands), not from the compiler.
+* The object test (`rep movs`, out-of-line `run_op`) checks what g++ 13.3 makes of one kernel shape; another compiler or version may turn other text into string instructions. The row copy's cause (the loop recognised as a `memcpy`, then expanded for size in a block taken for cold) is inferred from the objects and the bisect, not from the compiler's dumps. Only SYR2K's objects were read for string instructions after the fix.
+* The loop rule is static: a kernel with a short loop and an untaken EXIT in front of it (a few iterations of a few ops, launched many times) would be left unlinked and lose the gain of a kernel like JACOBI's. None of the 18 programs is of that kind. A hand-written kernel that diverges by a plain branch with no BSSY is also left unlinked (`two_loops_kernel` of the tests, which is why their legs turn the rule off; round sp52's `scripts/mutants.sh` needs `VGPU_JIT_LINK_RULE=0` in its environment now for the same reason).
+* BSYNC: the host's "the pass is over" path (`kBsyncOver`) never ran in a real program or in the SASS-level test (no kernel of either leaves a warp with no runnable lane at a BSYNC); it is held by the unit test's drawn answers only, and it has no host mutant. The exit that bilateral keeps at a BSYNC was not explained.
+* Not run: the `e2e_sass_jit` shards and the nightly matrix (no nvcc on the allowed hosts), a sanitizer build, g++-12 (server3 has g++ 13 only, and nothing may be compiled on the WSL machine), a build without the mutation hooks, the baseline SIMD level, `VGPU_JIT_RESIDENCE=1` / `VGPU_JIT_SPECIALIZE=1` / `VGPU_JIT_FUSE=1` with BSYNC on real programs (the unit test compiles the full form), the background compile.
+* The mutants of BSYNC and of the row copy were run on the build before the loop rule (`mutants.log`, whose columns the script cut to a fixed width); the generator's text for them did not change afterwards. After the fix of part 0 (which changes generated text only with residence) `test_jit_resid` was run again in full (7 tests pass, `matrix.log`), the rule's mutants, the counts, SYR2K's and SYRK's timing and the same-bits runs are of that final build, and the SASS-level legs were not run again. `tests.log` is of the build before BSYNC became an opt-in: the linking legs of the other three run-loop tests (store gate, ALU runs, dispatch counts) were not run again on the final build, where their environment (`VGPU_JIT_LINK_BSYNC=1`) means what the default meant before.
+* Deviations from the round's rules: one hold of the machine lock ran 26 minutes (a build and sixteen test legs; the limit was about 20) and two others about 20; `cmake` was configured once outside the lock (2 s); a disassembly was written to `/tmp` and removed in the same command.
+* Cleanup: the scratch tree of the round on server3 (`~/.cache/sp53`) was removed by exact path.

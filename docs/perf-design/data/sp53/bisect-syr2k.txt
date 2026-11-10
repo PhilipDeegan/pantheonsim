@@ -1,0 +1,10 @@
+polybench/SYR2K row-copy=loop unlinked: functions 2, instructions 10791, rep movs 0, source lines 1925
+polybench/SYR2K row-copy=loop linked: functions 1, instructions 11465, rep movs 20, source lines 1995
+polybench/SYR2K row-copy=loop linked-nomerge: functions 1, instructions 11465, rep movs 20, source lines 1995
+polybench/SYR2K row-copy=loop linked-noexit: functions 1, instructions 11349, rep movs 15, source lines 1938
+polybench/SYR2K row-copy=loop linked-nomerge-noexit: functions 2, instructions 10895, rep movs 0, source lines 1954
+polybench/SYR2K row-copy=moves unlinked: functions 2, instructions 9990, rep movs 0, source lines 1924
+polybench/SYR2K row-copy=moves linked: functions 1, instructions 10759, rep movs 0, source lines 1994
+polybench/SYR2K row-copy=moves linked-nomerge: functions 1, instructions 10759, rep movs 0, source lines 1994
+polybench/SYR2K row-copy=moves linked-noexit: functions 1, instructions 10627, rep movs 0, source lines 1937
+polybench/SYR2K row-copy=moves linked-nomerge-noexit: functions 2, instructions 10107, rep movs 0, source lines 1953
