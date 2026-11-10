@@ -42,11 +42,43 @@ a physical GPU and against this implementation, then diffs:
 | `sgemv`, `saxpy`, `sscal`, `sdot`, `snrm2` | agree to ~1e-7 relative |
 | `?axpy`, `?scal`, `?dot`, `?nrm2`, `i?amax`, `?tbmv` in single and double, negative increments included (`cublas_level1`) | agree to the harness's tolerance; every index identical |
 
-Every GEMM path is bit-identical to hardware. The level-1 and level-2 routines
+Every GEMM path is bit-identical to hardware in the default math mode (the TF32 and FP16/BF16 fast paths are the next
+section). The level-1 and level-2 routines
 differ in the last digit because reductions do not associate the same way on a
 GPU as on a CPU — a real GPU does not reproduce its own results bit-for-bit
 across architectures either, so the harness compares those with a tolerance
 (`nvidia/tests/conformance/compare_numeric.py`).
+
+## TF32, FP16 and BF16 inputs (tensor-core math modes)
+
+A GEMM on a tensor core converts each FP32 element of A and B to a narrower format before the multiply (the
+products are exact, the sums FP32). The host-computed routines do the same, to A and B only, never to C, and then
+run their usual FP32 sum. `nvidia/src/gemm_input_rounding.hpp` holds the rules and the measurements behind them
+(RTX 3060, cuBLAS 13.0); `nvidia/tests/e2e/blas_tf32_rounding.cu` checks every one of them and passes on the card
+and on the simulator.
+
+| asked for | conversion of each FP32 input |
+| --- | --- |
+| `cublasSetMathMode(CUBLAS_TF32_TENSOR_OP_MATH)` on `Sgemm`, `SgemmEx`, `Cgemm`, the batched forms, `GemmEx` with `CUBLAS_COMPUTE_32F` | TF32: 10 mantissa bits, nearest, **ties away from zero** (`1 + 2^-11` becomes `1 + 2^-10`; round-to-even would give 1) |
+| compute type `CUBLAS_COMPUTE_32F_FAST_TF32` on `GemmEx`, its batched forms and `cublasLtMatmul`, in any math mode | TF32, as above |
+| `CUBLAS_COMPUTE_32F_FAST_16F`, or the deprecated `CUBLAS_TENSOR_OP_MATH` on `Sgemm` / `GemmEx(32F)` | FP16, nearest even (overflow to infinity) |
+| `CUBLAS_COMPUTE_32F_FAST_16BF` | BF16, nearest even |
+| default or pedantic math mode, `CUBLAS_COMPUTE_32F`, `CUBLAS_COMPUTE_32F_PEDANTIC` | none |
+
+`cublasLtMatmul` never reads the handle's math mode, only its descriptor's compute type. `Ssyrk`, `Ssymm`, `Strmm` and
+the other non-GEMM routines do not convert in any mode. `NVIDIA_TF32_OVERRIDE=0` in the environment turns TF32 off
+everywhere, explicit `FAST_TF32` included (read once, on first use).
+
+One thing is a model rather than a measurement: **which sizes get the tensor-core kernel**. On the card a small product
+runs a plain FP32 kernel whatever the mode says (a 16x16x16 `Sgemm` in TF32 mode is bit-identical to the default one;
+so is any `n = 1` or `m < 4` shape), and cuBLAS's own heuristic switches over at about `m * n * k = 2^21`. The
+simulator converts when `m >= 4`, `n >= 2` and `m * n * k >= 2^21`, per matrix of a batch. That matches the card for
+the shapes real programs use (a 128x128x128 product converts on both, which is what cuTAGI's TF32 test needs) and was
+measured over `m, n, k` in 1..1024 for `Sgemm`, `GemmEx` and `Lt`, all four transposes; it differs from the card for a few
+`(m, n, k)` where the card keeps the FP32 kernel up to `2^22`-`2^24` (large `m` and `n` with a small `k`), for batches
+(the card counts the batch, a batched `m = 3` product converts there and not here), and for FP16/BF16 kernels at `m = 3`.
+Other GPUs may switch at other sizes (an H100's heuristic was not measured). The sums themselves are the host's FP32
+sums, not a tensor core's accumulation order, so a result agrees with the card to FP32 rounding, not bit for bit.
 
 ## What is implemented
 

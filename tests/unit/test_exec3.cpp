@@ -684,6 +684,51 @@ VTEST(wmma_m16n16k16_matmul) {
     VCHECK_EQ(as_f32(e.mem.load_scalar(out + l * 4, 4)), 96.0f);  // 16 * 2 * 3
 }
 
+// tiny-cuda-nn's fused backward pass loads the "forward activations" fragment of its last layer from a null pointer and reads nothing of
+// it (that layer has no activation function): ptxas removes the load as dead code, so on a card the address is never touched. Run as
+// written, the PTX engine read address 0 and stopped the program (an invalid-pointer error). A wmma.load whose registers nothing reads
+// is a nop; one whose registers are read still faults on a bad address.
+static std::string wmma_load_null_ptx(bool use_result) {
+  return std::string(kHeader) + R"(
+.visible .entry k(.param .u64 out)
+{
+    .reg .b32 %r<24>;
+    .reg .f32 %f<10>;
+    .reg .b64 %rd<8>;
+    ld.param.u64 %rd1, [out];
+    cvta.to.global.u64 %rd2, %rd1;
+    mov.u64 %rd5, 0;                  // a null base
+    mov.u32 %r20, 16;
+    wmma.load.a.sync.aligned.row.m16n16k16.f16 {%r1, %r2, %r3, %r4, %r5, %r6, %r7, %r8}, [%rd5], %r20;
+    mov.u32 %r10, 7;
+)" + (use_result ? "    add.u32 %r10, %r10, %r1;\n" : "") + R"(
+    mov.u32 %r11, %laneid;
+    mul.wide.u32 %rd3, %r11, 4;
+    add.s64 %rd4, %rd2, %rd3;
+    st.global.u32 [%rd4], %r10;
+    ret;
+}
+)";
+}
+VTEST(a_wmma_load_nothing_reads_is_dead_code_and_never_touches_its_address) {
+  Env e;
+  auto m = ptx::parse(wmma_load_null_ptx(false));
+  uint64_t out = e.mem.alloc(32 * 4);
+  LaunchConfig cfg;
+  cfg.block = {32, 1, 1};
+  exec::launch(m.entries[0], cfg, {arg_u64(out)}, e.mem, e.prof);
+  for (uint32_t l = 0; l < 32; ++l) VCHECK_EQ(e.mem.load_scalar(out + l * 4, 4), uint64_t{7});
+}
+VTEST(a_wmma_load_whose_registers_are_read_still_faults_on_a_bad_address) {
+  Env e;
+  auto m = ptx::parse(wmma_load_null_ptx(true));
+  uint64_t out = e.mem.alloc(32 * 4);
+  LaunchConfig cfg;
+  cfg.block = {32, 1, 1};
+  auto err = VCAPTURE(Error, exec::launch(m.entries[0], cfg, {arg_u64(out)}, e.mem, e.prof));
+  VCHECK_CONTAINS(err.what(), "read at 0x0");
+}
+
 VTEST(wmma_accumulator_is_added) {
   // Same as above but with a non-zero C: D = A*B + C = 96 + 10 = 106.
   std::string ptx = std::string(kHeader) + R"(

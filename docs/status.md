@@ -9,7 +9,7 @@ This is what runs today and what does not. [TODO.md](../TODO.md) has the long li
 - **`shfl.sync` bug.** It returns 0 for a lane of the mask that is still in a long loop, and reports nothing ([#488](https://github.com/pantheongpu/pantheonsim/issues/488)). Other unsupported instructions and API calls fail with an error that names them.
 - **Shared cudart only.** Build CUDA programs with `nvcc -cudart shared`. Hosting a static cudart needs NVIDIA's undocumented driver export tables ([TODO.md](../TODO.md), "Next milestones"). CuPy links it statically and does not run ([nvidia/docs/jit.md](../nvidia/docs/jit.md)).
 - **Not supported:** OptiX; NVIDIA's Nsight Systems and Nsight Compute (`vgpu ncu` is our own `ncu`, and `nsys` collects no CUDA data); NVDEC for MPEG-1, MPEG-4, VC-1, VP8, VP9 and AV1.
-- **Smaller gaps.** The `wmma` fragment layout is our own, because PTX leaves it open ([ARCHITECTURE.md](../ARCHITECTURE.md), D8). Branch reconvergence is min-PC, so irreducible control flow is not handled.
+- **Smaller gaps.** The `wmma` fragment layout is the Turing-and-later one, measured on an RTX 3060 (Volta was not measured; [ARCHITECTURE.md](../ARCHITECTURE.md), D8). Branch reconvergence is min-PC, so irreducible control flow is not handled.
 
 ## GPU profiles
 

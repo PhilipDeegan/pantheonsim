@@ -409,6 +409,7 @@ void transform(const Plan& p, const Geometry& g, const std::vector<char>& hin,
 // The single implementation behind every single-GPU Exec entry point. Reads
 // the whole input, transforms batch by batch, writes the whole output.
 cufftResult exec_plan(const Plan* p, const void* idata, void* odata, int direction, bool wait);
+Plan host_plan(const Plan& p, bool packed_real_side);   // below, with the multi-GPU code that shares it
 
 cufftResult exec(cufftHandle handle, const void* idata, void* odata, int direction) {
   Plan* p = find(handle);
@@ -434,8 +435,19 @@ cufftResult exec(cufftHandle handle, const void* idata, void* odata, int directi
 
 // The transform itself, past the checks. `wait` is whether the stream is waited for first (not when the
 // graph that runs this is itself on that stream).
-cufftResult exec_plan(const Plan* p, const void* idata, void* odata, int direction, bool wait) {
-  if (wait) cudaStreamSynchronize(p->stream);
+cufftResult exec_plan(const Plan* plan, const void* idata, void* odata, int direction, bool wait) {
+  if (wait) cudaStreamSynchronize(plan->stream);
+  // An in-place real transform (R2C, D2Z, C2R, Z2D on one buffer, default layout) keeps its real side padded: every
+  // row of the fastest axis is 2 * (n / 2 + 1) reals, so the real array is as wide as the complex one it turns into
+  // (and a batch's distance is the complex one, in reals). Reading it as dense, as an out-of-place plan does, takes
+  // every row after the first from the wrong place (pantheonsim #548; on an RTX 3060 in-place and out-of-place give the
+  // same bits). A plan with an advanced layout (cufftPlanMany with embeds) says where its elements are itself.
+  Plan padded;
+  const Plan* p = plan;
+  if (idata == odata && !is_c2c(plan->type) && plan->iembed.empty() && plan->oembed.empty() && plan->gpus.size() <= 1) {
+    padded = host_plan(*plan, false);
+    p = &padded;
+  }
   const Geometry g = geometry(*p);
   // The output is read first so the gaps a strided or padded layout leaves
   // keep what they held; an in-place transform reads the input just after.

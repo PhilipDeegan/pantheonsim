@@ -22,6 +22,7 @@
 #include "vgpu/sass/exec.hpp"
 #include "vgpu/host_gpu_rt.hpp"
 #include "vgpu/exec/launch_env.hpp"
+#include "vgpu/host_stats.hpp"
 #include "vgpu/exec/lockstep.hpp"
 
 #include <map>
@@ -1147,6 +1148,7 @@ void Device::enable_memo(const memo::Config& cfg) {
 Device::Device(DeviceProfile profile, int ordinal, telemetry::Publisher* telemetry, int physical)
     : profile_(std::move(profile)), ordinal_(ordinal), physical_(physical < 0 ? ordinal : physical),
       mem_(profile_.vram_bytes, static_cast<uint32_t>(physical_)), telemetry_(telemetry) {
+  host_stats_start();   // VGPU_HOST_STATS (vgpu/host_stats.hpp)
   if (const char* c = std::getenv("VGPU_LAUNCH_CACHE"); c && c[0] == '0' && c[1] == 0) launch_cache_ = false;
   // AMD's HIP allocates device memory by the 4 KB page (MemoryManager::
   // set_page_size says what that lets a kernel read).

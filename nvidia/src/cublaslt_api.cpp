@@ -45,6 +45,7 @@
 
 #include <cuda_runtime.h>
 
+#include "gemm_input_rounding.hpp"
 #include "host_gemm.hpp"
 #include "vgpu/profiling.hpp"
 #include "enum_value.hpp"
@@ -1441,6 +1442,28 @@ cublasStatus_t matmul_run(const MatmulDesc& md, const MatrixLayout& la, const Ma
     Elems ea, eb, ec, ed;
     ea.load(base(A, la), span(la), la.type);
     eb.load(base(B, lb), span(lb), lb.type);
+    // FAST_TF32, FAST_16F and FAST_16BF: a tensor-core kernel converts the FP32 inputs first (see gemm_input_rounding.hpp;
+    // the handle's math mode is not read here, as on the card).
+    if (md.compute == CUBLAS_COMPUTE_32F_FAST_TF32 || md.compute == CUBLAS_COMPUTE_32F_FAST_16F ||
+        md.compute == CUBLAS_COMPUTE_32F_FAST_16BF) {
+      using vgpu::gemmround::Kind;
+      const Kind want = md.compute == CUBLAS_COMPUTE_32F_FAST_TF32 ? Kind::Tf32
+                        : md.compute == CUBLAS_COMPUTE_32F_FAST_16F ? Kind::Fp16 : Kind::Bf16;
+      const Kind rk = vgpu::gemmround::effective(want, true, false, 0, m, n, k);
+      auto round_f32 = [rk](Elems& e) {
+        if (e.t != CUDA_R_32F || e.raw.size() < 4) return;
+        for (size_t i = 0; i < e.raw.size() / 4; ++i) {
+          float x;
+          std::memcpy(&x, e.raw.data() + 4 * i, 4);
+          x = vgpu::gemmround::round_to(x, rk);
+          std::memcpy(e.raw.data() + 4 * i, &x, 4);
+        }
+      };
+      if (rk != Kind::None) {
+        round_f32(ea);
+        round_f32(eb);
+      }
+    }
     if (C && any_beta) ec.load(base(C, lc), span(lc), lc.type);
     // D is read too, so the gaps a leading dimension leaves come back untouched.
     uint8_t* dptr = static_cast<uint8_t*>(D) + batch_offset_bytes(ld, bi);

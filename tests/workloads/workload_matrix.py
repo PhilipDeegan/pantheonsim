@@ -7,9 +7,13 @@ of them and prints a Markdown table with a row per workload and a column per
 machine, failures first, so the page answers "what broke, and where" before
 anything else.
 
-    python3 tests/workloads/workload_matrix.py results/ > matrix.md
+    python3 tests/workloads/workload_matrix.py results/ [expected-machines [workflow.yml]] > matrix.md
+
+With the workflow file the page names the machines whose job left no report (a runner that
+was lost mid-build writes nothing, and the count alone does not say which).
 """
 import pathlib
+import re
 import sys
 
 MARK = {"PASS": "✅", "SKIP": "➖", "FAIL": "❌", "TIMEOUT": "⏱️", "MISSING": "🚫"}
@@ -29,7 +33,14 @@ def load(root):
     return machines
 
 
-def render(machines, expected=None):
+def missing_keys(root, workflow):
+    """Machine keys in the workflow's matrix whose report directory (workloads-<key>) never arrived."""
+    keys = re.findall(r"\{\s*key:\s*([A-Za-z0-9._-]+)\s*,", pathlib.Path(workflow).read_text())
+    have = {p.parent.name for p in pathlib.Path(root).glob("**/results.tsv")}
+    return [k for k in keys if f"workloads-{k}" not in have and k not in have]
+
+
+def render(machines, expected=None, missing=None):
     if not machines:
         return "No machine wrote results: every job failed before running a workload.\n"
     out = []
@@ -46,6 +57,8 @@ def render(machines, expected=None):
         out.append(f"{len(broken)} of {len(names)} workloads fail somewhere; {total_bad} failures across {len(machines)} machines.")
     if missing_machines > 0:
         out.append(f"{missing_machines} machine(s) wrote no results at all (see their jobs).")
+        if missing:
+            out.append("Without results: " + ", ".join(f"`{k}`" for k in missing) + ".")
     out.append("")
     out.append("✅ pass · ❌ fail · ⏱️ timeout · 🚫 did not build · ➖ out of scope")
     out.append("")
@@ -70,4 +83,5 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     expected = int(sys.argv[2]) if len(sys.argv) > 2 else None
-    sys.stdout.write(render(load(sys.argv[1]), expected))
+    missing = missing_keys(sys.argv[1], sys.argv[3]) if len(sys.argv) > 3 else None
+    sys.stdout.write(render(load(sys.argv[1]), expected, missing))

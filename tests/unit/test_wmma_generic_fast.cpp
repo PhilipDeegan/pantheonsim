@@ -1,9 +1,9 @@
-// The PTX engine's tile route for wmma.mma on the shapes and types its tile (m16n16k16, f16 and bf16) does not take -- m32n8k16 and m8n32k16 of
+// The PTX engine's tile route for wmma.mma -- m16n16k16, m32n8k16 and m8n32k16 of
 // f16, bf16, s8 and u8, m16n16k8 of tf32, m8n8k32 of s4 and u4, m8n8k4 of f64 in all four rounding modes, f16 and f32 accumulators and results
 // in every pairing -- against the general form (VGPU_FASTPATH=0), bit for bit, on an RTX A10 (sm_86: the card-measured chunked sum) and an A100
 // (the plain f32 sum), with fragments of random bits drawn from the classes that break arithmetic (zeros of both signs, subnormals, infinities,
-// NaNs, the extremes, wide and narrow exponents, integers at their limits, accumulators near the s32 limits). Single-bit and 16x16x16 forms are
-// run too: the route leaves them to the general form, and must give the same answer by leaving. And mma.sync.m8n8k4 (Volta's f16 form: four 8x8x4
+// NaNs, the extremes, wide and narrow exponents, integers at their limits, accumulators near the s32 limits). Single-bit forms are run too: the
+// route leaves them to the general form, and must give the same answer by leaving. And mma.sync.m8n8k4 (Volta's f16 form: four 8x8x4
 // products, f16 or f32 C and D in every pairing, all four layouts), whose products go through the same kernel.
 #include <cstdlib>
 #include <cstring>

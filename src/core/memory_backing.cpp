@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstdlib>
+#include <atomic>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -30,6 +31,8 @@
 
 namespace vgpu::backing {
 namespace {
+std::atomic<uint64_t> g_madvise_dontneed{0};   // see kernel_calls()
+std::atomic<uint64_t> g_arena_maps{0};
 
 // Heap chunks come from arenas: mappings of kArenaBytes, aligned to the huge page, that the kernel is asked to back with huge pages
 // (a program that fills gigabytes of device memory takes one page fault for each 2 MiB, not 512). A fresh mapping reads as zero.
@@ -242,6 +245,7 @@ void make_cold(State& s, uint8_t* chunk) {
   (void)s;
   delete[] chunk;
 #else
+  g_madvise_dontneed.fetch_add(1, std::memory_order_relaxed);
   if (::madvise(chunk, kChunkSize, MADV_DONTNEED) != 0) std::memset(chunk, 0, kChunkSize);
   s.cold.push_back(chunk);
 #endif
@@ -423,6 +427,7 @@ uint8_t* arena_chunk(State& s) {
   }
   if (s.arena_next == s.arena_end) {
     // (the head and tail the alignment leaves stay mapped and untouched: they cost no memory)
+    g_arena_maps.fetch_add(1, std::memory_order_relaxed);
     void* m = ::mmap(nullptr, kArenaBytes + kHugePage, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (m == MAP_FAILED) {
       s.ram -= kChunkSize;
@@ -496,6 +501,7 @@ void give_back(State& s, uint8_t* chunk) {
   (void)s;
   delete[] chunk;
 #else
+  g_madvise_dontneed.fetch_add(1, std::memory_order_relaxed);
   if (::madvise(chunk, kChunkSize, MADV_DONTNEED) != 0) std::memset(chunk, 0, kChunkSize);
   std::lock_guard<std::mutex> lock(s.mu);
   s.cold.push_back(chunk);
@@ -566,6 +572,10 @@ uint64_t host_guard_samples() {
   State& s = state();
   std::lock_guard<std::mutex> lock(s.mu);
   return s.samples;
+}
+
+KernelCalls kernel_calls() {
+  return {g_madvise_dontneed.load(std::memory_order_relaxed), g_arena_maps.load(std::memory_order_relaxed)};
 }
 
 }  // namespace vgpu::backing
