@@ -18,6 +18,6 @@ run() {
   echo "mutant=${m:-none} unit rc=$rc1 sass rc=$rc2 | unit: $u | sass: $s"
 }
 run ""
-for m in link_flag link_olo link_olo_eq link_spin link_spin_limit link_nosplit link_split_pcs link_split_olo link_split_fl link_split_group link_split_glanes link_bssy link_bssy_ex host_olo host_spins; do run $m; done
+for m in link_flag link_olo link_olo_eq link_spin link_spin_limit link_nosplit link_split_pcs link_split_olo link_split_fl link_split_group link_split_glanes link_bssy link_bssy_ex link_exit_go link_exit_cb link_call_cb host_olo host_spins; do run $m; done
 [ -z "$NOLOCK" ] && flock -u 9
 true

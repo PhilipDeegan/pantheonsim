@@ -755,6 +755,8 @@ class Runner {
   // `ex` of d, exactly the values sreg() gives them one by one; false for any other register.
   bool tier_sreg_fill(const Block& blk, const Warp& w, unsigned idx, uint32_t* d, Mask ex) const;
   bool jit_exit_none(Block& blk, const Warp& w);   // tier_ops.inc: an EXIT no lane of the group takes, for generated code (linking)
+  bool jit_call_ok(uint64_t target) const;         // tier_ops.inc: a CALL.REL's target is plain code, not a function the simulator provides
+  int64_t jit_ret_target(Warp& w, unsigned r, Mask ex, Mask group, uint64_t base, uint64_t count, uint64_t pc0) const;   // tier_ops.inc: where a RET takes the whole group
   void tier_exec_mem(Block& blk, Warp& w, const Instr& ins, Mask ex) { exec_mem(blk, w, ins, ex); }
   uint32_t tier_cbank32(unsigned bank, uint64_t offset) const { return cbank32(bank, offset); }
   void tier_exec_float(Block& blk, Warp& w, const Instr& ins, Mask ex) { exec_float(blk, w, ins, ex); }

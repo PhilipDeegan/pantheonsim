@@ -287,20 +287,23 @@ static constexpr bool mutant(const char*) { return false; }
 std::vector<uint32_t> stretch_starts(const RegionSpec& r) {
   const uint32_t k = static_cast<uint32_t>(r.ops.size());
   std::set<uint32_t> st;
-  if (k) st.insert(0);
   for (uint32_t i = 0; i < k; ++i) {
     const OpFacts& o = r.ops[i];
+    if (o.stop) continue;   // (a merged region: an op of the loop's, never an entry)
+    if (i == 0 || r.ops[i - 1].stop) st.insert(i);
     if (!is_ctl(o)) continue;
-    if (i + 1 < k) st.insert(i + 1);
-    if (o.br && o.tgt >= 0 && static_cast<uint32_t>(o.tgt) < k) st.insert(static_cast<uint32_t>(o.tgt));
+    if (i + 1 < k && !r.ops[i + 1].stop) st.insert(i + 1);
+    if (o.br && o.tgt >= 0 && static_cast<uint32_t>(o.tgt) < k && !r.ops[static_cast<uint32_t>(o.tgt)].stop) st.insert(static_cast<uint32_t>(o.tgt));
   }
   return std::vector<uint32_t>(st.begin(), st.end());
 }
 
 uint32_t stretch_end(const RegionSpec& r, uint32_t start) {
   const uint32_t k = static_cast<uint32_t>(r.ops.size());
-  for (uint32_t j = start; j < k; ++j)
+  for (uint32_t j = start; j < k; ++j) {
+    if (r.ops[j].stop) return j;
     if (is_ctl(r.ops[j])) return j + 1;
+  }
   return k;
 }
 
@@ -314,7 +317,7 @@ std::vector<uint32_t> Engine::meta(const UnitSpec& spec) {
       m.push_back(static_cast<uint32_t>(o.hi));
       m.push_back(static_cast<uint32_t>(o.hi >> 32));
       m.push_back(o.cls | uint32_t{o.guard} << 8 | uint32_t{o.guard_not} << 16 | uint32_t{o.guard_uniform} << 17 | uint32_t{o.unguarded} << 18 | uint32_t{o.cont} << 19 |
-                  uint32_t{o.br} << 20 | uint32_t{o.store} << 21 | uint32_t{o.hostctl} << 22);
+                  uint32_t{o.br} << 20 | uint32_t{o.store} << 21 | uint32_t{o.hostctl} << 22 | uint32_t{o.call} << 24 | uint32_t{o.stop} << 25);
       m.push_back(o.form);
       if (o.hostctl == 2) {   // an EXIT: its conditions
         for (const SrcFacts* x : {&o.p, &o.p2}) {
@@ -373,12 +376,12 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool
        "  uint64_t* thread_instructions;\n  uint64_t* by_class;\n  void* tctx;\n  const uint8_t* ops;\n"
        "  void (*note)(Ctx*, uint32_t op);\n  void* host;\n"
        "  uint32_t* R;\n  const uint8_t* b0;\n  uint64_t b0n;\n  const void* pool;\n"
-       "  uint64_t* divergent;\n  bool* gate;\n  uint32_t* budget;\n  uint32_t* extra;\n  uint64_t* gen_run;\n  void (*sreg)(Ctx*, uint32_t, uint32_t*, uint32_t);\n  uint64_t max_steps;\n  int32_t exit_idx;\n  int32_t exit_ps;\n  uint32_t last;\n  int64_t olo;\n  uint32_t* spins;\n  void (*ctl)(Ctx*, uint32_t, uint32_t);\n  void (*split)(Ctx*, uint32_t, uint32_t, int32_t, int32_t);\n  uint32_t group;\n  int32_t pcs_at;\n  uint32_t (*exit0)(Ctx*);\n};\n";
+       "  uint64_t* divergent;\n  bool* gate;\n  uint32_t* budget;\n  uint32_t* extra;\n  uint64_t* gen_run;\n  void (*sreg)(Ctx*, uint32_t, uint32_t*, uint32_t);\n  uint64_t max_steps;\n  int32_t exit_idx;\n  int32_t exit_ps;\n  uint32_t last;\n  int64_t olo;\n  uint32_t* spins;\n  void (*ctl)(Ctx*, uint32_t, uint32_t);\n  void (*split)(Ctx*, uint32_t, uint32_t, int32_t, int32_t);\n  uint32_t group;\n  int32_t pcs_at;\n  uint32_t (*exit0)(Ctx*);\n  uint32_t (*callok)(Ctx*, uint32_t);\n  int64_t (*ret)(Ctx*, uint32_t, uint32_t, uint32_t);\n};\n";
   put("static_assert(sizeof(Ctx) == %zu, \"Ctx layout\");\n", sizeof(Ctx));
 #define VJ_FIELD(f) put("static_assert(offsetof(Ctx, " #f ") == %zu, \"Ctx::" #f "\");\n", offsetof(Ctx, f))
   VJ_FIELD(abi); VJ_FIELD(flags); VJ_FIELD(up); VJ_FIELD(p); VJ_FIELD(ur); VJ_FIELD(steps); VJ_FIELD(instructions); VJ_FIELD(thread_instructions);
   VJ_FIELD(by_class); VJ_FIELD(tctx); VJ_FIELD(ops); VJ_FIELD(note); VJ_FIELD(host); VJ_FIELD(R); VJ_FIELD(b0); VJ_FIELD(b0n); VJ_FIELD(pool);
-  VJ_FIELD(divergent); VJ_FIELD(gate); VJ_FIELD(budget); VJ_FIELD(extra); VJ_FIELD(gen_run); VJ_FIELD(sreg); VJ_FIELD(max_steps); VJ_FIELD(exit_idx); VJ_FIELD(exit_ps); VJ_FIELD(last); VJ_FIELD(olo); VJ_FIELD(spins); VJ_FIELD(ctl); VJ_FIELD(split); VJ_FIELD(group); VJ_FIELD(pcs_at); VJ_FIELD(exit0);
+  VJ_FIELD(divergent); VJ_FIELD(gate); VJ_FIELD(budget); VJ_FIELD(extra); VJ_FIELD(gen_run); VJ_FIELD(sreg); VJ_FIELD(max_steps); VJ_FIELD(exit_idx); VJ_FIELD(exit_ps); VJ_FIELD(last); VJ_FIELD(olo); VJ_FIELD(spins); VJ_FIELD(ctl); VJ_FIELD(split); VJ_FIELD(group); VJ_FIELD(pcs_at); VJ_FIELD(exit0); VJ_FIELD(callok); VJ_FIELD(ret);
 #undef VJ_FIELD
   s += "\n// The helpers that read the context (the rest are in vgpu_jit_rt.h).\n"
          "static inline uint32_t b0w(const Ctx* c, uint64_t off) {   // a word of constant bank 0 (tier_b0: zero past its end)\n"
@@ -524,7 +527,12 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool
     // The entries: the switch at the top, one label per stretch start.
     const std::vector<uint32_t> starts = stretch_starts(r);
     std::set<uint32_t> is_start(starts.begin(), starts.end());
-    if (starts.size() == 1) {   // (a region that is entered at its first op only: no jump table)
+    {   // (a RET the generated code runs looks its target up among the entries: it comes back here)
+      bool any_ret = false;
+      for (const OpFacts& o : r.ops) any_ret |= o.hostctl == 3;
+      if (link && any_ret) s += "DISPATCH:;\n";
+    }
+    if (starts.size() == 1 && starts[0] == 0) {   // (a region that is entered at its first op only: no jump table)
       s += "  if (entry != 0u) {\n    c->exit_idx = static_cast<int32_t>(entry); c->exit_ps = ps; return;\n  }\n";
     } else {
       s += "  switch (entry) {\n";
@@ -533,8 +541,19 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool
       s += "c->exit_idx = static_cast<int32_t>(entry); c->exit_ps = ps; return;\n  }\n";
     }
     bool fell = false;   // the previous op does not end its stretch: code falls into the next op (a start in the middle of a stretch is then reached by a jump or by falling)
+    // Whether the op after i is not an op of this region to go on at: past the end, or a stop op (the generated code leaves there).
+    const auto out_at = [&](uint32_t x) { return x >= k || r.ops[x].stop; };
     for (uint32_t i = 0; i < k; ++i) {
       const OpFacts& o = r.ops[i];
+      if (o.stop) {   // an op of the loop's between two merged regions: the code that falls into it leaves, with everything written
+        if (fell) {
+          flush();
+          rc.sync(s, false);
+          leave(std::to_string(i), "  ");
+        }
+        fell = false;
+        continue;
+      }
       if (is_start.count(i)) {
         if (fell) {   // the stretch goes on through this label: what is pending is written, no row is trusted, and the stretch's checks are not made again
           flush();
@@ -564,13 +583,21 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool
       if (o.br) {
         // A branch (tier_run_t's cont path for a BRA): the lanes that take it go to the target, the others to the next op. It is run here only when the
         // whole group takes it or none of it does, and the loop would go on past it (kFlagChain, a call left in the turn): else the loop runs it.
+        if (o.call && !link) {   // (a CALL is a region's op only with linking: the loop's)
+          flush();
+          rc.sync(s, true);
+          leave(std::to_string(i), "    ");
+          s += "  }\n";
+          fell = false;
+          continue;
+        }
         guard(o);
         s += "    uint32_t take = ex;\n";
         if (o.aux) put("    take &= %s;\n", pexpr(o.p).c_str());
         if (o.aux > 1) put("    take &= %s;\n", pexpr(o.p2).c_str());
         flush();
         rc.sync(s, true);
-        const bool back = o.tgt <= static_cast<int32_t>(i);   // (the loop's spin rule counts a taken branch to its own address or below)
+        const bool back = o.tgt <= static_cast<int32_t>(i) && !o.call;   // (the loop's spin rule counts a taken BRA to its own address or below; a CALL is not counted)
         if (link) {
           // Linking (jit.hpp, "Linking"). `fl` holds the chain bit (no other lane of the warp can run) or the link bit (others can, the lowest of them at `olo`;
           // with the chain bit `olo` is above everything). The loop ends its pass at this branch and its chain picks the group at the lowest address: the
@@ -587,13 +614,13 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool
             keep.swap(s);
             count(o);
             flush();
-            if (!o.unguarded) s += "    if (ex && ex != group) ++*c->divergent;\n";
+            if (!o.unguarded && !o.call) s += "    if (ex && ex != group) ++*c->divergent;\n";   // (a BRA whose guard splits the group; the loop does not count a CALL)
             cnt.swap(s);
             s.swap(keep);
           }
           const auto go = [&](int32_t x, const char* ind) {
             put("%sps = %d;\n", ind, x);
-            if (x >= 0 && static_cast<uint32_t>(x) < k) put("%sgoto L%d;\n", ind, x);
+            if (x >= 0 && !out_at(static_cast<uint32_t>(x))) put("%sgoto L%d;\n", ind, x);
             else leave(std::to_string(x), ind);
           };
           if (!always) {
@@ -605,6 +632,7 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool
               std::string cond = off + " || *c->budget == 0u";
               if (!mutant("link_olo")) cond += " || !(" + std::to_string(lo) + "ll " + lt + " olo)";
               if (back && !mutant("link_spin_limit")) cond += " || ((fl & 8u) && *c->spins >= 63u)";
+              if (o.call && !mutant("link_call_cb")) cond += " || !c->callok(c, " + std::to_string(i) + "u)";
               put("      if (%s) {\n", cond.c_str());
               leave(std::to_string(i), "        ");
               s += "      }\n";
@@ -627,6 +655,7 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool
             std::string cond = off + " || *c->budget == 0u";
             if (!mutant("link_olo")) cond += std::string(" || !(static_cast<int64_t>(take ? ") + std::to_string(T) + " : " + std::to_string(F) + ") " + lt + " olo)";
             if (back && !mutant("link_spin_limit")) cond += " || (take && (fl & 8u) && *c->spins >= 63u)";
+            if (o.call && !mutant("link_call_cb")) cond += " || !c->callok(c, " + std::to_string(i) + "u)";
             put("    if (%s) {\n", cond.c_str());
             leave(std::to_string(i), "      ");
             s += "    }\n";
@@ -662,7 +691,7 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool
         if (!o.unguarded && !mutant("ctl_divcount")) s += "    if (ex && ex != group) ++*c->divergent;\n";
         s += std::string("    ") + (mutant("ctl_budget_dec") ? "" : "--*c->budget; ") + (mutant("ctl_extra") ? "" : "++*c->extra; ") + (mutant("ctl_n0") ? "" : "n0 = 0;") + "\n";
         const bool always = o.unguarded && o.aux == 0;
-        const bool in = o.tgt >= 0 && static_cast<uint32_t>(o.tgt) < k;
+        const bool in = o.tgt >= 0 && !out_at(static_cast<uint32_t>(o.tgt));
         if (!always) s += mutant("ctl_swap") ? "    if (!take) {\n" : "    if (take) {\n";
         if (!mutant("ctl_ps")) put("      ps = %d;\n", o.tgt);
         if (in) put("      goto L%d;\n", o.tgt);
@@ -670,7 +699,33 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool
         if (!always) {
           s += "    }\n";
           if (!mutant("ctl_ps")) put("    ps = %uu;\n", i + 1);
-          if (i + 1 >= k) leave(std::to_string(i + 1), "    ");
+          if (out_at(i + 1)) leave(std::to_string(i + 1), "    ");
+        }
+        s += "  }\n";
+        fell = false;
+        continue;
+      }
+      if (o.hostctl == 3) {
+        // A RET (linking). The lanes that run it go to the address their register pair holds. When the whole group runs it and returns to one op of the section
+        // (the host reads the registers: Ctx::ret), the loop counts it, sets the group there and its chain goes on there: the generated code does the same when the
+        // chain would pick the group again, and finds the op among this region's entries (an op that is none is where it leaves). Else, and without linking, it
+        // stops before the RET.
+        guard(o);
+        flush();
+        rc.sync(s, true);
+        if (!link) {
+          leave(std::to_string(i), "    ");
+        } else {
+          s += "    int64_t x = INT64_MIN;\n";
+          std::string cond = std::string(mutant("link_flag") ? "false" : "!(fl & 12u)") + " || *c->budget == 0u";
+          put("    if (%s || (x = c->ret(c, %uu, ex, group)) == INT64_MIN%s) {\n", cond.c_str(), i, mutant("link_olo") ? "" : mutant("link_olo_eq") ? " || !(x <= olo)" : " || !(x < olo)");
+          leave(std::to_string(i), "      ");
+          s += "    }\n";
+          count(o);
+          flush();
+          s += "    --*c->budget; ++*c->extra; n0 = 0;\n    ps = static_cast<int32_t>(x);\n";
+          put("    if (x >= 0 && x < %ull) {\n      entry = static_cast<uint32_t>(x);\n      goto DISPATCH;\n    }\n", k);
+          leave("static_cast<int32_t>(x)", "    ");
         }
         s += "  }\n";
         fell = false;
@@ -700,7 +755,7 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool
           flush();
           s += "    --*c->budget; ++*c->extra; n0 = 0;\n";
           put("    ps = %uu;\n", i + 1);
-          if (i + 1 >= k) leave(std::to_string(i + 1), "    ");
+          if (out_at(i + 1)) leave(std::to_string(i + 1), "    ");
         }
         s += "  }\n";
         fell = false;
@@ -770,7 +825,7 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool
         }
         s += std::string("    ") + (mutant("ctl_budget_dec") ? "" : "--*c->budget; ") + (mutant("ctl_extra") ? "" : "++*c->extra; ") + (mutant("ctl_n0") ? "" : "n0 = 0;") + "\n";
         if (!mutant("ctl_ps")) put("    ps = %uu;\n", i + 1);
-        if (i + 1 >= k) leave(std::to_string(i + 1), "    ");
+        if (out_at(i + 1)) leave(std::to_string(i + 1), "    ");
       }
       s += "  }\n";
       fell = !o.cont;
@@ -951,6 +1006,44 @@ UnitSpec Engine::subspec(const UnitSpec& spec, const std::vector<uint32_t>& sel)
   return out;
 }
 
+// The span of a merged selection is bounded: a stop op costs no code, but the spec holds an element for it.
+static constexpr uint32_t kMaxMergedSpan = 16384;
+
+RegionSpec Engine::merge_regions(const UnitSpec& spec, const std::vector<uint32_t>& sel) {
+  RegionSpec m;
+  if (sel.empty()) return m;
+  const RegionSpec& lastr = spec.regions[sel.back()];
+  const uint32_t first = spec.regions[sel.front()].first, end = lastr.first + static_cast<uint32_t>(lastr.ops.size());
+  m.first = first;
+  OpFacts stop;
+  stop.stop = true;
+  m.ops.assign(end - first, stop);
+  for (uint32_t i : sel) {
+    const RegionSpec& r = spec.regions[i];
+    for (size_t j = 0; j < r.ops.size(); ++j) {
+      OpFacts o = r.ops[j];
+      if (o.br) o.tgt += static_cast<int32_t>(r.first) - static_cast<int32_t>(first);   // (region-relative: to the merged region's first op)
+      m.ops[r.first - first + j] = o;
+    }
+  }
+  return m;
+}
+
+bool Engine::merges(const UnitSpec& spec, const std::vector<uint32_t>& sel) const {
+  if (!cfg_.link || sel.empty()) return false;
+  const RegionSpec& a = spec.regions[sel.front()];
+  const RegionSpec& b = spec.regions[sel.back()];
+  return b.first >= a.first && b.first + b.ops.size() - a.first <= kMaxMergedSpan;
+}
+
+UnitSpec Engine::selected_spec(const UnitSpec& full, const std::vector<uint32_t>& sel) const {
+  if (!merges(full, sel)) return subspec(full, sel);
+  UnitSpec out;
+  out.sm = full.sm;
+  out.regions.push_back(merge_regions(full, sel));
+  return out;
+}
+
 Result Engine::lookup_selected(const UnitSpec& full, std::vector<uint32_t>* sel) {
   Result r;
   std::string why;
@@ -989,14 +1082,14 @@ Result Engine::lookup_selected(const UnitSpec& full, std::vector<uint32_t>* sel)
       q += used;
     }
   }
-  const UnitSpec sub = subspec(full, idx);
+  const UnitSpec sub = selected_spec(full, idx);
   Result l = lookup(sub);
   if (l.found && sel) *sel = idx;
   return l;
 }
 
 Result Engine::obtain_selected(const UnitSpec& full, const std::vector<uint32_t>& sel) {
-  Result r = obtain(subspec(full, sel));
+  Result r = obtain(selected_spec(full, sel));
   if (!r.found) return r;
   std::string why;
   const std::string skey = section_key(full, &why);
@@ -1320,6 +1413,31 @@ struct Manager {
     u.fn_index.assign(u.regions.size(), -1);
     u.fast.assign(u.regions.size(), nullptr);
     u.active_at.assign(u.region_at.size(), 0);
+    if (engine.merges(u.spec, sel) && u.regions.size() == u.spec.regions.size() + 1 && r.lib->fns.size() == 1) {
+      // Merging (linking): the object holds one function for the whole selection. The placeholder at the end of `regions` becomes that region, written
+      // here before `active` is published; the loop finds it only through active_at.
+      const size_t mi = u.regions.size() - 1;
+      u.merged = Engine::merge_regions(u.spec, sel);
+      Region& rg = u.regions[mi];
+      rg.first = u.merged.first;
+      rg.k = static_cast<uint32_t>(u.merged.ops.size());
+      rg.starts = stretch_starts(u.merged);
+      rg.maxreg = rg.gen = 0;
+      rg.has_store = rg.ctl = false;
+      for (uint32_t i : sel) {
+        rg.maxreg = std::max(rg.maxreg, u.regions[i].maxreg);
+        rg.gen += u.regions[i].gen;
+        rg.has_store |= u.regions[i].has_store;
+        rg.ctl |= u.regions[i].ctl;
+      }
+      u.fn_index[mi] = 0;
+      u.fast[mi] = r.lib->fns[0];
+      for (uint32_t st : rg.starts) u.active_at[rg.first + st] = static_cast<uint32_t>(mi) + 1;
+      u.active.store(u.active_at.data(), std::memory_order_release);
+      u.state.store(static_cast<int>(State::Ready), std::memory_order_release);
+      stats().units_ready.fetch_add(1);
+      return;
+    }
     for (size_t i = 0; i < sel.size(); ++i) {
       u.fn_index[sel[i]] = static_cast<int32_t>(i);
       u.fast[sel[i]] = r.lib->fns[i];
@@ -1340,7 +1458,7 @@ struct Manager {
   // The regions worth compiling: those that ran at least hot_permille thousandths of what the section's regions ran while counting, hottest
   // first, until max_ops ops are chosen (if none is that hot, the hottest are taken all the same).
   std::vector<uint32_t> select(const Unit& u) const {
-    const size_t n = u.regions.size();
+    const size_t n = u.spec.regions.size();   // (not `regions`: with linking it ends with the merged region's placeholder)
     std::vector<uint32_t> order(n);
     for (size_t i = 0; i < n; ++i) order[i] = static_cast<uint32_t>(i);
     std::vector<uint64_t> cnt(n);
@@ -1593,6 +1711,11 @@ static bool link_bssy(const tier::MOp& op) { return link_requested() && op.form 
 // of the grid) the loop only counts it and goes on at the next op (OpFacts::hostctl 2); where lanes leave, the generated code stops before it.
 static bool link_exit(const tier::MOp& op) { return link_requested() && op.form == tier::Form::Exit && !op.fn && !op.straight && op.aux <= 2; }
 
+// ... and a CALL.REL to a fixed place of the section and a RET.REL (the loop's tier_ctl): a branch the lanes its guard lets run take, and a branch to the
+// address a register pair holds (OpFacts::call, hostctl 3). With these a kernel and the functions it calls are regions the generated code moves between.
+static bool link_call(const tier::MOp& op) { return link_requested() && op.form == tier::Form::Call && !op.fn && !op.straight; }
+static bool link_ret(const tier::MOp& op) { return link_requested() && op.form == tier::Form::Ret && !op.fn && !op.straight; }
+
 std::shared_ptr<Unit> make_unit(const tier::Program& prog, int sm) {
   if (!requested()) return nullptr;
   Manager& mgr = manager();
@@ -1610,7 +1733,8 @@ std::shared_ptr<Unit> make_unit(const tier::Program& prog, int sm) {
     // only writes registers (MOp::cont).
     if (i + 1 >= count) return false;
     if (op.form == tier::Form::Bra) return branch_ok(op);
-    if (link_bssy(op) || link_exit(op)) return true;
+    if (link_bssy(op) || link_exit(op) || link_ret(op)) return true;
+    if (link_call(op)) return op.imm >= 0 && (op.imm & 15) == 0 && static_cast<uint64_t>(op.imm) / 16 < count;
     if (op.straight) return op.fn || op.never;
     return jit_cont(op);
   };
@@ -1631,6 +1755,7 @@ std::shared_ptr<Unit> make_unit(const tier::Program& prog, int sm) {
       rg.first = static_cast<uint32_t>(i);
       rg.k = static_cast<uint32_t>(j - i);
       RegionSpec rs;
+      rs.first = static_cast<uint32_t>(i);
       for (size_t x = i; x < j; ++x) {
         const tier::MOp& op = prog.ops[x];
         if (op.fn) rg.maxreg = std::max<uint32_t>(rg.maxreg, op.maxreg);
@@ -1657,6 +1782,19 @@ std::shared_ptr<Unit> make_unit(const tier::Program& prog, int sm) {
             out.val2 = in.off + 1 < prog.pool.size() ? prog.pool[in.off + 1].v[0] : 0;
           }
         };
+        if (link_ret(op)) {   // (its register pair must be in the warp's file: the host refuses the region otherwise, and the loop runs it)
+          f.cont = true;
+          f.hostctl = 3;
+          f.dst = op.dst;
+          rg.maxreg = std::max<uint32_t>(rg.maxreg, uint32_t{op.dst} + 1);
+        }
+        if (link_call(op)) {
+          f.br = f.call = true;
+          f.aux = 0;
+          f.imm = op.imm;
+          f.tgt = static_cast<int32_t>(op.imm / 16) - static_cast<int32_t>(i);
+          rg.ctl = true;
+        }
         if (link_exit(op)) {
           f.cont = true;
           f.hostctl = 2;
@@ -1746,11 +1884,13 @@ std::shared_ptr<Unit> make_unit(const tier::Program& prog, int sm) {
       if (out != stderr) std::fclose(out);
     }
   }
+  const size_t nregions = u->regions.size();
+  if (link_requested()) u->regions.emplace_back();   // (merging: the placeholder of the merged region, see Unit::merged)
   u->active.store(u->region_at.data(), std::memory_order_release);
   u->counts.reset(new std::atomic<uint64_t>[u->regions.size()]());
   u->sampling.store(mgr.share.on, std::memory_order_relaxed);
   stats().units.fetch_add(1);
-  stats().regions.fetch_add(u->regions.size());
+  stats().regions.fetch_add(nregions);
   return u;
 }
 

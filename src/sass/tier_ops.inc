@@ -2241,6 +2241,8 @@ struct JitHost {
   TCtx* c;
   bool stats;
   uint64_t pc0;   // the address of the first op of the region being run (a split in generated code sets lanes' addresses)
+  uint64_t base;  // the section's address, and how many ops it has
+  uint64_t count;
 };
 
 // The tier's statistics of an op the generated code has run, an escape's or its own (reported even when no lane executed it, as the loop reports them).
@@ -2275,6 +2277,39 @@ bool Runner::jit_exit_none(Block& blk, const Warp& w) {
   cluster_barrier_check(blk);
   return true;
 }
+// A CALL.REL inside a region (linking): the run loop's own test (tier_ctl). A function the simulator provides, a builtin at its magic address, is the
+// interpreter's; any other target is code of the section, and the CALL a branch the lanes that run it take.
+bool Runner::jit_call_ok(uint64_t target) const {
+  return m_.builtins.empty() || target < m_.builtins.begin()->first || m_.builtins.find(target) == m_.builtins.end();
+}
+uint32_t jit_callok(jit::Ctx* j, uint32_t i) {
+  JitHost& h = *static_cast<JitHost*>(j->host);
+  const tier::MOp& op = reinterpret_cast<const tier::MOp*>(j->ops)[i];
+  return h.c->r->jit_call_ok(h.base + static_cast<uint64_t>(op.imm)) ? 1u : 0u;
+}
+
+// A RET inside a region (linking): the run loop's lines for it (tier_ctl) when the whole group runs it. The address is in the register pair: a
+// section-relative offset, or an absolute code address a relocation wrote. When every lane of the group returns to one op of the section, that op as a
+// region-relative index; else INT64_MIN, and the loop runs the RET.
+int64_t Runner::jit_ret_target(Warp& w, unsigned r, Mask ex, Mask group, uint64_t base, uint64_t count, uint64_t pc0) const {
+  if (ex != group || !ex || r >= w.nregs) return std::numeric_limits<int64_t>::min();
+  uint64_t at = 0;
+  for (Mask m = group; m; m &= m - 1) {
+    const unsigned l = static_cast<unsigned>(std::countr_zero(m));
+    const uint32_t lo = w.reg(r, l), hi = r + 1 < w.nregs ? w.reg(r + 1, l) : 0;
+    const uint64_t t = hi == static_cast<uint32_t>(kCodeBase >> 32) ? (uint64_t{hi} << 32 | lo) : base + lo;
+    if (m == group) at = t;
+    else if (t != at) return std::numeric_limits<int64_t>::min();
+  }
+  if (at - base >= 16 * count || ((at - base) & 15)) return std::numeric_limits<int64_t>::min();
+  return (static_cast<int64_t>(at) - static_cast<int64_t>(pc0)) / 16;
+}
+int64_t jit_ret(jit::Ctx* j, uint32_t i, uint32_t ex, uint32_t group) {
+  JitHost& h = *static_cast<JitHost*>(j->host);
+  const tier::MOp& op = reinterpret_cast<const tier::MOp*>(j->ops)[i];
+  return h.c->r->jit_ret_target(*h.c->w, op.dst, ex, group, h.base, h.count, h.pc0);
+}
+
 uint32_t jit_exit0(jit::Ctx* j) {
   JitHost& h = *static_cast<JitHost*>(j->host);
   return h.c->r->jit_exit_none(*h.c->blk, *h.c->w) ? 1u : 0u;
@@ -2320,11 +2355,12 @@ struct JitFrame {
 // the state before that op: nothing of it is done.
 [[gnu::noinline]] unsigned jit_exit_why(const jit::Unit& ju, uint32_t ri, const tier::MOp* ops, int32_t ei, TCtx& c, const Warp& w, Mask group, bool chain, uint64_t max_steps) {
   const jit::Region& rg = ju.regions[ri - 1];
-  const jit::RegionSpec& rs = ju.spec.regions[ri - 1];
+  const jit::RegionSpec& rs = ri - 1 < ju.spec.regions.size() ? ju.spec.regions[ri - 1] : ju.merged;
   const size_t count = ju.region_at.size();
-  if (ei >= 0 && static_cast<uint32_t>(ei) < rg.k) {
+  if (ei >= 0 && static_cast<uint32_t>(ei) < rg.k && !rs.ops[static_cast<uint32_t>(ei)].stop) {
     const jit::OpFacts& f = rs.ops[static_cast<uint32_t>(ei)];
     const tier::MOp& op = ops[rg.first + static_cast<uint32_t>(ei)];
+    if (f.call || f.hostctl == 3) return jit::kExOtherCtl;   // a CALL or RET in a region (linking)
     if (f.br) {
       const Mask ex = op.unguarded ? group : tier_guard(w, *op.ins, group);
       Mask take = ex;
@@ -2390,7 +2426,7 @@ struct JitFrame {
   if (!f.init) [[unlikely]] {
     f.init = true;
     f.mut = jit::host_mutants();
-    f.jh = JitHost{&c, stats, 0};
+    f.jh = JitHost{&c, stats, 0, f.base, ju.region_at.size()};
     f.flags = (stats ? jit::kFlagTierStats : 0u) | (jit::stats_on() ? jit::kFlagJitStats : 0u) | ((f.mut & jit::kMutHostChain) ? jit::kFlagChain : 0u);
     jit::Ctx& jc = f.jc;
     jc = jit::Ctx{};
@@ -2419,6 +2455,8 @@ struct JitFrame {
     jc.ctl = &jit_ctl;
     jc.split = &jit_split;
     jc.exit0 = &jit_exit0;
+    jc.callok = &jit_callok;
+    jc.ret = &jit_ret;
     if (f.mut & jit::kMutHostSpins) [[unlikely]] {
       static thread_local uint32_t elsewhere;
       elsewhere = 0;

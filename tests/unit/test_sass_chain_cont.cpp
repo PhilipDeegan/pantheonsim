@@ -308,6 +308,67 @@ std::vector<Insn> joined_loops_kernel(unsigned iters_a, unsigned iters_b, unsign
   return c;
 }
 
+// CALL.REL.NOINC <the instruction at index `to`> and RET.REL.NODEC Rr (no text: the test checks what they decode to).
+Insn call_rel(int from, int to) {
+  const int64_t off = int64_t{16} * (to - from - 1);
+  return make(0x000fc00003800000ull | (off < 0 ? 0x3ffffull : 0ull), 0x7944ull | (static_cast<uint64_t>(off) & 0xffffffffull) << 32, "");
+}
+Insn ret_rel(unsigned r) { return make(0x000fc00003800000ull, 0x7950ull | uint64_t{r} << 24, ""); }
+
+// A loop that calls a function (round sp52: CALL.REL and RET.REL, which tier 2 with linking runs inside generated code). The function loads the shared
+// word, runs S2Rs, adds one and stores it; it returns through R8:R9, which the caller sets before each call as a compiler does. Lanes 16..31 make `more`
+// more iterations, so the branch back splits the warp once: the half that goes on loops, calls and returns while the other half waits at the tail.
+// With `fn_low` the function lies below the loop (the calls and returns of the half that goes on stay below the waiting half: the chain picks it again);
+// without, it lies above the tail (the chain picks the waiting half first, at every call).
+std::vector<Insn> call_kernel(unsigned iters, unsigned more, unsigned s2rs, bool fn_low) {
+  std::vector<Insn> c;
+  c.push_back(s2r_tid(0));
+  c.push_back(make(0x000fc60000000f00ull, 0x0000580000007a02ull | uint64_t{12} << 16, "MOV R12, c[0x0][0x160]"));
+  c.push_back(make(0x000fc60000000f00ull, 0x0000590000007a02ull | uint64_t{13} << 16, "MOV R13, c[0x0][0x164]"));
+  c.push_back(imad_wide_i(14, 0, kStride, 12));
+  c.push_back(s2r_lane(4));
+  c.push_back(movi(5, iters));
+  c.push_back(movi(9, 0));
+  c.push_back(isetp_ge(4, 16));
+  c.push_back(iadd3i(5, 5, more, kRZ, 0));   // @P0: lanes 16..31
+  int fn = -1;
+  const auto function = [&] {
+    fn = static_cast<int>(c.size());
+    c.push_back(ldg(1, 12));
+    for (unsigned i = 0; i < s2rs; ++i) c.push_back(s2r_lane(2));
+    c.push_back(iadd3i(1, 1, 1, kRZ));
+    c.push_back(stg(12, 1, 0));
+    c.push_back(ret_rel(8));
+  };
+  size_t skip = 0;
+  if (fn_low) {
+    c.push_back(isetp_ge(4, 0));   // (every lane: the branch over the function is taken by the whole warp)
+    skip = c.size();
+    c.push_back(exit_());   // (placeholder)
+    function();
+    c[skip] = bra_p0(static_cast<int>(skip), static_cast<int>(c.size()));
+  }
+  const int top = static_cast<int>(c.size());
+  const size_t ra = c.size();
+  c.push_back(exit_());   // (placeholder: MOV R8, <the address after the call>)
+  const size_t call = c.size();
+  c.push_back(exit_());   // (placeholder: the call)
+  c[ra] = movi(8, 16u * static_cast<uint32_t>(c.size()));
+  Insn dec = iadd3i(5, 5, 0xffffffffu, kRZ);
+  dec.text = "IADD3 R5, R5, -0x1, RZ";
+  c.push_back(dec);
+  c.push_back(isetp_ge(5, 1));
+  c.push_back(bra_p0(static_cast<int>(c.size()), top));
+  c.push_back(cs2r_clock(3));
+  c.push_back(stg(14, 3, 4));
+  c.push_back(stg(14, 2, 8));
+  c.push_back(exit_());
+  if (!fn_low) function();
+  c.push_back(exit_());   // (never reached: a section's last instruction is not a straight one)
+  c[call] = call_rel(static_cast<int>(call), fn);
+  return c;
+}
+
 struct Result {
   std::vector<uint32_t> out;
   exec::LaunchStats stats;
@@ -435,6 +496,26 @@ VTEST(the_groups_of_a_diverged_warp_loop_apart_and_meet_where_the_chain_picks_th
   }
   compare(joined_loops_kernel(700, 900, 2), 64, "joined, two warps, turns end inside the loops");
   compare(joined_loops_kernel(40, 90, 1), 40, "joined, a warp and a part of one");
+  // A loop that calls a function and returns from it, the warp split once by the loop's branch back.
+  for (const bool fn_low : {false, true}) {
+    const std::vector<Insn> k = call_kernel(5, 7, 1, fn_low);
+    unsigned calls = 0, rets = 0;
+    for (size_t i = 0; i < k.size(); ++i) {
+      const sass::Instr ins = sass::decode(k[i].w, 16 * i, 86);
+      calls += ins.op == sass::Op::CALL;
+      rets += ins.op == sass::Op::RET;
+    }
+    VCHECK_EQ(calls, 1u);
+    VCHECK_EQ(rets, 1u);
+    const std::string m = fn_low ? ", the function below the loop" : ", the function above the tail";
+    for (unsigned s2rs : {1u, 3u}) {
+      compare(call_kernel(5, 7, s2rs, fn_low), 32, "calls, 5 and 12 iterations, " + std::to_string(s2rs) + " S2Rs" + m);
+      compare(call_kernel(100, 150, s2rs, fn_low), 32, "calls, 100 and 250 iterations, " + std::to_string(s2rs) + " S2Rs" + m);
+    }
+    compare(call_kernel(900, 300, 2, fn_low), 64, "calls, two warps, turns end inside the loops" + m);
+    compare(call_kernel(40, 0, 1, fn_low), 32, "calls, the warp never splits" + m);
+    compare(call_kernel(40, 30, 1, fn_low), 40, "calls, a warp and a part of one" + m);
+  }
   // With tier 2 and linking asked for (ctest test_sass_chain_cont_jit_link), the generated code must have taken the chain's part: a run in which nothing was
   // linked would compare equal too. (Counted only with VGPU_JIT_STATS; no compiler on PATH: nothing ran as generated code.)
   if (sass::jit::requested() && sass::jit::link_requested() && sass::jit::stats_on() && sass::jit::stats().regions_run.load() > 0) {

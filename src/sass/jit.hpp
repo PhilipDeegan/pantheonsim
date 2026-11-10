@@ -108,6 +108,11 @@ struct Ctx {
   // An EXIT inside a region that no lane of the group takes (OpFacts::hostctl 2): whether the run loop would run it itself (no lane of the warp waits, no block
   // barrier has an arrival; else it is the interpreter's and the generated code stops before it), and then the rest of what the loop does for it.
   uint32_t (*exit0)(Ctx*);
+  // A CALL.REL inside a region (OpFacts::call): whether the place op `op` calls is plain code of the section (not a function the simulator provides, which the
+  // interpreter runs). A RET inside a region (hostctl 3): the region-relative op every lane of `group` returns to, or INT64_MIN when the guard lets only
+  // some of them run it (ex != group), they return to different places, or the place is not an op of the section (all of these are the loop's).
+  uint32_t (*callok)(Ctx*, uint32_t op);
+  int64_t (*ret)(Ctx*, uint32_t op, uint32_t ex, uint32_t group);
 };
 
 // A region is entered at any of its stretch starts (stretch_starts) with the number of ops the loop's current pass has taken since its start (n0);
@@ -138,7 +143,13 @@ struct OpFacts {
   bool cont = false;           // MOp::cont: not straight, a handler that only writes registers: the run loop may go on past it (a stretch ends here)
   uint8_t hostctl = 0;         // (with cont; linking only) an op without a handler that the generated code goes on past. 1, a BSSY: the host's Ctx::ctl does its
                                // bookkeeping, whatever the guard says. 2, an EXIT (aux, p, p2: its conditions): gone past only when no lane leaves and
-                               // the host's Ctx::exit0 says the loop itself would run it; else the generated code stops before it
+                               // the host's Ctx::exit0 says the loop itself would run it; else the generated code stops before it. 3, a RET (dst: the
+                               // register pair that holds the address): gone past when every lane of the group returns to one place in the section
+                               // (the host's Ctx::ret reads it), which the generated code then looks up among the region's entries
+  bool call = false;           // (with br; linking only) a CALL.REL to a fixed place in the section: a branch every lane its guard lets run takes, without
+                               // the spin rule and the divergent-branch count of a BRA, and only when the place is no function the simulator provides (Ctx::callok)
+  bool stop = false;           // (merged regions; linking only) not an op of the region at all: an op between two of the regions that were merged, which the
+                               // run loop runs. The generated code leaves before it; it is no entry, no branch target and belongs to no stretch
   bool store = false;          // MOp::store: a store to global memory (an escape): while the warp's store gate is up the generated code leaves before it
   bool br = false;             // a plain relative BRA (tier::Form::Bra) that the generated code runs itself: imm is its target in the section, tgt in the region, p/p2/aux its conditions
   int32_t tgt = 0;             // a branch: the region-relative index of its target (outside [0, k): the generated code leaves there)
@@ -178,6 +189,7 @@ struct RowCtx {
 std::string gen_op_body(const OpFacts& o, RowCtx& rc);
 struct RegionSpec {
   std::vector<OpFacts> ops;
+  uint32_t first = 0;          // the section's op its first op is (make_unit sets it; merging needs it; not part of the metadata)
 };
 // Control flow inside a region (milestone 5). A region is a run of consecutive ops that may hold uniform branches (every lane of the group takes it, or none),
 // ops that are not straight but only write registers (`cont`), and stores. It is cut into *stretches*: a stretch starts at the region's first op, at the target
@@ -253,6 +265,12 @@ class Engine {
   static std::vector<uint32_t> meta(const UnitSpec& spec);
   // The 32-hex-digit key: the source, the compiler's identity, flags, ISA level, ABI and generator versions. Empty (and `why` set) with no compiler.
   std::string key(const UnitSpec& spec, std::string* why = nullptr);
+  // Merging (linking). The selected regions of a section as ONE region that runs from the first selected region's first op to the last one's last: the ops
+  // between them are `stop` ops, branch targets are rebased. One function then holds every compiled op of the section, so a branch, a call or a return
+  // from one of the old regions into another is a jump inside generated code. merges(): whether a selection is merged (linking on, and the span is not huge).
+  static RegionSpec merge_regions(const UnitSpec& spec, const std::vector<uint32_t>& sel);
+  bool merges(const UnitSpec& spec, const std::vector<uint32_t>& sel) const;
+  UnitSpec selected_spec(const UnitSpec& full, const std::vector<uint32_t>& sel) const;   // subspec, or the one merged region
   // The cache only: found, damaged (removed), or absent. Never compiles.
   Result lookup(const UnitSpec& spec);
   // The cache, else the compiler (under a per-key lock file, so that threads and processes compile one key once).
@@ -331,6 +349,9 @@ struct Unit : std::enable_shared_from_this<Unit> {
   std::atomic<bool> sampling{false};   // the share rule has not decided yet (set by make_unit when the rule is on)
   std::atomic<uint64_t> sampled{0};    // warp instructions run in the hook loop while sampling
   std::unique_ptr<std::atomic<uint64_t>[]> counts;   // ... per region: which ones are hot decides which are compiled
+  // Merging (linking): `regions` has one more element than spec.regions, a placeholder until a merged selection is published; then it is the merged region
+  // (its spec is `merged`), the only one with entries in active_at and a function.
+  RegionSpec merged;
   std::shared_ptr<Loaded> lib;         // valid once state is Ready (published with release)
   std::vector<int32_t> fn_index;       // region -> its function in lib, -1 for a region that was not compiled (valid once Ready)
   bool ready() const { return state.load(std::memory_order_acquire) == static_cast<int>(State::Ready); }
