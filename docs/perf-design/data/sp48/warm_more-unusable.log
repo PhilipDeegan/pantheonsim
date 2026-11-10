@@ -1,0 +1,3 @@
+hecbench/atan2-cuda dev:jit 0.02(6%) dev:jit:VGPU_JIT_FUSE=1 0.02(6%) hashes [1, 1] same
+hecbench/adam-cuda dev:jit 0.02(5%) dev:jit:VGPU_JIT_FUSE=1 0.02(3%) hashes [1, 1] same
+hecbench/aobench-cuda dev:jit 0.99(112%) dev:jit:VGPU_JIT_FUSE=1 1.63(77%) hashes [1, 1] same
