@@ -105,7 +105,10 @@ VTEST(f16c_check_is_lazy_and_selects_what_it_did) {
     const auto& full = simd::kernels_for(simd::Level::Avx2);
     VCHECK(k.hmma == full.hmma && k.hfma2_m == full.hfma2_m && k.f16_to_f32 == full.f16_to_f32 && k.f32_to_f16 == full.f32_to_f16);
     VCHECK(k.hmma != simd::kernels_for(simd::Level::Base).hmma);
-    VCHECK(k.iadd3 == full.iadd3 && k.ffma == full.ffma);
+    // (The lane kernels are the level's own: on a host with AVX-512 the table in use has the 512-bit ones of src/simd/lanes512.inc.)
+    const auto& mine = simd::kernels_for(k.level);
+    VCHECK(k.iadd3 == mine.iadd3 && k.ffma == mine.ffma);
+    if (k.level == simd::Level::Avx2) VCHECK(k.iadd3 == full.iadd3 && k.ffma == full.ffma);
     simd::kernels().f16_to_f32(halves, got, 8);   // a second use does not check again
     VCHECK_EQ(simd::testing::f16c_checks_run(), 1);
   } else {

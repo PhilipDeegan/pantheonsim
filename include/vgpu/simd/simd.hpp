@@ -339,6 +339,10 @@ bool f64_bin_lanes_avx2(unsigned op, uint64_t* r, const uint64_t* a, const uint6
 namespace testing {
 // Switches the kernel above between the level's own (true) and none (false), for the tests that compare the two.
 void use_sector_window_kernel(bool on);   // (and the warp-addresses kernel with it)
+// The two warp-addresses kernels at a level (Avx2 or Avx512; null where the host cannot run it, and for Base, which has none), for the test that
+// runs one against the other (tests/unit/test_lanes512.cpp).
+WarpRowsFn warp_rows_at(Level l);
+WarpRunFn warp_run_at(Level l);
 }
 
 }  // namespace vgpu::simd

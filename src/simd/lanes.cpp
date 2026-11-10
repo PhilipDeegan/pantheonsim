@@ -79,22 +79,75 @@ constexpr NibbleMasks kNibble;
     _mm256_storeu_si256(at, _mm256_blendv_epi8(_mm256_loadu_si256(at), _mm256_blendv_epi8(n, t, mt), mg));
   }
 }
+
+// The same three at the AVX-512 level (the Avx512 kernel table in use: simd::kernels().level, so VGPU_SIMD=avx2 keeps the 256-bit ones above):
+// eight lanes to a step, the lane bits of `run`, `group` and `take` straight into mask registers, and an unsigned 64-bit minimum, which this
+// level has. The answers are those of the functions above (tests/unit/test_lanes512.cpp runs each against them).
+#define VGPU_LANES_T512 [[gnu::target("avx2,avx512f,avx512bw,avx512dq,avx512vl")]]
+
+// The lowest address among the lanes of `run` and the lanes standing there. A lane that does not run is left out of the minimum (the masked
+// form keeps the running minimum in that lane) and out of the group at the end; an address of all ones in a running lane is the largest there
+// is, so the start value never wins over a running lane's.
+VGPU_LANES_T512 Mask pick_group_avx512(const uint64_t* pc, Mask run, uint64_t& lo) {
+  __m512i v[4];
+  __m512i best = _mm512_set1_epi64(-1);
+  for (unsigned i = 0; i < 4; ++i) {
+    // (Loaded as four 16-byte pieces, as the AVX2 form loads halves: the addresses were just stored 16 bytes or less at a time, or by the wider
+    // stores below, and a load is served from a store only when the store covers all of it.)
+    const __m128i* const at = reinterpret_cast<const __m128i*>(pc + 8 * i);
+    const __m256i l = _mm256_inserti128_si256(_mm256_castsi128_si256(_mm_loadu_si128(at)), _mm_loadu_si128(at + 1), 1);
+    const __m256i h = _mm256_inserti128_si256(_mm256_castsi128_si256(_mm_loadu_si128(at + 2)), _mm_loadu_si128(at + 3), 1);
+    v[i] = _mm512_inserti64x4(_mm512_castsi256_si512(l), h, 1);
+    best = _mm512_mask_min_epu64(best, static_cast<__mmask8>(run >> (8 * i)), best, v[i]);
+  }
+  const uint64_t low = _mm512_reduce_min_epu64(best);
+  const __m512i want = _mm512_set1_epi64(static_cast<long long>(low));
+  Mask group = 0;
+  for (unsigned i = 0; i < 4; ++i) group |= static_cast<Mask>(_mm512_cmpeq_epi64_mask(v[i], want)) << (8 * i);
+  lo = low;
+  return group & run;
+}
+
+VGPU_LANES_T512 void set_pcs_avx512(uint64_t* pc, Mask group, uint64_t v) {
+  const __m512i vv = _mm512_set1_epi64(static_cast<long long>(v));
+  for (unsigned i = 0; i < 4; ++i) {
+    void* const at = pc + 8 * i;
+    _mm512_storeu_si512(at, _mm512_mask_mov_epi64(_mm512_loadu_si512(at), static_cast<__mmask8>(group >> (8 * i)), vv));
+  }
+}
+
+VGPU_LANES_T512 void select_pcs_avx512(uint64_t* pc, Mask group, Mask take, uint64_t target, uint64_t next) {
+  const __m512i t = _mm512_set1_epi64(static_cast<long long>(target)), n = _mm512_set1_epi64(static_cast<long long>(next));
+  for (unsigned i = 0; i < 4; ++i) {
+    void* const at = pc + 8 * i;
+    const __m512i to = _mm512_mask_mov_epi64(n, static_cast<__mmask8>(take >> (8 * i)), t);
+    _mm512_storeu_si512(at, _mm512_mask_mov_epi64(_mm512_loadu_si512(at), static_cast<__mmask8>(group >> (8 * i)), to));
+  }
+}
+
+// 0: the plain loops, 1: AVX2, 2: AVX-512 -- the level of the kernel table in use.
+int lanes_level() {
+  static const int l = simd::kernels().level == simd::Level::Avx512 ? 2 : simd::level() == simd::Level::Avx2 ? 1 : 0;
+  return l;
+}
 #endif
 
 }  // namespace
 
 void set_pcs_partial(uint64_t* pc, Mask group, uint64_t v) {
 #ifdef VGPU_LANES_AVX2
-  static const bool avx2 = simd::level() == simd::Level::Avx2;
-  if (avx2) return set_pcs_avx2(pc, group, v);
+  static const int lvl = lanes_level();
+  if (lvl == 2) return set_pcs_avx512(pc, group, v);
+  if (lvl == 1) return set_pcs_avx2(pc, group, v);
 #endif
   for (Mask m = group; m; m &= m - 1) pc[std::countr_zero(m)] = v;
 }
 
 void select_pcs(uint64_t* pc, Mask group, Mask take, uint64_t target, uint64_t next) {
 #ifdef VGPU_LANES_AVX2
-  static const bool avx2 = simd::level() == simd::Level::Avx2;
-  if (avx2) return select_pcs_avx2(pc, group, take, target, next);
+  static const int lvl = lanes_level();
+  if (lvl == 2) return select_pcs_avx512(pc, group, take, target, next);
+  if (lvl == 1) return select_pcs_avx2(pc, group, take, target, next);
 #endif
   for (Mask m = group; m; m &= m - 1) {
     const unsigned l = static_cast<unsigned>(std::countr_zero(m));
@@ -104,11 +157,54 @@ void select_pcs(uint64_t* pc, Mask group, Mask take, uint64_t target, uint64_t n
 
 Mask pick_group_diverged(const uint64_t* pc, Mask run, uint64_t& lo) {
 #ifdef VGPU_LANES_AVX2
-  static const bool avx2 = simd::level() == simd::Level::Avx2;
-  if (avx2) return pick_group_avx2(pc, run, lo);
+  static const int lvl = lanes_level();
+  if (lvl == 2) return pick_group_avx512(pc, run, lo);
+  if (lvl == 1) return pick_group_avx2(pc, run, lo);
 #endif
   return pick_group_plain(pc, run, lo);
 }
+
+namespace testing {
+bool pick_group_at(simd::Level l, const uint64_t* pc, Mask run, uint64_t& lo, Mask& group) {
+  if (l == simd::Level::Base) return group = pick_group_plain(pc, run, lo), true;
+#ifdef VGPU_LANES_AVX2
+  if (!simd::supported(l)) return false;
+  group = l == simd::Level::Avx512 ? pick_group_avx512(pc, run, lo) : pick_group_avx2(pc, run, lo);
+  return true;
+#else
+  return false;
+#endif
+}
+bool set_pcs_at(simd::Level l, uint64_t* pc, Mask group, uint64_t v) {
+  if (l == simd::Level::Base) {
+    for (Mask m = group; m; m &= m - 1) pc[std::countr_zero(m)] = v;
+    return true;
+  }
+#ifdef VGPU_LANES_AVX2
+  if (!simd::supported(l)) return false;
+  l == simd::Level::Avx512 ? set_pcs_avx512(pc, group, v) : set_pcs_avx2(pc, group, v);
+  return true;
+#else
+  return false;
+#endif
+}
+bool select_pcs_at(simd::Level l, uint64_t* pc, Mask group, Mask take, uint64_t target, uint64_t next) {
+  if (l == simd::Level::Base) {
+    for (Mask m = group; m; m &= m - 1) {
+      const unsigned i = static_cast<unsigned>(std::countr_zero(m));
+      pc[i] = ((take >> i) & 1) ? target : next;
+    }
+    return true;
+  }
+#ifdef VGPU_LANES_AVX2
+  if (!simd::supported(l)) return false;
+  l == simd::Level::Avx512 ? select_pcs_avx512(pc, group, take, target, next) : select_pcs_avx2(pc, group, take, target, next);
+  return true;
+#else
+  return false;
+#endif
+}
+}  // namespace testing
 
 Mask pick_group_reference(const uint64_t* pc, Mask run, uint64_t& lo) {
   const uint64_t first = pc[std::countr_zero(run)];
