@@ -1,0 +1,10 @@
+## polybench_LU
+jit: 2 units (8 regions), 2 ready, 2 cache hits, 0 compiles (0.0 ms), 0 failures, 0 damaged objects replaced; 136622223 region calls ran 1594076261 warp instructions (1456381153 computed by generated code), 0 exceptions unwound through them; share rule: 0 declined, 2 accepted; 408721095 branches and register-only ops continued inside generated code
+## hecbench_black-scholes-cuda
+jit: 1 units (40 regions), 1 ready, 1 cache hits, 0 compiles (0.0 ms), 0 failures, 0 damaged objects replaced; 115612635 region calls ran 910840043 warp instructions (798352088 computed by generated code), 0 exceptions unwound through them; share rule: 0 declined, 1 accepted; 35933657 branches and register-only ops continued inside generated code
+## rodinia_gaussian
+jit: 2 units (10 regions), 2 ready, 2 cache hits, 0 compiles (0.0 ms), 0 failures, 0 damaged objects replaced; 15445319 region calls ran 146246043 warp instructions (137624280 computed by generated code), 0 exceptions unwound through them; share rule: 0 declined, 2 accepted; 44746455 branches and register-only ops continued inside generated code
+## rodinia_hotspot
+jit: 1 units (12 regions), 1 ready, 1 cache hits, 0 compiles (0.0 ms), 0 failures, 0 damaged objects replaced; 3354983 region calls ran 47161306 warp instructions (38342515 computed by generated code), 0 exceptions unwound through them; share rule: 0 declined, 1 accepted; 6038951 branches and register-only ops continued inside generated code
+## polybench_SYRK
+jit: 1 units (4 regions), 1 ready, 1 cache hits, 0 compiles (0.0 ms), 0 failures, 0 damaged objects replaced; 98239 region calls ran 194178695 warp instructions (91276043 computed by generated code), 0 exceptions unwound through them; share rule: 0 declined, 1 accepted; 2554516 branches and register-only ops continued inside generated code

@@ -1,0 +1,15 @@
+## out/prof2/hecbench_black-scholes-cuda.jit.stat
+301796363842,,instructions:u,19980290291,100.00,3.36,insn per cycle
+89882495473,,cycles:u,19980290291,100.00,,
+## out/prof2/polybench_LU.jit.stat
+379564525797,,instructions:u,24199153483,100.00,3.39,insn per cycle
+112021858265,,cycles:u,24199153483,100.00,,
+## out/prof2/polybench_SYRK.jit.stat
+96872021522,,instructions:u,4901142080,100.00,4.17,insn per cycle
+23204763456,,cycles:u,4901142080,100.00,,
+## out/prof2/rodinia_gaussian.jit.stat
+60877539608,,instructions:u,3282933675,100.00,3.85,insn per cycle
+15818744441,,cycles:u,3282933675,100.00,,
+## out/prof2/rodinia_hotspot.jit.stat
+14542140429,,instructions:u,866371332,100.00,3.45,insn per cycle
+4209457662,,cycles:u,866371332,100.00,,
