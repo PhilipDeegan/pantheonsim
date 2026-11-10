@@ -4,17 +4,22 @@
   mutants.py <src> <build> [name ...]
 For each mutant: patch the source in place, rebuild test_exact_threads, run it in its four forms (default, VGPU_TIER=0,
 VGPU_FASTPATH=0, VGPU_EXACT_PAGES=0), put the source back. Prints "killed by <forms>" or "SURVIVED" per mutant, then rebuilds
-the unmutated test and requires it to pass. The first group is this round's mechanisms (the note by page, the worker's memory of
-pages, a warp's lanes as one range or one page, the second trial); the second is round sp47's mutants on the lines this round moved
-or rewrote, and a sample of those it did not touch."""
-import os, subprocess, sys
+the unmutated test and requires it to pass. The first groups are this round's mechanisms (the note by page and the second trial; what a
+worker remembers of pages, runs of words and pages of words; two words taken at once); the last is round sp47's mutants on the lines
+this round moved or rewrote, and a sample of those it did not touch."""
+import fcntl, os, subprocess, sys
+
+LOCK = "/tmp/pantheonsim-builder.lock"   # the machine lock: held for one mutant's build and runs at a time
 
 M = "src/core/memory_spec.cpp"
 C = "src/core/memory.cpp"
 X = "src/sass/exec.cpp"
 SEEN = "    if (seen.slot == slot && (seen.tag == w.tag || seen.tag == Spec::kMany)) [[likely]] continue;"
+KNOWN = "      if (runs[i].tag == tag && g0 >= runs[i].g0 && g1 <= runs[i].g1) return true;"
+JOIN = "      if (runs[i].tag == tag && g0 <= runs[i].g1 + 1 && g1 + 1 >= runs[i].g0) {"
+WP = "        if (!(v == Spec::kMany || v == tag || v == (tag | Spec::kWrite))) break;"
 MUTANTS = [
-    # ---- this round ----
+    # ---- this round: the note by page ----
     ("seen_for_any_block", M, SEEN, "    if (seen.slot == slot) [[likely]] continue;"),
     ("seen_for_any_page", M, SEEN, "    if (seen.tag == w.tag || seen.tag == Spec::kMany) [[likely]] continue;"),
     ("write_in_a_page_others_read", M,
@@ -29,27 +34,6 @@ MUTANTS = [
     ("writer_takes_a_page_of_several_readers", M,
      '      if (v == tag) {\n        // The page\'s only reader so far.',
      '      if (v == tag || v == kMany) {\n        // The page\'s only reader so far.'),
-    ("warp_page_check_without_last_bytes", M,
-     '    if (((apart | ends | ((a0 + (size - 1)) ^ a0)) >> 12) == 0',
-     '    if (((apart | ((a0 + (size - 1)) ^ a0)) >> 12) == 0'),
-    ("warp_page_check_without_first_bytes", M,
-     '    if (((apart | ends | ((a0 + (size - 1)) ^ a0)) >> 12) == 0',
-     '    if (((ends | ((a0 + (size - 1)) ^ a0)) >> 12) == 0'),
-    ("warp_page_check_without_lane_0", M,
-     '    if (((apart | ends | ((a0 + (size - 1)) ^ a0)) >> 12) == 0',
-     '    if (((apart | ends) >> 12) == 0'),
-    ("read_run_is_its_first_lane", M,
-     '      spec_read_in(s, worker, a0, uint64_t{count} * size);',
-     '      spec_read_in(s, worker, a0, size);'),
-    ("write_run_is_its_first_lane", M,
-     '      ++static_cast<Spec::Worker*>(worker)->st.runs_as_one;\n      spec_write_in(s, worker, a0, uint64_t{count} * size);\n      return;\n    }\n  }\n  for (size_t i = 0; i < count; ++i) spec_write_in(s, worker, addrs[i], size);',
-     '      ++static_cast<Spec::Worker*>(worker)->st.runs_as_one;\n      spec_write_in(s, worker, a0, size);\n      return;\n    }\n  }\n  for (size_t i = 0; i < count; ++i) spec_write_in(s, worker, addrs[i], size);'),
-    ("gapped_lanes_taken_as_a_run", M,
-     '    for (size_t i = 1; i < count; ++i) gaps |= addrs[i] - (a0 + i * size);\n    if (gaps == 0 &&',
-     '    for (size_t i = 1; i < count; ++i) gaps |= addrs[i] - (a0 + i * size);\n    if ('),
-    ("any_stride_taken_as_a_run", M,
-     '  if (count > 1 && stride == static_cast<int64_t>(size) && a0 + uint64_t{count} * size > a0) {',
-     '  if (count > 1 && a0 + uint64_t{count} * size > a0) {'),
     ("coarse_stop_not_said", M,
      '    out.coarse = true;',
      '    out.coarse = false;'),
@@ -74,6 +58,43 @@ MUTANTS = [
     ("second_trial_keeps_the_first_one_s_counters", X,
      '    sums.assign(threads, exec::LaunchStats{});',
      '    if (sums.empty()) sums.assign(threads, exec::LaunchStats{});'),
+    # ---- this round: what a worker remembers of words ----
+    ("run_for_any_block", M, KNOWN, "      if (g0 >= runs[i].g0 && g1 <= runs[i].g1) return true;"),
+    ("run_known_by_its_first_word", M, KNOWN, "      if (runs[i].tag == tag && g0 >= runs[i].g0 && g0 <= runs[i].g1) return true;"),
+    ("runs_joined_across_a_gap", M, JOIN, "      if (runs[i].tag == tag) {"),
+    ("read_run_remembered_before_it_is_noted", M,
+     '    const uint64_t g0 = first % kPageWords, g1 = last % kPageWords;\n    w.st.words_read += g1 - g0 + 1;',
+     '    const uint64_t g0 = first % kPageWords, g1 = last % kPageWords;\n    learn(w.read, w.read_next, tag, first, last);\n    w.st.words_read += g1 - g0 + 1;'),
+    ("write_run_remembered_before_it_is_taken", M,
+     '  const uint64_t mine2 = uint64_t{mine} | uint64_t{mine} << 32;',
+     '  const uint64_t mine2 = uint64_t{mine} | uint64_t{mine} << 32;\n  Spec::learn(w.wrote, w.wrote_next, w.tag, g0, g1);'),
+    ("readable_words_of_another_block", M, WP, "        if (v != Spec::kMany && (v & Spec::kWrite) && v != (tag | Spec::kWrite)) break;"),
+    ("readable_words_not_looked_at", M, WP, "        if (false) break;"),
+    ("word_page_of_another_page", M,
+     '    if (wp.slot == slot) {',
+     '    if (wp.page) {'),
+    # ---- this round: two words at once ----
+    ("pair_written_when_the_first_is_free", M,
+     '      if ((a == 0 || a == w.tag) && (b == 0 || b == w.tag) &&',
+     '      if ((a == 0 || a == w.tag) &&'),
+    ("pair_written_when_the_second_is_free", M,
+     '      if ((a == 0 || a == w.tag) && (b == 0 || b == w.tag) &&',
+     '      if ((b == 0 || b == w.tag) &&'),
+    ("pair_written_over_any_reader", M,
+     '      const uint32_t a = static_cast<uint32_t>(v2), b = static_cast<uint32_t>(v2 >> 32);',
+     '      const uint32_t a = static_cast<uint32_t>(v2) & Spec::kWrite ? 1u << 30 : 0, b = static_cast<uint32_t>(v2 >> 32) & Spec::kWrite ? 1u << 30 : 0;'),
+    ("pair_written_not_kept", M,
+     '        w.st.words_written_first += 2;\n        if (run == ~uint64_t{0}) run = g;',
+     '        w.st.words_written_first += 2;'),
+    ("pair_read_by_its_first_word", M,
+     '        if (mine(static_cast<uint32_t>(v2)) && mine(static_cast<uint32_t>(v2 >> 32))) {',
+     '        if (mine(static_cast<uint32_t>(v2))) {'),
+    ("pair_read_by_its_second_word", M,
+     '        if (mine(static_cast<uint32_t>(v2)) && mine(static_cast<uint32_t>(v2 >> 32))) {',
+     '        if (mine(static_cast<uint32_t>(v2 >> 32))) {'),
+    ("pair_already_written_by_its_first_word", M,
+     '      if (v2 == mine2) {',
+     '      if (static_cast<uint32_t>(v2) == mine) {'),
     # ---- round sp47's, on this round's lines ----
     ("write_conflict_ignored", M,
      '      if (v != Spec::kMany && (v & Spec::kWrite)) spec_refuse("two blocks wrote the same bytes");',
@@ -96,6 +117,9 @@ MUTANTS = [
     ("shadow_not_cleared", M,
      '      Spec::Word* page = s.top[slot].exchange(nullptr, std::memory_order_acq_rel);',
      '      Spec::Word* page = s.top[slot].load(std::memory_order_acquire);\n      continue;'),
+    ("undo_log_not_emptied", M,
+     '    w.kept_at.clear();\n    w.kept.clear();\n    // (the log\'s memory stays for the next trial, unless it grew large)',
+     '    // (the log\'s memory stays for the next trial, unless it grew large)'),
     ("host_store_allowed", M,
      '  if (off >= s.span || len > s.span - off) spec_refuse("a block wrote outside the device\'s own memory");',
      '  if (off >= s.span || len > s.span - off) return;'),
@@ -144,6 +168,8 @@ def main():
         if text.count(old) != 1:
             print("%-44s NOT APPLIED (%d matches)" % (name, text.count(old)), flush=True)
             continue
+        lock = open(LOCK, "w")
+        fcntl.flock(lock, fcntl.LOCK_EX)
         open(p, "w").write(text.replace(old, new))
         try:
             ok, log = build(bld)
@@ -154,7 +180,10 @@ def main():
             print("%-44s %s" % (name, "killed by " + ", ".join(failed) if failed else "SURVIVED"), flush=True)
         finally:
             open(p, "w").write(text)
+            lock.close()
     if not want:
+        lock = open(LOCK, "w")
+        fcntl.flock(lock, fcntl.LOCK_EX)
         ok, log = build(bld)
         failed = run(bld) if ok else ["build"]
         print("%-44s %s" % ("(no mutant)", "passes" if not failed else "FAILS: " + ", ".join(failed)), flush=True)

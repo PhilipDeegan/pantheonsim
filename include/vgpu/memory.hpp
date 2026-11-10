@@ -668,15 +668,14 @@ class MemoryManager {
     uint64_t pages_shared = 0;          // ... that a second block then read (several readers)
     uint64_t pages_by_word = 0;         // pages noted by word from their first touch
     uint64_t pages_coarse = 0;          // pages their only reader went on to write in (every word marked read by it)
-    uint64_t page_looks = 0;            // reads of a page the worker had no memory of
+    uint64_t page_looks = 0;            // reads that had to look at the shadow (no memory of the page, the run or the words)
     uint64_t words_read = 0;            // words looked at for a read in pages noted by word
     uint64_t words_read_first = 0;      // ... taken by compare-and-swap as their first reader
     uint64_t words_read_shared = 0;     // ... moved to several readers by compare-and-swap
     uint64_t words_written = 0;         // words looked at for a write
     uint64_t words_written_first = 0;   // ... taken by compare-and-swap (their bytes are kept)
     uint64_t keeps = 0;                 // pieces kept for undoing
-    uint64_t runs_as_one = 0;           // warp accesses of lanes one after another noted as one range
-    uint64_t warps_in_a_page = 0;       // warp reads answered by one look at the worker's memory of a page
+    uint64_t runs_known = 0;            // accesses inside a run of words the worker remembered its block had noted
     uint64_t word_pages = 0;            // pages of words put in place
     void add(const SpecStats& o);
   };

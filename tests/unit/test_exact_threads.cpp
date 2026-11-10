@@ -599,7 +599,7 @@ struct Paged {
   }
   void put_back() { mem.write(a, init.data(), size); }
   bool rd(uint64_t at, uint64_t len) {
-    uint8_t b[16];
+    uint8_t b[64];
     return stops([&] { mem.read(at, b, len); });
   }
   bool wr(uint64_t at, uint64_t len) {
@@ -766,10 +766,22 @@ VTEST(a_second_block_in_a_page_another_block_claimed_whole_is_stopped_before_its
   }
 }
 
+namespace {
+// Where a worker keeps its memory of a page (src/core/memory_spec.cpp, Spec::seen_at): two pages of `d` that share a place in a
+// table of `places` entries, as page numbers of `d` (`first` < `second`).
+std::pair<uint64_t, uint64_t> pages_that_share_a_place(const Paged& d, uint64_t pages, uint64_t places) {
+  const auto place = [&](uint64_t page) { return ((((d.p - kDeviceVaBase) / kPage + page) * 0x9E3779B97F4A7C15ull) >> 56) % places; };
+  for (uint64_t j = 1; j < pages; ++j)
+    for (uint64_t i = 0; i < j; ++i)
+      if (place(i) == place(j)) return {i, j};
+  throw vtest::Failure("no two pages share a place");
+}
+}  // namespace
+
 VTEST(what_a_worker_remembers_of_a_page_is_the_block_s_and_not_the_next_block_s) {
   // One worker runs block 0 and then block 1; both read the same page. If block 1 went by what the worker remembered for block 0,
   // its read would not be noted, and block 0's later write in the page would be let through.
-  Paged d(70);
+  Paged d(300);
   {
     Trial t(d.mem);
     VCHECK(!d.rd(d.p + 8, 4));
@@ -780,23 +792,37 @@ VTEST(what_a_worker_remembers_of_a_page_is_the_block_s_and_not_the_next_block_s)
     VCHECK(!t.end().committed);
   }
   {
-    // Two pages that share a place in the worker's memory (64 pages apart): the memory of one must not answer for the other.
+    // Two pages that share a place in the worker's memory: the memory of one must not answer for the other.
+    const auto [one, two] = pages_that_share_a_place(d, 300, 256);
     Trial t(d.mem);
     t.as(1, 1);
-    VCHECK(!d.wr(d.p + 64 * kPage + 8, 4));
+    VCHECK(!d.wr(d.p + two * kPage + 8, 4));
     t.as(0, 0);
-    VCHECK(!d.rd(d.p + 8, 4));
-    VCHECK(!d.rd(d.p + 8, 4));
-    VCHECK(d.rd(d.p + 64 * kPage + 8, 4));   // block 1 wrote it
+    VCHECK(!d.rd(d.p + one * kPage + 8, 4));
+    VCHECK(!d.rd(d.p + one * kPage + 8, 4));
+    VCHECK(d.rd(d.p + two * kPage + 8, 4));   // block 1 wrote it
+    VCHECK(!t.end().committed);
+  }
+  {
+    // The same for the pages of words a worker remembers: the words of one page do not answer for another's.
+    const auto [one, two] = pages_that_share_a_place(d, 300, 64);
+    Trial t(d.mem);
+    t.as(1, 1);
+    VCHECK(!d.wr(d.p + two * kPage + 8, 4));
+    t.as(0, 0);
+    VCHECK(!d.wr(d.p + one * kPage + 2048, 4));   // (by word)
+    VCHECK(!d.rd(d.p + one * kPage + 8, 4));
+    VCHECK(!d.rd(d.p + one * kPage + 8, 4));
+    VCHECK(d.rd(d.p + two * kPage + 8, 4));       // block 1 wrote it
     VCHECK(!t.end().committed);
   }
   VCHECK(d.all() == d.init);
 }
 
-VTEST(a_warp_s_lanes_are_noted_as_one_range_or_one_page_and_stopped_where_lane_by_lane_would_be) {
+VTEST(every_lane_of_a_warp_is_noted_wherever_it_lies) {
   Paged d(4);
   uint64_t addrs[32], v[64] = {};
-  // Lanes one after another: one range. A word in the middle is another block's: the load and the store are stopped, nothing is written.
+  // Lanes one after another, one word of which is another block's: the load and the store are stopped, nothing is written.
   for (int i = 0; i < 32; ++i) addrs[i] = d.p + 64 + 4 * i;
   for (const int taken : {0, 13, 31}) {
     for (const bool store : {false, true}) {
@@ -806,28 +832,25 @@ VTEST(a_warp_s_lanes_are_noted_as_one_range_or_one_page_and_stopped_where_lane_b
       VCHECK(stops([&] { store ? (void)d.mem.store_batch(addrs, 32, 4, v) : (void)d.mem.load_batch(addrs, 32, 4, v); }));
       const MemoryManager::SpecOutcome out = t.end();
       VCHECK(!out.committed && !out.coarse);
-      VCHECK_EQ(out.stats.runs_as_one, uint64_t{1});
       VCHECK(d.all() == d.init);
     }
   }
   {
-    // A store of 32 lanes one after another keeps its 128 bytes as one piece, and a later stop puts every one of them back.
+    // A warp's stores (lanes one after another, and lanes apart) keep every byte they change, and a later stop puts each back.
     Trial t(d.mem);
     for (int i = 0; i < 32; ++i) v[i] = 0xD0D0D0D0u + i;
     VCHECK(d.mem.store_batch(addrs, 32, 4, v));
     VCHECK(d.mem.store_strided(d.p + 1024, 8, 16, 8, v));
-    VCHECK(d.mem.store_strided(d.p + 2048, 16, 4, 8, v));   // (not one after another: lane by lane)
+    VCHECK(d.mem.store_strided(d.p + 2048, 16, 4, 8, v));
     t.as(1, 1);
     VCHECK(d.rd(addrs[31], 1));
     const MemoryManager::SpecOutcome out = t.end();
     VCHECK(!out.committed);
-    VCHECK_EQ(out.stats.keeps, uint64_t{1 + 1 + 4});
-    VCHECK_EQ(out.stats.runs_as_one, uint64_t{2});
     VCHECK_EQ(out.kept_bytes, uint64_t{128 + 128 + 32});
     VCHECK(d.all() == d.init);
   }
-  // Lanes scattered over one page the block may read: one look. A lane in another page, or whose last byte is, is still noted:
-  // that page holds another block's store.
+  // Lanes scattered over one page the block may read without a note, and one lane that lies in another page, or whose last byte
+  // does: that lane is still noted (the page holds another block's store).
   for (const int stray : {-1, 0, 7, 31}) {
     for (const uint64_t stray_at : {d.p + 2 * kPage + 16, d.p + kPage - 4}) {
       Trial t(d.mem);
@@ -841,7 +864,6 @@ VTEST(a_warp_s_lanes_are_noted_as_one_range_or_one_page_and_stopped_where_lane_b
       VCHECK_EQ(stopped, stray >= 0);
       const MemoryManager::SpecOutcome out = t.end();
       VCHECK_EQ(out.committed, stray < 0);
-      if (pages_on() && stray < 0) VCHECK_EQ(out.stats.warps_in_a_page, uint64_t{1});
       VCHECK(d.all() == d.init);
     }
   }
@@ -1033,6 +1055,151 @@ VTEST(a_chain_stopped_by_a_coarse_note_is_tried_by_word_and_then_run_in_order) {
   else VCHECK(got.counts.again <= 3);
   for (uint32_t b = 1; b <= 200; ++b)
     for (uint32_t t = 0; t < kThreads; ++t) VCHECK_EQ(got.words[b * kThreads + t], 3 * t + 7 + b);
+}
+
+VTEST(a_worker_remembers_the_runs_of_words_its_block_noted_for_that_block_only) {
+  Paged d(3);
+  uint8_t b[64] = {};
+  const auto wr = [&](uint64_t at, uint64_t len) { return stops([&] { d.mem.write(at, b, len); }); };
+  {
+    // A store in a loop: the second and later notes of the same words are answered by the worker's memory.
+    Trial t(d.mem);
+    VCHECK(!wr(d.p + 64, 32));
+    VCHECK(!wr(d.p + 64, 32));
+    VCHECK(!wr(d.p + 72, 8));
+    VCHECK(!d.rd(d.p + 68, 12));           // its own stores: readable
+    VCHECK(!wr(d.p + 96, 32));             // touches the run: one run of sixteen words now
+    VCHECK(!wr(d.p + 80, 40));
+    const MemoryManager::SpecOutcome out = t.end();
+    VCHECK(out.committed);
+    VCHECK_EQ(out.stats.runs_known, uint64_t{4});
+    VCHECK_EQ(out.stats.words_written, uint64_t{8 + 8});
+    VCHECK_EQ(out.kept_bytes, uint64_t{64});
+    d.put_back();
+  }
+  for (const unsigned other : {0u, 1u}) {
+    // What block 0 is remembered to hold is not block 1's, on the same worker or another: its write and its read are stopped.
+    for (const bool reads : {false, true}) {
+      Trial t(d.mem);
+      VCHECK(!wr(d.p + 64, 32));
+      VCHECK(!wr(d.p + 64, 32));
+      t.as(other, 1);
+      VCHECK(reads ? d.rd(d.p + 76, 4) : wr(d.p + 76, 4));
+      VCHECK(!t.end().committed);
+      VCHECK(d.all() == d.init);
+    }
+    // Words block 0 noted for reading (in a page noted by word) and read again: block 1's read of them is still noted (block 0's
+    // later write is stopped), and block 1's write is stopped.
+    for (const bool reads : {false, true}) {
+      Trial t(d.mem);
+      VCHECK(!wr(d.p + 512, 4));           // the page is by word from here
+      VCHECK(!d.rd(d.p + 64, 32));
+      VCHECK(!d.rd(d.p + 64, 32));
+      VCHECK(!d.rd(d.p + 70, 9));
+      t.as(other, 1);
+      if (reads) {
+        VCHECK(!d.rd(d.p + 64, 32));
+        VCHECK(!d.rd(d.p + 64, 32));
+        t.as(0, 0);
+        VCHECK(wr(d.p + 80, 4));
+      } else {
+        VCHECK(wr(d.p + 80, 4));
+      }
+      const MemoryManager::SpecOutcome out = t.end();
+      VCHECK(!out.committed);
+      VCHECK(out.stats.runs_known >= 2);
+      VCHECK(d.all() == d.init);
+    }
+  }
+  {
+    // Two runs with another block's word between them are not one run: a store across the gap is stopped.
+    Trial t(d.mem);
+    t.as(1, 1);
+    VCHECK(!wr(d.p + 80, 4));
+    t.as(0, 0);
+    VCHECK(!wr(d.p + 64, 16));
+    VCHECK(!wr(d.p + 84, 16));
+    VCHECK(wr(d.p + 64, 36));
+    VCHECK(!t.end().committed);
+    VCHECK(d.all() == d.init);
+  }
+}
+
+VTEST(the_words_a_worker_finds_readable_are_looked_at_every_time_and_for_the_block_that_reads) {
+  // A worker that has read in a page noted by word keeps where its words are, and a read whose words already allow it needs no
+  // more. What allows block 0 does not allow block 1, and a word another block wrote since is seen.
+  Paged d(3);
+  for (const unsigned other : {0u, 1u}) {
+    Trial t(d.mem);
+    VCHECK(!d.wr(d.p + 2048, 4));          // the page is by word
+    VCHECK(!d.rd(d.p + 64, 4));
+    VCHECK(!d.rd(d.p + 64, 4));            // (its own reader mark: nothing to do)
+    VCHECK(!d.rd(d.p + 72, 8));
+    t.as(other, 1);
+    VCHECK(!d.wr(d.p + 68, 4));            // a free word between block 0's
+    VCHECK(!d.rd(d.p + 72, 4));            // block 1 reads what block 0 read: it must be noted (several readers) ...
+    t.as(0, 0);
+    VCHECK(d.wr(d.p + 72, 4));             // ... or this store would go through
+    const MemoryManager::SpecOutcome out = t.end();
+    VCHECK(!out.committed);
+    VCHECK(std::string(out.why) == "a block wrote what another block read");
+    VCHECK(d.all() == d.init);
+    Trial t2(d.mem);
+    VCHECK(!d.wr(d.p + 2048, 4));
+    VCHECK(!d.rd(d.p + 64, 12));
+    t2.as(other, 1);
+    VCHECK(!d.wr(d.p + 76, 4));
+    t2.as(0, 0);
+    VCHECK(!d.rd(d.p + 64, 12));           // still its own
+    VCHECK(d.rd(d.p + 64, 16));            // the fourth word is block 1's now
+    VCHECK(!t2.end().committed);
+    VCHECK(d.all() == d.init);
+  }
+}
+
+VTEST(two_words_taken_at_once_are_taken_only_when_both_are_free_and_kept_like_two) {
+  Paged d(3);
+  uint8_t b[64];
+  std::memset(b, 0x5A, sizeof b);
+  // Block 1 holds one word (as its reader or its writer), at an even and at an odd place; block 0's store and load over it, starting
+  // at every place around it, are stopped, and what block 0 had taken before the stop goes back.
+  for (const uint64_t held : {uint64_t{128}, uint64_t{132}}) {
+    for (const bool held_written : {false, true}) {
+      for (uint64_t start = held - 20; start <= held; start += 4) {
+        for (const int form : {0, 1, 2, 3}) {
+          const bool store = form & 1, partner = form & 2;
+          Trial t(d.mem);
+          VCHECK(!d.wr(d.p + 2048, 4));   // (the page is by word)
+          if (partner) VCHECK(!d.rd(d.p + (held ^ 4), 4));   // the other word of the held word's pair is block 0's own
+          t.as(1, 1);
+          VCHECK(!(held_written ? d.wr(d.p + held, 4) : d.rd(d.p + held, 4)));
+          t.as(0, 0);
+          const bool stopped = store ? stops([&] { d.mem.write(d.p + start, b, 40); }) : d.rd(d.p + start, 40);
+          VCHECK_EQ(stopped, store || held_written);
+          const MemoryManager::SpecOutcome out = t.end();
+          VCHECK_EQ(out.committed, !stopped);
+          if (stopped) VCHECK(d.all() == d.init);
+          d.put_back();
+        }
+      }
+    }
+  }
+  // A store over words the block read one by one before (its own reader marks), from an odd place: every byte kept once.
+  for (const uint64_t start : {uint64_t{256}, uint64_t{260}}) {
+    Trial t(d.mem);
+    VCHECK(!d.wr(d.p + 2048, 4));
+    VCHECK(!d.rd(d.p + start + 8, 4));
+    VCHECK(!d.rd(d.p + start + 20, 8));
+    VCHECK(!stops([&] { d.mem.write(d.p + start, b, 44); }));
+    VCHECK(!stops([&] { d.mem.write(d.p + start + 4, b, 36); }));
+    t.as(1, 1);
+    VCHECK(d.rd(d.p + start + 40, 4));
+    const MemoryManager::SpecOutcome out = t.end();
+    VCHECK(!out.committed);
+    VCHECK_EQ(out.kept_bytes, uint64_t{4 + 44});
+    VCHECK_EQ(out.stats.words_written_first, uint64_t{1 + 11});
+    VCHECK(d.all() == d.init);
+  }
 }
 
 VTEST_MAIN

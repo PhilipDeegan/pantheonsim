@@ -69,15 +69,31 @@ Every method of the memory manager that reads or writes device bytes makes this 
 batch forms in `src/core/memory.cpp`; with no trial on, each is one null test). The methods that hand out a pointer for the caller
 to use later (`batch_window`, `atomic_word_ptrs`) decline during a trial, and the caller takes the path that is noted.
 
-Three things make the note cheaper without changing what is noted:
+Four things make the note cheaper without changing what is noted. Each is a memory a worker keeps for itself, or a wider
+compare-and-swap; none adds a state:
 
-* each worker remembers the last 64 pages its block may read with no further note: pages whose state was the block's own reader
-  mark, valid for that block only, and pages with several readers, valid for the rest of the trial (that state is final). A read of
-  such a page is one compare in the worker's own memory, with no atomic at all. The memory is asked the page and the block, so the
-  next block on the same worker starts with nothing but the pages of several readers;
-* a warp's accesses whose lanes lie one after another in memory are noted as the one range they are (one walk over its words and,
-  for a store, one piece of the undo log, where lane by lane it was 32 of each);
-* a warp's loads whose lanes all lie, first byte and last, in one page the worker remembers need that one compare for the warp.
+* **Pages a worker has seen.** Each worker remembers up to 256 pages its block may read with no further note: pages whose state
+  was the block's own reader mark, valid for that block only, and pages with several readers, valid for the rest of the trial
+  (that state is final). A read of such a page is one compare in the worker's own memory, with no atomic at all. The memory is
+  asked the page and the block, so the next block on the same worker starts with nothing but the pages of several readers. (The
+  place of a page in the memory is a hash of its number: a warp's lanes are often a fixed number of pages apart, the rows of a
+  matrix, and the low bits of the page number sent them all to a few places.)
+* **Runs of words a block has noted.** In a page noted by word, a worker remembers the last four runs of four words or more
+  that its block took as their writer (every word holds the block's writer mark, which nothing changes), and the last four it
+  noted for reading (every word held the block's reader mark, its writer mark or the several-readers mark, and from those a
+  word only moves to another of them). An access of the same block inside a remembered run has nothing to note: the store of
+  `tmp[i] += ...` in a loop is one range compare instead of 32 loads and compares. Two runs of one block that touch are
+  remembered as one; a run is asked the block.
+* **Pages of words a worker has read in.** The worker remembers where the words of 64 such pages are; a read whose words all
+  allow it already (looked at one by one, every time) needs no call and no compare-and-swap.
+* **Two words at once.** Two neighbouring words (the first at an even index) are read as one 64-bit value, and taken by one
+  64-bit compare-and-swap when both are free for the block (both untouched for a read; each untouched or the block's own reader
+  mark for a write). When either holds anything else the words are handled one at a time as before, so no state is entered
+  that the single-word rules do not allow: the 64-bit compare-and-swap succeeds only if both words still hold exactly the values
+  that were judged free.
+
+The undo log of a worker keeps its memory from one trial to the next (up to 64 MiB; a launch that writes much writes as much the
+next time).
 
 When the workers are done:
 
@@ -104,6 +120,12 @@ writer. The other block made its note either
   the same block (or, for "several readers", for any block): both stay true of the page for as long as the memory is used, the
   first because a page read by `b` can only be changed to "several readers" (also fine for `b`) or to "by word" by `b` itself
   with `b`'s mark on every word.
+
+The same holds for a block that goes by a remembered run of words instead of the words: a word in a run the block wrote holds the
+block's writer mark for the rest of the trial; a word in a run it noted for reading held a mark that allows the block's read, and
+every state such a word can move to still stops another block's write of it (another block's reader mark on it makes it "several
+readers"; the block's own write makes it the block's). Taking two words by one compare-and-swap is taking each of them by the
+single-word rule at the same instant, or not at all.
 
 So in a trial that was not stopped, no byte was written by one block and touched by another. Each block therefore read, for every
 byte, either what the launch started with or what the block itself stored, and that is also what it reads when the blocks run in
@@ -139,10 +161,12 @@ A block writes a byte only after its word is the block's own writer mark, and it
 the mark and the first store. No other block writes a word that carries the mark, so what was copied is what the launch started
 with, and no byte the trial wrote is outside a word some block marked and copied. Writing the copies back, in any order, gives
 the memory of before the launch. Bytes of a marked word that lie outside every allocation (the tail of an allocation whose size is
-no multiple of four) are not copied and cannot be written. A warp's store noted as one range takes the same words and keeps the
-same bytes as its lanes one by one would, in one piece; when a word in the middle of the range is another block's, the trial stops
-with the words before it marked and not yet copied, and no lane of the store has been written (the note comes before the store), so
-there is nothing of theirs to put back. The page states hold no bytes and are cleared with the words.
+no multiple of four) are not copied and cannot be written. Two words taken at once are kept like two taken one after the other
+(they join the run of words taken in the call, which is copied before the call returns). When a word in the middle of a store's
+range is another block's, the trial stops with the words before it marked and not yet copied, and no byte of the store has been
+written (the note comes before the store), so there is nothing of theirs to put back. A store inside a remembered run of the
+block's own words keeps nothing: those words were kept when the block took them. The page states hold no bytes and are cleared
+with the words.
 
 Every block of a trial sees a state of memory that could be real (the launch's start plus its own stores), so a block of a trial
 that will be stopped still runs on consistent data. It may run longer than it does in order, or wait for a store that never comes;
@@ -189,8 +213,9 @@ hand-off to the pool stays on one thread and is not tried.
 
 While a trial runs, each access of a warp to global memory makes one call of the note on top of the access. For a page the block
 may read without a note (read by it, or by several blocks, and written by none) that is a compare in the worker's memory per page
-the warp touches; for a page noted by word, a load of the word and a compare per lane when the block has been there, a
-compare-and-swap the first time, and for a store a copy of the old bytes. The page states take four bytes of host memory per 4 KiB
+the warp touches; for a page noted by word, a range compare when the block is remembered to have noted the words, else a load
+and a compare per word when the block has been there and a compare-and-swap per two words the first time, and for a store a
+copy of the old bytes. The page states take four bytes of host memory per 4 KiB
 of device memory the launch touches; the words 4 KiB per 4 KiB page a block writes in (or that the plan notes by word); both are
 cleared after each trial. The undo log holds the bytes the launch wrote for the first time, at most 1 GiB per worker (more stops
 the trial). A kernel with a coarse stop pays for the part of the trial before the stop once per learned allocation. Measurements:
@@ -202,7 +227,7 @@ Round sp47 and Round sp55 in [the performance log](perf-design/rounds/README.md)
 or `in order`, the reason, the bytes kept for undoing and the 4 KiB pages touched; a trial that was stopped coarsely and tried again
 has a line of its own before it, with `again`. `VGPU_EXACT_STATS=<file>` appends a line per trial with what its notes cost
 (`MemoryManager::SpecStats`): calls of the hooks, pages taken by one reader, by several, noted by word, made coarse, words looked at
-and taken by compare-and-swap for reads and for writes, pieces and bytes kept, warp accesses noted as one range or one page.
+and taken by compare-and-swap for reads and for writes, pieces and bytes kept, accesses answered by a remembered run.
 `sass::exact_counts()` gives the process's totals to a test (`again`: the trials run a second time).
 
 ## Tests
@@ -218,8 +243,10 @@ For the note by page: a second block, on the same worker and on another, in a pa
 as its reader and then a writer; with a second reader), at every byte of the first, a middle and the last word of the page, with
 lengths of 1 to 8 bytes and accesses that end in the next page: stopped before the access wherever a note by word stops it, undone
 to the byte, said to be coarse exactly where only the grain stopped it, and kept when run again with the allocation by word; the
-worker's memory of a page not answering for the next block or for another page; a warp's lanes as one range (a word in the middle
-taken by another block, the undo of a range kept in one piece) and as one page (a lane whose first or last byte is in another
-page); 600 random interleavings of four blocks on two workers against a model of the four word states (by word: stopped at exactly
+worker's memory of a page not answering for the next block or for another page that shares its place (nor its memory of a page
+of words); a warp's lanes each noted (a word in the middle taken by another block, a lane whose first or last byte is in another
+page than the rest); remembered runs of words answering for their block only, joined only when they touch; readable words
+looked at every time; two words taken at once only when both are free, at even and odd places, and kept like two; 600 random
+interleavings of four blocks on two workers against a model of the four word states (by word: stopped at exactly
 the access the model stops; by page: never later, earlier only as a coarse stop, and the model's again with the allocation by
 word); a kernel that updates its buffer in place, tried again by word and kept, with the bits and counters of the run in order.
