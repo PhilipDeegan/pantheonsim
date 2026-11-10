@@ -7,6 +7,10 @@ release says what runs and what it produces, never how fast a real GPU would run
 
 ## Unreleased
 
+- SASS: a loop that spins with `__nanosleep` as its back-off (lanes of one warp racing for a slot with `atomicCAS`, the losers
+  sleeping until the winner publishes) runs to the end. ptxas puts no YIELD in such a loop, so the lane that won stood at the
+  BSYNC closing it and the spinners ran until the exec limit; a NANOSLEEP now lets the other lanes and warps go first, as a YIELD
+  does, and the spin breaker applies (eliphatfs/cuacd's mesh_audit edge table, pantheonsim #553).
 - CUDA runtime and driver: a zero-byte `cudaMalloc`, `cudaMallocManaged`, `cudaMallocHost`, `cudaHostAlloc` or `cudaMallocAsync` succeeds
   and gives a NULL pointer, as on a GPU, where it gave a distinct non-NULL one (Gpufit tests its unused buffers against NULL); the
   driver's `cuMemHostAlloc`/`cuMemAllocHost` of 0 bytes do the same, and `cuMemAlloc(0)` is `CUDA_ERROR_INVALID_VALUE` with the
