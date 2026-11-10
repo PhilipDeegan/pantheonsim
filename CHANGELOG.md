@@ -7,6 +7,11 @@ release says what runs and what it produces, never how fast a real GPU would run
 
 ## Unreleased
 
+- SASS engine on hosts with AVX-512 (F/BW/DQ/VL and VNNI): binary64 add, multiply and fused multiply-add (`DADD`, `DMUL`, `DFMA`) run
+  sixteen lanes to a step instead of four. Programs that compute in `double` run 3 to 39 % faster on a Zen 4 host (eight of nine
+  measured gain 5 % or more: lavaMD 1.18x, RSBench 1.39x, LULESH 1.07x); single-precision programs and hosts without AVX-512 are
+  unchanged, the results are the same bits, and `VGPU_SIMD=avx2` keeps the 256-bit kernel. New unit test `test_lanes512` (skipped on
+  a host without AVX-512).
 - `VGPU_HOST_STATS=1` prints one line of host-kernel counters when a simulated program exits (CPU user and system time, page faults,
   context switches, threads, huge-page use, heap-chunk `madvise` and `mmap` counts, worker-pool threads and calls, kernel, CPU count and
   THP mode); `VGPU_HOST_STATS=30` also prints one every 30 seconds, flushed, and `VGPU_HOST_STATS_FILE` redirects them. For finding why a

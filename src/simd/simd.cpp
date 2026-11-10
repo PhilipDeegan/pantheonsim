@@ -450,12 +450,13 @@ bool bank_window_k(const uint32_t* offs, uint32_t m, uint32_t bytes, uint32_t& o
 }  // namespace avx2_impl
 #pragma GCC pop_options
 
-// The AVX-512 level: the tile kernels at 512 bits (kernels512.inc), under the target pragma for the units they use; the other entries of the
-// Avx512 table are the Avx2 ones.
+// The AVX-512 level: the tile kernels at 512 bits (kernels512.inc) and the SASS tier's binary64 kernel dop_m sixteen lanes to a step
+// (lanes512.inc), under the target pragma for the units they use; the other entries of the Avx512 table are the Avx2 ones.
 #pragma GCC push_options
 #pragma GCC target("avx2,fma,f16c,avx512f,avx512bw,avx512dq,avx512vl,avx512vnni")
 namespace avx512_impl {
 #include "kernels512.inc"
+#include "lanes512.inc"
 }  // namespace avx512_impl
 #pragma GCC pop_options
 #endif
@@ -647,7 +648,7 @@ const Kernels kAvx2Lazy = {Level::Avx2,       lazy_f16_to_f32,   lazy_f32_to_f16
                        avx2_impl::prmt0_k, avx2_impl::dcmp_k, avx2_impl::hfma2_bf_m_k,
                        avx2_impl::tile_f32_k, avx2_impl::tile_i32_k, avx2_impl::tile_f64_k, avx2_impl::tile_f32c_k, avx2_impl::f2f_widen_k, avx2_impl::f2f_narrow_k, avx2_impl::i2d_k};
 
-// The Avx512 tables: each Avx2 one with the three tile kernels replaced by the 512-bit forms.
+// The Avx512 tables: each Avx2 one with the tile kernels and dop_m (lanes512.inc) replaced by the 512-bit forms.
 Kernels make_avx512(const Kernels& base) {
   Kernels k = base;
   k.level = Level::Avx512;
@@ -655,6 +656,7 @@ Kernels make_avx512(const Kernels& base) {
   k.tile_i32 = avx512_impl::tile_i32_k;
   k.tile_f64 = avx512_impl::tile_f64_k;
   k.tile_f32c = avx512_impl::tile_f32c_k;
+  k.dop_m = avx512_impl::dop_m_k;
   return k;
 }
 const Kernels kAvx512NoF16c = make_avx512(kAvx2NoF16c), kAvx512 = make_avx512(kAvx2), kAvx512Lazy = make_avx512(kAvx2Lazy);

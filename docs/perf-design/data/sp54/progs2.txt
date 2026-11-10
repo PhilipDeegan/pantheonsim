@@ -1,0 +1,60 @@
+# id|directory under corp2|program and arguments (sizes cut down from the Makefiles' until a run takes seconds on the simulator)
+hec2/aop-cuda|HeCBench/src/aop-cuda|main -runs 1
+hec2/lavaMD-cuda|HeCBench/src/lavaMD-cuda|main -boxes1d 8
+hec2/babelstream-cuda|HeCBench/src/babelstream-cuda|main -s 4194304 -n 5
+hec2/xsbench-cuda|HeCBench/src/xsbench-cuda|main -s small -m event -l 200000
+hec2/rsbench-cuda|HeCBench/src/rsbench-cuda|main -s small -m event -l 20000
+hec2/myocyte-cuda|HeCBench/src/myocyte-cuda|main 4000
+hec2/lulesh-cuda|HeCBench/src/lulesh-cuda|main -i 10 -s 48 -r 11 -b 1 -c 1
+hec2/burger-cuda|HeCBench/src/burger-cuda|main 1024 1024 20
+hec2/thomas-cuda|HeCBench/src/thomas-cuda|main 1024 4096 64 2
+hec2/romberg-cuda|HeCBench/src/romberg-cuda|main 128 64 4
+hec2/haversine-cuda|HeCBench/src/haversine-cuda|main ../geodesic-cuda/locations.txt 1
+hec2/vanGenuchten-cuda|HeCBench/src/vanGenuchten-cuda|main 64 64 64 10
+hec2/kalman-cuda|HeCBench/src/kalman-cuda|main 1000 50 3 2
+hec2/zmddft-cuda|HeCBench/src/zmddft-cuda|main 1
+hec2/su3-cuda|HeCBench/src/su3-cuda|main -i 5 -l 16 -t 128 -v 3 -w 1
+hec2/dslash-cuda|HeCBench/src/dslash-cuda|main 16
+hec2/amgmk-cuda|HeCBench/src/amgmk-cuda|main
+hec2/ccsd-trpdrv-cuda|HeCBench/src/ccsd-trpdrv-cuda|main 8 16 1
+hec2/fresnel-cuda|HeCBench/src/fresnel-cuda|main 1
+hec2/complex-cuda|HeCBench/src/complex-cuda|main 100000 1
+hec2/sph-cuda|HeCBench/src/sph-cuda|main
+hec2/wsm5-cuda|HeCBench/src/wsm5-cuda|main 1
+hec2/damage-cuda|HeCBench/src/damage-cuda|main 100000 1
+hec2/tridiagonal-cuda|HeCBench/src/tridiagonal-cuda|main -num_systems=1024
+hec2/libor-cuda|HeCBench/src/libor-cuda|main 1
+hec2/bonds-cuda|HeCBench/src/bonds-cuda|main 1
+hec2/laplace-cuda|HeCBench/src/laplace-cuda|main
+hec2/d2q9-bgk-cuda|HeCBench/src/d2q9-bgk-cuda|main Inputs/input_128x128.params Obstacles/obstacles_128x128.dat
+hec2/projectile-cuda|HeCBench/src/projectile-cuda|main 1
+hec2/michalewicz-cuda|HeCBench/src/michalewicz-cuda|main 100000 1
+hec2/mcpr-cuda|HeCBench/src/mcpr-cuda|main alphas.csv 1
+hec2/sw4ck-cuda|HeCBench/src/sw4ck-cuda|main sw4ck.in 1
+hec2/md-cuda|HeCBench/src/md-cuda|main 3 1
+hec2/nbody-cuda|HeCBench/src/nbody-cuda|main 1000 1
+hec2/particlefilter-cuda|HeCBench/src/particlefilter-cuda|main -x 64 -y 64 -z 5 -np 4000
+hec2/cfd-cuda|HeCBench/src/cfd-cuda|main ../data/cfd/fvcorr.domn.097K
+hec2/heat2d-cuda|HeCBench/src/heat2d-cuda|main 256 256 10
+hec2/jacobi-cuda|HeCBench/src/jacobi-cuda|main
+hec2/adv-cuda|HeCBench/src/adv-cuda|main 7 15 100 1
+hec2/minimod-cuda|HeCBench/src/minimod-cuda|main --niters 1 --grid 32 --nsteps 5
+hec2/fft-cuda|HeCBench/src/fft-cuda|main 1 1
+hec2/simplemoc-cuda|HeCBench/src/simplemoc-cuda|main -s 20000 -e 32 -n 1
+hec2/rayleighBenardConvection-cuda|HeCBench/src/rayleighBenardConvection-cuda|main 2
+hec2/wenofv-cuda|HeCBench/src/wenofv-cuda|main 32 32 16 1
+samples/MC_EstimatePiP-double|cuda-samples/build/Samples/2_Concepts_and_Techniques/MC_EstimatePiP|MC_EstimatePiP --precision=double --sims=20000
+samples/MC_EstimatePiInlineP-double|cuda-samples/build/Samples/2_Concepts_and_Techniques/MC_EstimatePiInlineP|MC_EstimatePiInlineP --precision=double --sims=20000
+samples/MC_SingleAsianOptionP-double|cuda-samples/build/Samples/2_Concepts_and_Techniques/MC_SingleAsianOptionP|MC_SingleAsianOptionP --precision=double --sims=5000
+samples/interval|cuda-samples/build/Samples/2_Concepts_and_Techniques/interval|interval
+samples/binomialOptions|cuda-samples/build/Samples/5_Domain_Specific/binomialOptions|binomialOptions
+samples/MonteCarloMultiGPU|cuda-samples/build/Samples/5_Domain_Specific/MonteCarloMultiGPU|MonteCarloMultiGPU
+samples/jacobiCudaGraphs|cuda-samples/build/Samples/3_CUDA_Features/jacobiCudaGraphs|jacobiCudaGraphs
+samples/quasirandomGenerator|cuda-samples/build/Samples/5_Domain_Specific/quasirandomGenerator|quasirandomGenerator
+# Tried and left out of progs2.txt (profile-base/shares.txt has their lines): did not finish in the sampler's 30 s (or 20 s) limit at the
+# arguments tried, or had no arguments to cut down:
+#   hec2/binomial-cuda|main            hec2/hypterm-cuda|main 1         hec2/feynman-kac-cuda|main 1     hec2/sheath-cuda|main
+# and hec2/heat-cuda|main 1024 200 (7.5 s, kernel 6.2 %: under the 10 % line).
+# Lines above that failed where they stand: haversine (its input file is in geodesic-sycl, not copied), d2q9-bgk (its Inputs directory was
+# not in the cached build), dslash, fresnel, sph, wsm5, tridiagonal, bonds, laplace (over the limit at these arguments).
+# Lines from hec2/md-cuda down and the samples/ lines were never run: the triage was stopped once nine programs were over the 10 % line.
