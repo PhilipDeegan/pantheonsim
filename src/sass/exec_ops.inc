@@ -5560,9 +5560,10 @@ bool Runner::exec_control(Block& blk, Warp& w, const Instr& ins, Mask ex, Mask g
         });
       }
       return false;
-    case Op::NOP: case Op::DEPBAR: case Op::MEMBAR: case Op::ERRBAR: case Op::NANOSLEEP:
+    case Op::NOP: case Op::DEPBAR: case Op::MEMBAR: case Op::ERRBAR:
     case Op::ENDCOLLECTIVE:
       return false;
+    case Op::NANOSLEEP:   // a thread that sleeps lets the others go first, as a YIELD does: a spin-wait with a back-off is no different
     case Op::YIELD:
       // A hint ptxas puts in loops, spin-waits among them (sm_80's mbarrier
       // waits poll shared memory): other lane groups, and other warps, go

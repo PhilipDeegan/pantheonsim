@@ -12,6 +12,23 @@ release says what runs and what it produces, never how fast a real GPU would run
   measured gain 5 % or more: lavaMD 1.18x, RSBench 1.39x, LULESH 1.07x); single-precision programs and hosts without AVX-512 are
   unchanged, the results are the same bits, and `VGPU_SIMD=avx2` keeps the 256-bit kernel. New unit test `test_lanes512` (skipped on
   a host without AVX-512).
+- PTX: `ld.weak` and `st.weak` are accepted (the explicit spelling of the default memory semantics, PTX ISA 6.0 and later). They
+  stopped GiMMiK 4.0's matrix-multiply kernels, and so PyFR's CUDA backend, at module load (pantheonsim #554).
+- NVRTC (the built-in compiler, used when no toolkit is visible): `--ftz=`, `--prec-div=` and `--prec-sqrt=` are accepted beside
+  `--fmad=`, as the real NVRTC takes them; PyFR passes `--ftz=true` to every compile (pantheonsim #555).
+- CUDA driver: `cuModuleLoadDataEx` fills `CU_JIT_ERROR_LOG_BUFFER` (and the size slot) when a load fails, and malformed PTX is
+  `CUDA_ERROR_INVALID_PTX` rather than `CUDA_ERROR_NOT_SUPPORTED`; a `.version` past 9.3 is `CUDA_ERROR_UNSUPPORTED_PTX_VERSION`, and
+  text that does not begin with `.version` is `CUDA_ERROR_INVALID_IMAGE`. `cuLinkAddData` checks its PTX as it is added and fails
+  the same three ways, with the log in the link state's error buffer, instead of `cuLinkComplete` succeeding on garbage. All
+  measured on an RTX 3060 (gocudrv's `TestRealModuleJITLog` and `TestRealLinkerBadPTX`, pantheonsim #558).
+- PTX: a `.reg` range may declare up to 1,048,576 registers (it was 65,536). ptxas allocates physical registers and counts only what
+  a kernel uses, so nvcc's unrolled BN254 field arithmetic declares 125,511 and loads on a GPU; the per-block limit on registers a
+  kernel uses is unchanged (pantheonsim #559).
+
+- SASS: a loop that spins with `__nanosleep` as its back-off (lanes of one warp racing for a slot with `atomicCAS`, the losers
+  sleeping until the winner publishes) runs to the end. ptxas puts no YIELD in such a loop, so the lane that won stood at the
+  BSYNC closing it and the spinners ran until the exec limit; a NANOSLEEP now lets the other lanes and warps go first, as a YIELD
+  does, and the spin breaker applies (eliphatfs/cuacd's mesh_audit edge table, pantheonsim #553).
 - `VGPU_HOST_STATS=1` prints one line of host-kernel counters when a simulated program exits (CPU user and system time, page faults,
   context switches, threads, huge-page use, heap-chunk `madvise` and `mmap` counts, worker-pool threads and calls, kernel, CPU count and
   THP mode); `VGPU_HOST_STATS=30` also prints one every 30 seconds, flushed, and `VGPU_HOST_STATS_FILE` redirects them. For finding why a

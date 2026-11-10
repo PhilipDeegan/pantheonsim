@@ -691,9 +691,10 @@ void analyze(const Instr& ins, int sm, Program& prog, MOp& op) {
       m.dst = static_cast<uint16_t>(ins.dst[0].reg);
       accept(Form::Bssy);
       return;
-    case Op::NOP: case Op::DEPBAR: case Op::MEMBAR: case Op::ERRBAR: case Op::NANOSLEEP: case Op::ENDCOLLECTIVE:
+    case Op::NOP: case Op::DEPBAR: case Op::MEMBAR: case Op::ERRBAR: case Op::ENDCOLLECTIVE:
       accept(Form::Nop);   // exec_control does nothing for these but let the group go on
       return;
+    case Op::NANOSLEEP:   // sleeping lets the others go first, as a YIELD does (exec_control)
     case Op::YIELD:       // the other lanes, and the other warps, go first
       accept(Form::Yield);
       return;
