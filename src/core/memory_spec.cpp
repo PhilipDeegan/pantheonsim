@@ -572,6 +572,16 @@ void MemoryManager::spec_keep(uint64_t addr, uint64_t len) const {
         w.st.words_read += g1 - g0 + 1;
         continue;
       }
+      // One untouched word (a lane of a scattered load): taken here as its first reader. (Anything else, and a word another
+      // block took meanwhile, goes the long way.)
+      if (g0 == g1) {
+        uint32_t none = 0;
+        if (wp.page[g].compare_exchange_strong(none, tag, std::memory_order_acq_rel)) {
+          w.st.words_read += 1;
+          w.st.words_read_first += 1;
+          continue;
+        }
+      }
     }
     ++w.st.page_looks;
     s.read_page(w, slot, lo, hi);
