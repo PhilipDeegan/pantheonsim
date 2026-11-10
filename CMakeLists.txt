@@ -1533,6 +1533,7 @@ add_test(NAME test_sass_store_gate_tier0 COMMAND test_sass_store_gate)
 set_tests_properties(test_sass_store_gate_tier0 PROPERTIES ENVIRONMENT "VGPU_TIER=0")
 # The run loop going on past S2R, ULDC, UMOV, USEL, PLOP3 and SEL where the chain would have started the next call there: same words, counters and clocks as the interpreter.
 vgpu_unit_test(test_sass_chain_cont)
+target_include_directories(test_sass_chain_cont PRIVATE src)   # (src/sass/jit.hpp: the statistics the linking check reads)
 # What the run loop counts and when it stops, op by op, against the interpreter's: the lanes a guard leaves and their count, the group's count between
 # calls of the chain, a lane's exit or an op's fault in the middle of a run, and the step budget ended at every offset.
 vgpu_unit_test(test_sass_dispatch_counts)
@@ -1546,6 +1547,13 @@ foreach(_t test_sass_chain_cont test_sass_store_gate test_sass_alu_runs test_sas
   add_test(NAME ${_t}_jit COMMAND ${_t})
   set_tests_properties(${_t}_jit PROPERTIES ENVIRONMENT
     "VGPU_JIT=1;VGPU_JIT_THRESHOLD=1;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-${_t}")
+endforeach()
+# And with linking (VGPU_JIT_LINK=1, round sp52: the generated code goes on past a branch or cont op in a diverged warp while the chain would pick its group again):
+# test_sass_chain_cont's kernels diverge, loop apart and meet; the same words, counters and clocks as the interpreter, and the linking must have happened.
+foreach(_t test_sass_chain_cont test_sass_store_gate test_sass_alu_runs test_sass_dispatch_counts)
+  add_test(NAME ${_t}_jit_link COMMAND ${_t})
+  set_tests_properties(${_t}_jit_link PROPERTIES ENVIRONMENT
+    "VGPU_JIT=1;VGPU_JIT_LINK=1;VGPU_JIT_STATS=1;VGPU_JIT_STATS_FILE=/dev/null;VGPU_JIT_THRESHOLD=1;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-link-${_t}")
 endforeach()
 vgpu_unit_test(test_sass_s2r_fill)
 # LDGSTS (cp.async): the tier's own handler against the rule and the interpreter, registers, shared memory and counters.

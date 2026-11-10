@@ -2240,12 +2240,44 @@ inline void tier_release_bar(Block& blk, unsigned id) {
 struct JitHost {
   TCtx* c;
   bool stats;
+  uint64_t pc0;   // the address of the first op of the region being run (a split in generated code sets lanes' addresses)
 };
 
 // The tier's statistics of an op the generated code has run, an escape's or its own (reported even when no lane executed it, as the loop reports them).
 void jit_note(jit::Ctx* j, uint32_t i) {
   JitHost& h = *static_cast<JitHost*>(j->host);
   if (h.stats) [[unlikely]] tier_stats().native[static_cast<size_t>(reinterpret_cast<const tier::MOp*>(j->ops)[i].ins->op)].fetch_add(1, std::memory_order_relaxed);
+}
+
+// A BSSY inside a region (linking, jit.hpp): the run loop's own lines for it. The lanes join the barrier, in nesting order (exec_control's BSSY).
+void jit_ctl(jit::Ctx* j, uint32_t i, uint32_t ex) {
+  JitHost& h = *static_cast<JitHost*>(j->host);
+  TCtx& c = *h.c;
+  const tier::MOp& op = reinterpret_cast<const tier::MOp*>(j->ops)[i];
+  c.w->b[op.dst] |= ex;
+  c.w->bssy_stamp[op.dst & 15] = ++c.blk->bssy_clock;
+}
+
+// A branch that splits the group, run by generated code (linking): the lanes that take it stand at its target, the others of the group at the next op
+// (the run loop's select_pcs for it; both places are region-relative op indices).
+void jit_split(jit::Ctx* j, uint32_t group, uint32_t take, int32_t tgt, int32_t fall) {
+  JitHost& h = *static_cast<JitHost*>(j->host);
+  exec::sasslanes::select_pcs(h.c->w->pc, group, take, h.pc0 + 16 * static_cast<uint64_t>(static_cast<int64_t>(tgt)), h.pc0 + 16 * static_cast<uint64_t>(static_cast<int64_t>(fall)));
+}
+
+// An EXIT inside a region that no lane of the group takes (linking, jit.hpp). The run loop runs an EXIT itself only when nothing waits for it (no lane of the
+// warp waits, no block barrier has an arrival; otherwise it is the interpreter's): then, with no lane leaving, what is left of the loop's lines is the
+// cluster barrier's check. False: not the loop's, nothing done.
+bool Runner::jit_exit_none(Block& blk, const Warp& w) {
+  if (w.waiting != 0) return false;
+  for (const Block::Barrier& b : blk.bars())
+    if (b.arrived) return false;
+  cluster_barrier_check(blk);
+  return true;
+}
+uint32_t jit_exit0(jit::Ctx* j) {
+  JitHost& h = *static_cast<JitHost*>(j->host);
+  return h.c->r->jit_exit_none(*h.c->blk, *h.c->w) ? 1u : 0u;
 }
 
 // S2R for generated code: the special register `sr` of the executing lanes into the row d (h_s2r's work, which the generated code cannot do without the
@@ -2275,7 +2307,73 @@ struct JitFrame {
   uint32_t mut = 0;   // the mutation checks (tests only)
   uint32_t flags = 0; // Ctx::flags but the chain's bit: what does not change from one region call to the next
   uint64_t gen = 0;   // the generated ops run (the statistics)
+  // Linking (jit.hpp, Ctx::olo), worked out by the loop once a pass, at the first region call of a pass whose chain conditions fail: 0 not yet, 1 the
+  // conditions fail only because other runnable lanes stand elsewhere (kFlagLink goes up, `olo` is the section-relative op index of the lowest of them,
+  // rounded up), 2 no.
+  uint8_t lstate = 0;
+  int64_t olo = 0;
+  uint64_t base = 0;    // the section's address
+  size_t pcs_first = 0; // after a region call that split the group (jc.group is not the group it was called with): the section's op the new group's lanes' addresses were set to
 };
+
+// Why a region call ended at the region-relative op `ei` (the statistics only: jit::ExitWhy). Worked out from the state the generated code left, which is
+// the state before that op: nothing of it is done.
+[[gnu::noinline]] unsigned jit_exit_why(const jit::Unit& ju, uint32_t ri, const tier::MOp* ops, int32_t ei, TCtx& c, const Warp& w, Mask group, bool chain, uint64_t max_steps) {
+  const jit::Region& rg = ju.regions[ri - 1];
+  const jit::RegionSpec& rs = ju.spec.regions[ri - 1];
+  const size_t count = ju.region_at.size();
+  if (ei >= 0 && static_cast<uint32_t>(ei) < rg.k) {
+    const jit::OpFacts& f = rs.ops[static_cast<uint32_t>(ei)];
+    const tier::MOp& op = ops[rg.first + static_cast<uint32_t>(ei)];
+    if (f.br) {
+      const Mask ex = op.unguarded ? group : tier_guard(w, *op.ins, group);
+      Mask take = ex;
+      if (op.aux) {
+        take &= tier_pmask(c, op.p);
+        if (op.aux > 1) take &= tier_pmask(c, op.p2);
+      }
+      if (take != group && take) return jit::kExSplit;
+      if (!chain) return take ? jit::kExBraTaken : jit::kExBraFall;
+      if (!w.budget) return jit::kExBudget;
+    } else if (f.hostctl == 2) {   // an EXIT in a region (linking)
+      Mask go = op.unguarded ? group : tier_guard(w, *op.ins, group);
+      if (op.aux) {
+        go &= tier_pmask(c, op.p);
+        if (op.aux > 1) go &= tier_pmask(c, op.p2);
+      }
+      return go ? jit::kExExit : jit::kExExitNone;
+    } else if (f.cont) {
+      if (!chain) return jit::kExCont;
+      if (!w.budget) return jit::kExBudget;
+    } else if (f.store && w.store_gate) {
+      return jit::kExGate;
+    }
+    return w.steps + (jit::stretch_end(rs, static_cast<uint32_t>(ei)) - static_cast<uint32_t>(ei)) > max_steps ? jit::kExSteps : jit::kExBound;
+  }
+  const int64_t idx = static_cast<int64_t>(rg.first) + ei;
+  if (idx < 0 || static_cast<size_t>(idx) >= count) return jit::kExInterp;
+  const uint32_t* act = ju.active.load(std::memory_order_acquire);
+  if (act[idx] && ju.fn(act[idx] - 1)) return jit::kExToRegion;
+  const tier::MOp& op = ops[idx];
+  switch (op.form) {
+    case tier::Form::Bssy: case tier::Form::Nop: return jit::kExBssy;
+    case tier::Form::Bsync: return jit::kExBsync;
+    case tier::Form::Exit: {
+      Mask go = op.unguarded ? group : tier_guard(w, *op.ins, group);
+      if (op.aux) {
+        go &= tier_pmask(c, op.p);
+        if (op.aux > 1) go &= tier_pmask(c, op.p2);
+      }
+      return go ? jit::kExExit : jit::kExExitNone;
+    }
+    case tier::Form::Bar: case tier::Form::Yield: case tier::Form::Call: case tier::Form::Ret: case tier::Form::Warpsync: return jit::kExOtherCtl;
+    case tier::Form::Bra: return jit::kExBraOther;
+    default: break;
+  }
+  if (op.straight && (op.fn || op.never)) return jit::kExStraight;
+  if (op.fn) return jit::kExHandler;
+  return jit::kExInterp;
+}
 
 [[gnu::noinline]] bool jit_run_region(JitFrame& f, jit::Unit& ju, uint32_t ri, TCtx& c, Warp& w, exec::LaunchStats& st, const tier::MOp* ops, size_t idx,
                                       unsigned n0, Mask group, unsigned glanes, uint64_t max_steps, bool stats, bool chain, const tier::MOp*& faulting,
@@ -2292,7 +2390,7 @@ struct JitFrame {
   if (!f.init) [[unlikely]] {
     f.init = true;
     f.mut = jit::host_mutants();
-    f.jh = JitHost{&c, stats};
+    f.jh = JitHost{&c, stats, 0};
     f.flags = (stats ? jit::kFlagTierStats : 0u) | (jit::stats_on() ? jit::kFlagJitStats : 0u) | ((f.mut & jit::kMutHostChain) ? jit::kFlagChain : 0u);
     jit::Ctx& jc = f.jc;
     jc = jit::Ctx{};
@@ -2317,12 +2415,27 @@ struct JitFrame {
     jc.extra = &w.extra;
     jc.gen_run = &f.gen;
     jc.max_steps = max_steps;
+    jc.spins = &w.spins;
+    jc.ctl = &jit_ctl;
+    jc.split = &jit_split;
+    jc.exit0 = &jit_exit0;
+    if (f.mut & jit::kMutHostSpins) [[unlikely]] {
+      static thread_local uint32_t elsewhere;
+      elsewhere = 0;
+      jc.spins = &elsewhere;
+    }
   }
   f.jc.R = c.R;   // (the register file may have moved since the last pass)
   f.jc.flags = f.flags | (chain ? jit::kFlagChain : 0u);
+  if (f.lstate == 1 && !chain) {
+    f.jc.flags |= jit::kFlagLink;
+    f.jc.olo = f.olo - static_cast<int64_t>(rg.first);
+  }
   if (f.mut & jit::kMutHostN0) n0 = 0;
   f.jc.ops = reinterpret_cast<const uint8_t*>(&ops[rg.first]);
   f.jc.last = ~0u;
+  f.jc.group = group;
+  f.jh.pc0 = f.base + 16 * static_cast<uint64_t>(rg.first);
   const uint32_t entry = static_cast<uint32_t>(idx - rg.first);
   [[maybe_unused]] uint64_t insts0 = 0;
   [[maybe_unused]] uint32_t extra0 = 0;
@@ -2338,6 +2451,18 @@ struct JitFrame {
     throw;
   }
   const int32_t ei = f.jc.exit_idx, eps = f.jc.exit_ps;
+  if (f.jc.group != group) [[unlikely]] {   // a split was run in there: the loop goes on with the half the generated code went on with, in a diverged warp
+    f.pcs_first = static_cast<size_t>(static_cast<int64_t>(rg.first) + f.jc.pcs_at);
+    f.olo = f.jc.olo + static_cast<int64_t>(rg.first);
+    f.lstate = 1;
+    chain = false;
+    if (jit::stats_on()) jit::stats().splits.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (jit::stats_on()) [[unlikely]] {
+    const unsigned why = jit_exit_why(ju, ri, ops, ei, c, w, f.jc.group, chain, max_steps);
+    jit::stats().exits[why][w.runnable() != f.jc.group ? 1 : 0].fetch_add(1, std::memory_order_relaxed);
+    if (ei == static_cast<int32_t>(entry) && eps == jit::kNoPassStart) jit::stats().exits[why][2].fetch_add(1, std::memory_order_relaxed);
+  }
   if (ei == static_cast<int32_t>(entry) && eps == jit::kNoPassStart) return false;   // it left at once: nothing was run
   next = static_cast<size_t>(static_cast<int64_t>(rg.first) + ei);
   pass_start = (eps == jit::kNoPassStart || (f.mut & jit::kMutHostPs)) ? -1 : static_cast<int64_t>(rg.first) + eps;
@@ -2346,6 +2471,7 @@ struct JitFrame {
     jit::stats().instructions_run.fetch_add(st.instructions - insts0, std::memory_order_relaxed);
     jit::stats().generated_run.fetch_add(f.gen, std::memory_order_relaxed);
     jit::stats().continued.fetch_add(w.extra - extra0, std::memory_order_relaxed);
+    if (f.jc.flags & jit::kFlagLink) jit::stats().linked.fetch_add(w.extra - extra0, std::memory_order_relaxed);
     f.gen = 0;
   }
   return true;
@@ -2478,21 +2604,25 @@ bool Runner::tier_run_t(Block& blk, Warp& w, Mask group, uint64_t pick, const Co
   // Whether the loop may go on past an op that is not straight, as the chain below would start another call at once (the 'cont' ops); worked out
   // at the first of them in a pass (0: not yet, 1: yes, 2: no).
   uint8_t cstate = 0;
-  if constexpr (Jit) region_at = ju->active.load(std::memory_order_acquire);
+  if constexpr (Jit) {
+    region_at = ju->active.load(std::memory_order_acquire);
+    jf.lstate = 0;
+    jf.base = code.base;
+  }
   if (tier_stats_) [[unlikely]] {
     tier_stats().passes.fetch_add(1, std::memory_order_relaxed);
     if (again) tier_stats().chained.fetch_add(1, std::memory_order_relaxed);
   }
-  const size_t first = static_cast<size_t>((pick - code.base) / 16);
+  size_t first = static_cast<size_t>((pick - code.base) / 16);   // (tier 2 moves it, with o0, when generated code has run a split: see there)
   // The loop below keeps its place as a pointer, `o`, and not as an index: the loop carries one value from op to op, and it was a stack
   // slot (the loop has more live values than the registers a call leaves). The ops this pass has taken are o - o0, never more than 256, and
   // a straight one is not the section's last: both are the one test o < olim.
-  const tier::MOp* const o0 = ops + first;
+  const tier::MOp* o0 = ops + first;
   const tier::MOp* const ops_last = ops + (count - 1);   // (the section's last op never runs as a straight one)
   const tier::MOp* olim = ops + std::min(count - 1, first + 256);
   const tier::MOp* o = o0;
   [[maybe_unused]] const tier::MOp* psp = o0;   // where the pass's 256-op run last restarted (tier 2 hands a region the ops the pass has taken since: o - psp)
-  const unsigned glanes = popc(group);
+  unsigned glanes = popc(group);
   const tier::MOp* cur = o;
   bool all_at = false;   // the run ended by setting every lane of the group to one address, `at` (the chain below then knows where they stand)
   uint64_t at = 0;
@@ -2505,6 +2635,22 @@ bool Runner::tier_run_t(Block& blk, Warp& w, Mask group, uint64_t pick, const Co
           // Whether the loop would go on past a branch or an op that is not straight (the cont path below), worked out once for the pass.
           if (cstate == 0) cstate = (regs_ok && !tier_stats_ && tier_chain_ && !w.yield && !w.slice && !w.give_way && !w.ws_held && !w.mactive_force && group &&
                                      w.runnable() == group) ? 1 : 2;
+          // Linking: when the chain's conditions fail only because other runnable lanes of the warp stand elsewhere, the generated code may go on past a branch or
+          // cont op while this group stays the one the chain would pick (jit.hpp, Ctx::olo). The other lanes do not move while this group runs, so their lowest
+          // address is worked out once a pass.
+          if (cstate == 2 && jf.lstate == 0) [[unlikely]] {
+            jf.lstate = 2;
+            if (jit_link_ && regs_ok && !tier_stats_ && tier_chain_ && !w.yield && !w.slice && !w.give_way && !w.ws_held && !w.mactive_force && group) {
+              if (const Mask others = w.runnable() & ~group; others && !(group & ~w.runnable())) {
+                uint64_t olo;
+                (void)exec::sasslanes::pick_group(w.pc, others, olo);
+                const uint64_t d = olo - code.base;
+                jf.olo = olo < code.base ? std::numeric_limits<int64_t>::min() / 2 : static_cast<int64_t>((d + 15) / 16);
+                if (jit::host_mutants() & jit::kMutHostOlo) [[unlikely]] jf.olo = std::numeric_limits<int64_t>::max() / 2;
+                jf.lstate = 1;
+              }
+            }
+          }
           const tier::MOp* faulting = nullptr;   // (not `cur`: its address would keep it out of a register in the loop below)
           size_t next = 0;
           int64_t pass_start = -1;
@@ -2513,12 +2659,24 @@ bool Runner::tier_run_t(Block& blk, Warp& w, Mask group, uint64_t pick, const Co
             ran = jit_run_region(jf, *ju, ri, c, w, st, ops, idx, static_cast<unsigned>(o - psp), group, glanes, max_steps_, tier_stats_, cstate == 1, faulting, next,
                                  pass_start);
           } catch (...) {
-            if (faulting) cur = faulting;
+            if (faulting) {
+              cur = faulting;
+              group = jf.jc.group;   // (a split run in there before the fault: the fault names the group's first lane)
+            }
             throw;
           }
           if (ran) {
             o = ops + next;
             cur = o;
+            if (jf.jc.group != group) [[unlikely]] {
+              // The generated code ran a branch that split the group and went on with the half at the lower address (linking): that half is the group now, its
+              // lanes' addresses are those of the op it went on at (the pass's first op, for what follows), and the warp is a diverged one.
+              group = jf.jc.group;
+              glanes = popc(group);
+              first = jf.pcs_first;
+              o0 = ops + first;
+              cstate = 2;
+            }
             if (pass_start >= 0) {   // a branch or an op that is not straight restarted the 256-op run, as the loop's own cont path does
               psp = ops + pass_start;
               olim = (reinterpret_cast<const char*>(ops_last) - reinterpret_cast<const char*>(psp) > static_cast<ptrdiff_t>(256 * sizeof(tier::MOp))) ? psp + 256 : ops_last;

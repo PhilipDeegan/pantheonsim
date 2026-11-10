@@ -264,6 +264,7 @@ Config Config::from_env() {
   c.specialize = false;
   if (const std::string r = env("VGPU_JIT_RESIDENCE"); !r.empty() && r != "0") c.residence = true;
   if (const std::string r = env("VGPU_JIT_SPECIALIZE"); !r.empty() && r != "0") c.specialize = true;
+  if (env("VGPU_JIT_LINK") == "1") c.link = true;
   if (const std::string t = env("VGPU_JIT_TIMEOUT"); !t.empty()) c.timeout_s = static_cast<unsigned>(std::strtoul(t.c_str(), nullptr, 10));
   if (const std::string m = env("VGPU_JIT_MEM_MB"); !m.empty()) c.mem_mb = static_cast<unsigned>(std::strtoul(m.c_str(), nullptr, 10));
   return c;
@@ -313,8 +314,16 @@ std::vector<uint32_t> Engine::meta(const UnitSpec& spec) {
       m.push_back(static_cast<uint32_t>(o.hi));
       m.push_back(static_cast<uint32_t>(o.hi >> 32));
       m.push_back(o.cls | uint32_t{o.guard} << 8 | uint32_t{o.guard_not} << 16 | uint32_t{o.guard_uniform} << 17 | uint32_t{o.unguarded} << 18 | uint32_t{o.cont} << 19 |
-                  uint32_t{o.br} << 20 | uint32_t{o.store} << 21);
+                  uint32_t{o.br} << 20 | uint32_t{o.store} << 21 | uint32_t{o.hostctl} << 22);
       m.push_back(o.form);
+      if (o.hostctl == 2) {   // an EXIT: its conditions
+        for (const SrcFacts* x : {&o.p, &o.p2}) {
+          m.push_back(uint32_t{x->kind} | uint32_t{x->dyn} << 8 | uint32_t{x->mod} << 16);
+          m.push_back(x->off);
+        }
+        m.push_back(o.aux);
+        continue;
+      }
       if (o.br) {   // a branch: its conditions and where it goes
         for (const SrcFacts* x : {&o.p, &o.p2}) {
           m.push_back(uint32_t{x->kind} | uint32_t{x->dyn} << 8 | uint32_t{x->mod} << 16);
@@ -343,7 +352,7 @@ std::vector<uint32_t> Engine::meta(const UnitSpec& spec) {
   return m;
 }
 
-std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool specialize) {
+std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool specialize, bool link) {
   std::string s;
   const auto put = [&](const char* fmt, auto... a) {
     char buf[1024];
@@ -364,12 +373,12 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool
        "  uint64_t* thread_instructions;\n  uint64_t* by_class;\n  void* tctx;\n  const uint8_t* ops;\n"
        "  void (*note)(Ctx*, uint32_t op);\n  void* host;\n"
        "  uint32_t* R;\n  const uint8_t* b0;\n  uint64_t b0n;\n  const void* pool;\n"
-       "  uint64_t* divergent;\n  bool* gate;\n  uint32_t* budget;\n  uint32_t* extra;\n  uint64_t* gen_run;\n  void (*sreg)(Ctx*, uint32_t, uint32_t*, uint32_t);\n  uint64_t max_steps;\n  int32_t exit_idx;\n  int32_t exit_ps;\n  uint32_t last;\n};\n";
+       "  uint64_t* divergent;\n  bool* gate;\n  uint32_t* budget;\n  uint32_t* extra;\n  uint64_t* gen_run;\n  void (*sreg)(Ctx*, uint32_t, uint32_t*, uint32_t);\n  uint64_t max_steps;\n  int32_t exit_idx;\n  int32_t exit_ps;\n  uint32_t last;\n  int64_t olo;\n  uint32_t* spins;\n  void (*ctl)(Ctx*, uint32_t, uint32_t);\n  void (*split)(Ctx*, uint32_t, uint32_t, int32_t, int32_t);\n  uint32_t group;\n  int32_t pcs_at;\n  uint32_t (*exit0)(Ctx*);\n};\n";
   put("static_assert(sizeof(Ctx) == %zu, \"Ctx layout\");\n", sizeof(Ctx));
 #define VJ_FIELD(f) put("static_assert(offsetof(Ctx, " #f ") == %zu, \"Ctx::" #f "\");\n", offsetof(Ctx, f))
   VJ_FIELD(abi); VJ_FIELD(flags); VJ_FIELD(up); VJ_FIELD(p); VJ_FIELD(ur); VJ_FIELD(steps); VJ_FIELD(instructions); VJ_FIELD(thread_instructions);
   VJ_FIELD(by_class); VJ_FIELD(tctx); VJ_FIELD(ops); VJ_FIELD(note); VJ_FIELD(host); VJ_FIELD(R); VJ_FIELD(b0); VJ_FIELD(b0n); VJ_FIELD(pool);
-  VJ_FIELD(divergent); VJ_FIELD(gate); VJ_FIELD(budget); VJ_FIELD(extra); VJ_FIELD(gen_run); VJ_FIELD(sreg); VJ_FIELD(max_steps); VJ_FIELD(exit_idx); VJ_FIELD(exit_ps); VJ_FIELD(last);
+  VJ_FIELD(divergent); VJ_FIELD(gate); VJ_FIELD(budget); VJ_FIELD(extra); VJ_FIELD(gen_run); VJ_FIELD(sreg); VJ_FIELD(max_steps); VJ_FIELD(exit_idx); VJ_FIELD(exit_ps); VJ_FIELD(last); VJ_FIELD(olo); VJ_FIELD(spins); VJ_FIELD(ctl); VJ_FIELD(split); VJ_FIELD(group); VJ_FIELD(pcs_at); VJ_FIELD(exit0);
 #undef VJ_FIELD
   s += "\n// The helpers that read the context (the rest are in vgpu_jit_rt.h).\n"
          "static inline uint32_t b0w(const Ctx* c, uint64_t off) {   // a word of constant bank 0 (tier_b0: zero past its end)\n"
@@ -416,6 +425,8 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool
       }
     s += "  uint32_t* const R = c->R;\n";
     s += "  int32_t ps = INT32_MIN;   // where the loop's 256-op run last restarted (region-relative); INT32_MIN: it did not\n";
+    if (link) s += "  uint32_t fl = c->flags;   // linking: the chain bit (4) or the link bit (8); a split in here turns the first into the second\n"
+                   "  int64_t olo = (fl & 8u) ? c->olo : INT64_MAX;   // the lowest place another runnable lane stands at\n  (void)fl; (void)olo;\n";
     if (any_dyn) s += "  uint64_t tl = 0;\n";
     for (unsigned kk : dyn_classes) put("  uint64_t bc%u = 0;\n", kk);
     uint64_t pend_ops = 0, pend_unguarded = 0, pend_gen = 0;
@@ -559,9 +570,83 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool
         if (o.aux > 1) put("    take &= %s;\n", pexpr(o.p2).c_str());
         flush();
         rc.sync(s, true);
+        const bool back = o.tgt <= static_cast<int32_t>(i);   // (the loop's spin rule counts a taken branch to its own address or below)
+        if (link) {
+          // Linking (jit.hpp, "Linking"). `fl` holds the chain bit (no other lane of the warp can run) or the link bit (others can, the lowest of them at `olo`;
+          // with the chain bit `olo` is above everything). The loop ends its pass at this branch and its chain picks the group at the lowest address: the
+          // generated code goes on while that is a group it knows -- the whole group at the place it goes to, or, when the branch splits it, the half at
+          // the lower place -- and that place is strictly below every other runnable lane. A taken backward branch while other lanes can run counts
+          // towards the spin rule first; the one that would make the group give way is left to the loop.
+          const bool always = o.unguarded && o.aux == 0;
+          const int32_t T = o.tgt, F = static_cast<int32_t>(i) + 1;
+          const std::string off = mutant("link_flag") ? "false" : "!(fl & 12u)";
+          const char* lt = mutant("link_olo_eq") ? "<=" : "<";
+          std::string cnt;   // the op's counts, written on both ways on
+          {
+            std::string keep;
+            keep.swap(s);
+            count(o);
+            flush();
+            if (!o.unguarded) s += "    if (ex && ex != group) ++*c->divergent;\n";
+            cnt.swap(s);
+            s.swap(keep);
+          }
+          const auto go = [&](int32_t x, const char* ind) {
+            put("%sps = %d;\n", ind, x);
+            if (x >= 0 && static_cast<uint32_t>(x) < k) put("%sgoto L%d;\n", ind, x);
+            else leave(std::to_string(x), ind);
+          };
+          if (!always) {
+            s += "    if (take != group && take != 0u) {\n";
+            if (T == F || mutant("link_nosplit")) {   // (both halves at one place: the loop's)
+              leave(std::to_string(i), "      ");
+            } else {
+              const int32_t lo = T < F ? T : F, hi = T < F ? F : T;
+              std::string cond = off + " || *c->budget == 0u";
+              if (!mutant("link_olo")) cond += " || !(" + std::to_string(lo) + "ll " + lt + " olo)";
+              if (back && !mutant("link_spin_limit")) cond += " || ((fl & 8u) && *c->spins >= 63u)";
+              put("      if (%s) {\n", cond.c_str());
+              leave(std::to_string(i), "        ");
+              s += "      }\n";
+              s += cnt;
+              if (back && !mutant("link_spin")) s += "      if (fl & 8u) ++*c->spins;\n";
+              // The lanes' addresses (the host's select_pcs), the turn's call, then the half at the lower place is the group; the other half is one more group
+              // of other lanes, and the warp is a diverged one from here on.
+              if (!mutant("link_split_pcs")) put("      c->split(c, group, take, %d, %d);\n", T, F);
+              s += "      --*c->budget; ++*c->extra; n0 = 0;\n";
+              if (!mutant("link_split_olo")) put("      if (%dll < olo) olo = %dll;\n", hi, hi);
+              if (!mutant("link_split_fl")) s += "      fl = (fl & ~4u) | 8u;\n";
+              put("      group = %s;\n", (T < F) != mutant("link_split_group") ? "take" : "group & ~take");
+              if (!mutant("link_split_glanes")) s += "      glanes = static_cast<uint32_t>(__builtin_popcount(group));\n";
+              put("      c->group = group; c->olo = olo; c->pcs_at = %d;\n", lo);
+              go(lo, "      ");
+            }
+            s += "    }\n";
+          }
+          {
+            std::string cond = off + " || *c->budget == 0u";
+            if (!mutant("link_olo")) cond += std::string(" || !(static_cast<int64_t>(take ? ") + std::to_string(T) + " : " + std::to_string(F) + ") " + lt + " olo)";
+            if (back && !mutant("link_spin_limit")) cond += " || (take && (fl & 8u) && *c->spins >= 63u)";
+            put("    if (%s) {\n", cond.c_str());
+            leave(std::to_string(i), "      ");
+            s += "    }\n";
+          }
+          s += cnt;
+          if (back && !mutant("link_spin")) s += "    if (take && (fl & 8u)) ++*c->spins;\n";
+          s += "    --*c->budget; ++*c->extra; n0 = 0;\n";
+          if (!always) s += "    if (take) {\n";
+          go(T, "      ");
+          if (!always) {
+            s += "    }\n";
+            go(F, "    ");
+          }
+          s += "  }\n";
+          fell = false;
+          continue;
+        }
         {
           std::string cond;
-          const auto add = [&](const char* t) { cond += std::string(cond.empty() ? "" : " || ") + t; };
+          const auto add = [&](const std::string& t) { cond += std::string(cond.empty() ? "" : " || ") + t; };
           if (!mutant("ctl_flag")) add("!(c->flags & 4u)");
           if (!mutant("ctl_budget")) add("*c->budget == 0u");
           if (!mutant("ctl_split")) add("(take != group && take != 0u)");
@@ -591,10 +676,45 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool
         fell = false;
         continue;
       }
+      if (o.hostctl == 2) {
+        // An EXIT (linking). The lanes its guard and conditions hold for leave the kernel: that is the loop's. When they hold for no lane of the group, the loop
+        // counts it, sets the group to the next op and its chain goes on there, as past an op that only writes registers; the generated code does that when
+        // the loop would have run the EXIT itself (Ctx::exit0) and the chain would pick the group again. Without linking the generated code stops here.
+        guard(o);
+        s += "    uint32_t go = ex;\n";
+        if (o.aux) put("    go &= %s;\n", pexpr(o.p).c_str());
+        if (o.aux > 1) put("    go &= %s;\n", pexpr(o.p2).c_str());
+        flush();
+        rc.sync(s, true);
+        if (!link) {
+          leave(std::to_string(i), "    ");
+        } else {
+          std::string cond = std::string(mutant("link_flag") ? "false" : "!(fl & 12u)") + " || *c->budget == 0u";
+          if (!mutant("link_exit_go")) cond += " || go != 0u";
+          if (!mutant("link_olo")) cond += " || !(" + std::to_string(i + 1) + "ll " + (mutant("link_olo_eq") ? "<=" : "<") + " olo)";
+          if (!mutant("link_exit_cb")) cond += " || !c->exit0(c)";
+          put("    if (%s) {\n", cond.c_str());
+          leave(std::to_string(i), "      ");
+          s += "    }\n";
+          count(o);
+          flush();
+          s += "    --*c->budget; ++*c->extra; n0 = 0;\n";
+          put("    ps = %uu;\n", i + 1);
+          if (i + 1 >= k) leave(std::to_string(i + 1), "    ");
+        }
+        s += "  }\n";
+        fell = false;
+        continue;
+      }
       if (o.cont) {
         // An op that is not straight, only writes registers, and past which the loop goes on when its chain conditions hold: the generated code checks them before
         // anything of the op is done, writes what is pending and the register rows (the handler works on the register file), and leaves if they do not.
         if (!mutant("ctl_cont_nogate")) {
+          if (link) {   // (linking, as for a branch: the group goes to the next op)
+            std::string cond = std::string(mutant("link_flag") ? "false" : "!(fl & 12u)") + " || *c->budget == 0u";
+            if (!mutant("link_olo")) cond += " || !(" + std::to_string(i + 1) + "ll " + (mutant("link_olo_eq") ? "<=" : "<") + " olo)";
+            s += "    if (" + cond + ") {\n";
+          } else
           s += "    if (!(c->flags & 4u) || *c->budget == 0u) {\n";
           s += flush_text();
           {
@@ -621,7 +741,13 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool
       }
       guard(o);
       count(o);
-      if (o.form == 0) {
+      if (o.form == 0 && o.hostctl == 1) {
+        // A BSSY (linking): no handler. The loop counts it, its lanes join the barrier and the barrier's stamp is renewed even when no lane runs it (the
+        // host's lines, Ctx::ctl). (The tier's statistics are never on where the generated code goes on past an op, so nothing is noted.)
+        flush();
+        rc.sync(s, true);
+        if (!mutant("link_bssy")) put("    if (%s) c->ctl(c, %uu, ex);\n", mutant("link_bssy_ex") ? "ex" : "true", i);
+      } else if (o.form == 0) {
         flush();
         rc.sync(s, true);   // the tier's handler reads and writes the real register file: every dirty row and predicate goes back, none is trusted after
         put("    if (ex) run_op(c, %uu, ex);\n    if (c->flags & 1u) c->note(c, %uu);\n", i, i);
@@ -798,7 +924,7 @@ namespace {
 std::string key_suffix(const Config& cfg, const std::string& cid, const std::string& isa) {
   static const std::string rt_hash = hash_text(std::string(kEmbeddedRuntime)) + hash_text(std::string(kEmbeddedKernels));
   return "\n//key: " + cid + " | isa " + isa + " | flags " + isa_flags(isa) + " | " + cfg.extra_flags + " | abi " + std::to_string(kAbiVersion) + " | gen " +
-         std::to_string(kGeneratorVersion) + " | rt " + rt_hash;
+         std::to_string(kGeneratorVersion) + " | rt " + rt_hash + (cfg.link ? " | link" : "");   // (linking: its own objects and its own selections)
 }
 }  // namespace
 
@@ -806,7 +932,7 @@ std::string Engine::key(const UnitSpec& spec, std::string* why) {
   const std::string cid = compiler_id(why);
   if (cid.empty()) return {};
   const std::string isa = cfg_.isa.empty() ? detect_isa() : cfg_.isa;
-  return hash_text(source(spec, isa == "avx2", cfg_.residence, cfg_.specialize) + key_suffix(cfg_, cid, isa));
+  return hash_text(source(spec, isa == "avx2", cfg_.residence, cfg_.specialize, cfg_.link) + key_suffix(cfg_, cid, isa));
 }
 
 // The key of a whole section (what the file naming its selection of regions is named by): the facts of every region, not their text.
@@ -1036,7 +1162,7 @@ Result Engine::obtain(const UnitSpec& spec) {
     return out;
   }
   const std::string isa = cfg_.isa.empty() ? detect_isa() : cfg_.isa;
-  if (!write_file(tmp_cpp, source(spec, isa == "avx2", cfg_.residence, cfg_.specialize))) {
+  if (!write_file(tmp_cpp, source(spec, isa == "avx2", cfg_.residence, cfg_.specialize, cfg_.link))) {
     out.status = Status::CacheUnusable;
     out.message = "cannot write to " + dir + ": " + std::strerror(errno);
     return out;
@@ -1372,6 +1498,13 @@ void Unit::sample(uint64_t instr) {
 
 void drain() { manager().drain(); }
 
+const char* exit_name(unsigned why) {
+  static const char* const names[kExCount] = {"split-branch", "uniform-branch-taken", "uniform-branch-not-taken", "register-only-op", "turn-budget", "run-bound",
+                                              "step-budget", "store-gate", "to-compiled-region", "bssy-nop", "bsync", "exit", "exit-no-lane-leaves", "bar-yield-call-ret-warpsync",
+                                              "branch-outside-regions", "straight-op-outside-regions", "handler-op", "interpreter-op"};
+  return why < kExCount ? names[why] : "?";
+}
+
 void Manager::report() {
   const char* v = std::getenv("VGPU_JIT_STATS");
   if (!(v && *v && v[0] != '0')) return;
@@ -1388,6 +1521,13 @@ void Manager::report() {
                (unsigned long long)s.failures.load(), (unsigned long long)s.corrupt.load(), (unsigned long long)s.regions_run.load(),
                (unsigned long long)s.instructions_run.load(), (unsigned long long)s.generated_run.load(), (unsigned long long)s.region_throws.load(), (unsigned long long)s.declined.load(),
                (unsigned long long)s.accepted.load(), (unsigned long long)s.continued.load());
+  if (link_requested())
+    std::fprintf(out, "jit: link in-diverged-warps: %llu\njit: link calls-with-a-split: %llu\n", (unsigned long long)s.linked.load(), (unsigned long long)s.splits.load());
+  // Why the region calls ended (one line a reason that occurred): all, of them in a diverged warp, of them at the entry with nothing run.
+  for (unsigned w = 0; w < kExCount; ++w) {
+    const uint64_t a = s.exits[w][0].load(), d = s.exits[w][1].load(), z = s.exits[w][2].load();
+    if (a + d) std::fprintf(out, "jit: exit %s: %llu (diverged warp %llu, nothing run %llu)\n", exit_name(w), (unsigned long long)(a + d), (unsigned long long)d, (unsigned long long)z);
+  }
   if (out != stderr) std::fclose(out);
 }
 
@@ -1398,9 +1538,19 @@ uint32_t host_mutants() {
     if (mutant("host_chain")) v |= kMutHostChain;
     if (mutant("host_maxreg")) v |= kMutHostMaxreg;
     if (mutant("host_n0")) v |= kMutHostN0;
+    if (mutant("host_olo")) v |= kMutHostOlo;
+    if (mutant("host_spins")) v |= kMutHostSpins;
     return v;
   }();
   return m;
+}
+
+bool link_requested() {
+  static const bool on = [] {
+    const char* v = std::getenv("VGPU_JIT_LINK");
+    return v && v[0] == '1' && !v[1];
+  }();
+  return on;
 }
 
 // VGPU_JIT_ESCAPE_ONLY=1: every op is an escape to the tier's handler (milestone 1's generated code), for measuring what the arithmetic adds.
@@ -1434,6 +1584,15 @@ static bool jit_cont(const tier::MOp& op) {
   }
 }
 
+// With linking (VGPU_JIT_LINK=1) a BSSY is a region's op too. It ends the loop's pass without moving a lane anywhere but to the next op, as an op that only
+// writes registers does: the loop counts it, the lanes join the barrier, the chain starts the next pass at the next op. In a region it is a cont op whose
+// work is the host's (OpFacts::hostctl). (A NOP is left out: its form covers the barriers and fences, which are not worth a region's op.)
+static bool link_bssy(const tier::MOp& op) { return link_requested() && op.form == tier::Form::Bssy && !op.fn && !op.straight; }
+
+// ... and so is an EXIT: where its guard or its conditions hold for no lane of the group (the bounds test of a kernel, in every warp but those at the edge
+// of the grid) the loop only counts it and goes on at the next op (OpFacts::hostctl 2); where lanes leave, the generated code stops before it.
+static bool link_exit(const tier::MOp& op) { return link_requested() && op.form == tier::Form::Exit && !op.fn && !op.straight && op.aux <= 2; }
+
 std::shared_ptr<Unit> make_unit(const tier::Program& prog, int sm) {
   if (!requested()) return nullptr;
   Manager& mgr = manager();
@@ -1451,6 +1610,7 @@ std::shared_ptr<Unit> make_unit(const tier::Program& prog, int sm) {
     // only writes registers (MOp::cont).
     if (i + 1 >= count) return false;
     if (op.form == tier::Form::Bra) return branch_ok(op);
+    if (link_bssy(op) || link_exit(op)) return true;
     if (op.straight) return op.fn || op.never;
     return jit_cont(op);
   };
@@ -1484,6 +1644,7 @@ std::shared_ptr<Unit> make_unit(const tier::Program& prog, int sm) {
         f.guard_uniform = op.ins->guard_uniform;
         f.unguarded = op.unguarded;
         f.cont = jit_cont(op) && !op.straight;
+        if (link_bssy(op)) f.cont = true, f.hostctl = 1;
         f.store = op.store;
         const auto src = [&](const tier::Src& in, SrcFacts& out) {
           out.kind = static_cast<uint8_t>(in.kind);
@@ -1496,6 +1657,13 @@ std::shared_ptr<Unit> make_unit(const tier::Program& prog, int sm) {
             out.val2 = in.off + 1 < prog.pool.size() ? prog.pool[in.off + 1].v[0] : 0;
           }
         };
+        if (link_exit(op)) {
+          f.cont = true;
+          f.hostctl = 2;
+          f.aux = op.aux;
+          src(op.p, f.p);
+          src(op.p2, f.p2);
+        }
         if (op.form == tier::Form::Bra) {
           f.br = true;
           f.aux = op.aux;

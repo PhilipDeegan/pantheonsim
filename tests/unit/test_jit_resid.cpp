@@ -920,4 +920,308 @@ VTEST(jit_graph_regions_with_residence_equal_the_register_file_code) {
   VCHECK(taken.load() > runs.load() / 10);
 }
 
+// ---- linking (round sp52) ----------------------------------------------------------------------------------------------------------------------
+//
+// In a warp whose runnable lanes stand at several addresses the run loop ends its pass at every branch and cont op, and its chain starts the next pass with
+// the group at the lowest address (tier_ops.inc, "The chain"). Code generated with Config::link goes on inside the region while that group is one it knows:
+// the whole group where it goes to, or the half at the lower place when a branch splits it (jit.hpp, "Linking"). A BSSY is a region's op too (hostctl).
+// The check is differential: the same regions compiled without linking, with the run loop's part between two region calls played here from the loop's own
+// rules (loop_step: the general path of a branch -- one that splits the group too --, of an op that only writes registers and of a BSSY, the spin rule, the
+// chain's conditions and its pick of the lowest address), against the linked code called once. Registers, predicates, every counter, the turn's calls,
+// the spin count, the escapes' and the host calls' log, the lanes' addresses a split set, the group the code ends with, the op it stops at and where the
+// 256-op run restarted must be equal, with the chain bit up, with the link bit up, and with neither (the linked code must then leave at every branch as the
+// unlinked code does).
+
+namespace {
+
+struct LSim : GSim {
+  uint32_t spins = 0;
+  int64_t olo = 0;
+  int64_t pcs[32] = {};   // the lanes' addresses, as region-relative ops (what a split sets)
+  bool exit_ok = true;    // whether the loop itself would run an EXIT (nothing waits for it)
+};
+
+// The host's part of a BSSY in a region, and of a split: logged where the escapes are (their order is part of what is compared).
+void link_ctl(jit::Ctx* c, uint32_t op, uint32_t ex) {
+  LSim& s = *static_cast<LSim*>(static_cast<GSim*>(c->host));
+  s.log.push_back(mix(0x62737379ull, op * 131u + ex));
+}
+uint32_t link_exit0(jit::Ctx* c) {
+  LSim& s = *static_cast<LSim*>(static_cast<GSim*>(c->host));
+  s.log.push_back(mix(0x65786974ull, s.log.size()));
+  return s.exit_ok ? 1u : 0u;
+}
+void link_split(jit::Ctx* c, uint32_t group, uint32_t take, int32_t tgt, int32_t fall) {
+  LSim& s = *static_cast<LSim*>(static_cast<GSim*>(c->host));
+  for (unsigned l = 0; l < 32; ++l)
+    if ((group >> l) & 1u) s.pcs[l] = ((take >> l) & 1u) ? tgt : fall;
+}
+
+struct LoopState {
+  uint32_t group, flags;   // the group the loop runs, and its chain / link bits
+  unsigned links = 0, spun = 0, splits = 0, bssys = 0, exits = 0;
+};
+
+// The run loop for the op at `at`, where the unlinked code stopped: whether the loop's next pass starts with a group this code knows, and where (`next`). The
+// loop runs the op (its general path) and then asks its chain; this says "no" before the op when the chain would not go on at once with the group or its lower
+// half, which is where the linked code stops too.
+bool loop_step(const jit::RegionSpec& r, LSim& s, LoopState& ls, int32_t at, int32_t& next) {
+  const int32_t k = static_cast<int32_t>(r.ops.size());
+  const bool others = ls.flags & jit::kFlagLink;   // other lanes of the warp can run (the lowest of them at s.olo)
+  if (at < 0 || at >= k || !(ls.flags & (jit::kFlagLink | jit::kFlagChain))) return false;
+  const jit::OpFacts& o = r.ops[static_cast<size_t>(at)];
+  if (!jit::is_ctl(o)) return false;                    // the store gate or a bound: not the chain's business
+  if (s.budget == 0 || s.steps + 1 > s.max_steps) return false;   // the turn has no call left; the step budget
+  const uint32_t group = ls.group;
+  const uint32_t ex = ex_of(o, group, s);
+  const int64_t olo = others ? s.olo : INT64_MAX;
+  int32_t x = at + 1;
+  bool spin = false, split = false;
+  uint32_t take = 0;
+  if (o.br) {
+    take = ex;
+    if (o.aux) take &= pm_of(o.p, s);
+    if (o.aux > 1) take &= pm_of(o.p2, s);
+    split = take != group && take != 0;
+    if (split) {
+      if (o.tgt == at + 1) return false;                // (both halves at one place: left to the loop)
+      x = std::min(o.tgt, at + 1);                      // the chain picks the half at the lower address
+    } else if (take) {
+      x = o.tgt;
+    }
+    spin = take && o.tgt <= at && others;               // the spin rule: a taken branch to its own address or below, while other lanes can run
+  }
+  if (!(static_cast<int64_t>(x) < olo)) return false;   // another runnable lane stands at that address or below it: the chain picks its group (or both)
+  if (spin && s.spins + 1 >= 64) return false;          // the 64th makes the group give way
+  jit::Ctx host{};
+  host.host = static_cast<GSim*>(&s);
+  if (o.hostctl == 2) {                                 // an EXIT: lanes that leave are the loop's business; so is one the interpreter would run
+    uint32_t go = ex;
+    if (o.aux) go &= pm_of(o.p, s);
+    if (o.aux > 1) go &= pm_of(o.p2, s);
+    if (go) return false;
+    if (!link_exit0(&host)) return false;
+    ++ls.exits;
+  }
+  ++s.steps;
+  ++s.insts;
+  s.tinsts += static_cast<uint32_t>(__builtin_popcount(ex));
+  s.by_class[o.cls] += static_cast<uint32_t>(__builtin_popcount(ex));
+  if (o.br) {
+    if (ex && ex != group) ++s.divergent;
+    if (spin) {
+      ++s.spins;
+      ++ls.spun;
+    }
+    if (split) {
+      link_split(&host, group, take, o.tgt, at + 1);
+      s.olo = std::min<int64_t>(olo, std::max(o.tgt, at + 1));   // the half left behind is one more group of other lanes
+      ls.flags = (ls.flags & ~jit::kFlagChain) | jit::kFlagLink;
+      ls.group = o.tgt < at + 1 ? take : (group & ~take);
+      ++ls.splits;
+    }
+  } else if (o.hostctl == 1) {
+    link_ctl(&host, static_cast<uint32_t>(at), ex);     // (a BSSY: whatever the guard says)
+    ++ls.bssys;
+  } else if (o.hostctl == 2) {                          // (an EXIT no lane takes: counted, nothing else)
+  } else if (ex) {
+    graph_escape(&host, static_cast<uint32_t>(at), ex);
+  }
+  --s.budget;
+  ++s.extra;
+  ++ls.links;
+  next = x;
+  return true;
+}
+
+jit::Ctx make_lctx(LSim& s, uint32_t flags, uint32_t group) {
+  jit::Ctx c = make_gctx(s, flags);
+  c.host = static_cast<GSim*>(&s);
+  c.olo = s.olo;
+  c.spins = &s.spins;
+  c.ctl = &link_ctl;
+  c.split = &link_split;
+  c.exit0 = &link_exit0;
+  c.group = group;
+  return c;
+}
+
+}  // namespace
+
+VTEST(jit_linked_regions_equal_the_unlinked_code_and_the_run_loop_between_its_calls) {
+  if (VJ_SAN || !have_cxx()) return;
+  const unsigned units = static_cast<unsigned>(std::strtoul(std::getenv("VGPU_JIT_GRAPH_UNITS") ? std::getenv("VGPU_JIT_GRAPH_UNITS") : "6", nullptr, 10));
+  const uint64_t seed0 = std::getenv("VGPU_JIT_RANDOM_SEED") ? std::strtoull(std::getenv("VGPU_JIT_RANDOM_SEED"), nullptr, 10) : 1;
+  const std::string dir = tmp_dir("link");
+  std::atomic<unsigned> next{0}, failures{0}, runs{0}, links{0}, linked_runs{0}, spins_counted{0}, spin_stops{0}, olo_stops{0}, throws{0}, splits{0}, after_split{0}, bssys{0}, exits{0};
+  std::mutex mu;
+  std::string first_failure;
+  // The regions: escapes, branches and cont ops; a quarter of the cont ops are BSSYs (the host's call, no handler), a quarter EXITs.
+  const auto regions = [](Gen& g, jit::UnitSpec& spec) {
+    for (unsigned r = 0; r < 12; ++r) {
+      const bool lng = r % 6 == 5;
+      spec.regions.push_back(graph_region(g, lng ? 150 + static_cast<unsigned>(g.u(70)) : 4 + static_cast<unsigned>(g.u(40)), false, lng ? 3 : 30));
+      for (jit::OpFacts& o : spec.regions.back().ops)
+        if (o.cont) {
+          const unsigned kind = static_cast<unsigned>(g.u(100));
+          if (kind < 25) {
+            o.hostctl = 1;
+          } else if (kind < 50) {   // an EXIT: often with a condition, so that it holds for no lane, for some or for all
+            o.hostctl = 2;
+            o.aux = static_cast<uint8_t>(g.u(3));
+            o.p = g.pred();
+            o.p2 = g.pred();
+          }
+        }
+    }
+  };
+  {   // (the text itself: a generator that never links would pass the comparison)
+    Gen g(seed0);
+    jit::UnitSpec spec;
+    spec.sm = 80;
+    regions(g, spec);
+    const std::string on = jit::Engine::source(spec, true, false, false, true), off = jit::Engine::source(spec, true, false, false, false);
+    VCHECK(on.find("< olo)") != std::string::npos && on.find("c->split(") != std::string::npos && on.find("++*c->spins") != std::string::npos);
+    VCHECK(off.find("< olo)") == std::string::npos && off.find("c->spins") == std::string::npos && off.find("c->split(") == std::string::npos);
+  }
+  const auto worker = [&] {
+    for (;;) {
+      const unsigned unit = next.fetch_add(1);
+      if (unit >= units) return;
+      Gen g(seed0 * 5000011u + unit);
+      jit::UnitSpec spec;
+      spec.sm = 80;
+      regions(g, spec);
+      jit::Config on, off;
+      on.cache_dir = dir + "/on" + std::to_string(unit);
+      off.cache_dir = dir + "/off" + std::to_string(unit);
+      on.link = true;
+      jit::Engine eon(on), eoff(off);
+      const jit::Result ron = eon.obtain(spec), roff = eoff.obtain(spec);
+      if (!ron.found || !roff.found) {
+        std::lock_guard<std::mutex> lk(mu);
+        ++failures;
+        if (first_failure.empty()) first_failure = "unit " + std::to_string(unit) + ": compile failed: " + (ron.found ? roff.message : ron.message);
+        continue;
+      }
+      std::mt19937_64 rng(seed0 * 32452843u + unit);
+      for (unsigned r = 0; r < spec.regions.size(); ++r) {
+        const jit::RegionSpec& rs = spec.regions[r];
+        const int32_t k = static_cast<int32_t>(rs.ops.size());
+        const std::vector<uint32_t> starts = jit::stretch_starts(rs);
+        for (unsigned t = 0; t < 60; ++t) {
+          LSim a;
+          randomize_g(a, rng, false);
+          a.seed = rng();
+          Trial tr = draw_trial(rng, rs, t);
+          if (tr.n0 > 256) tr.n0 = 256;   // (the loop never has more)
+          if (rng() % 3 == 0)             // predicates that differ from lane to lane, so that branches split the group
+            for (unsigned i = 0; i < 7; ++i) a.p[i] = static_cast<uint32_t>(rng());
+          // The flags: mostly a diverged warp the host allows linking in; the chain bit up (no other lane can run; a split in there makes it a diverged one);
+          // neither bit.
+          const unsigned kind = static_cast<unsigned>(rng() % 10);
+          tr.flags = kind < 6 ? jit::kFlagLink : kind < 9 ? jit::kFlagChain : 0u;
+          // Where the other runnable lanes stand: far above the region (every place the group goes to is below them), inside or just around it, below it.
+          const unsigned ok = static_cast<unsigned>(rng() % 8);
+          a.olo = ok < 3 ? 1000000 : ok < 7 ? static_cast<int64_t>(rng() % static_cast<uint64_t>(k + 6)) - 2 : -1000000;
+          static const uint32_t spin0[] = {0, 0, 1, 17, 40, 60, 61, 62, 63};
+          a.spins = spin0[rng() % (sizeof spin0 / sizeof spin0[0])];
+          for (auto& v : a.pcs) v = -7;
+          a.exit_ok = rng() % 5 != 0;
+          if (t % 7 == 3) a.throw_at = static_cast<long>(rng() % 6);
+          LSim b = a;
+          const uint32_t gl = static_cast<uint32_t>(__builtin_popcount(tr.group));
+          // The linked code, once.
+          jit::Ctx ca = make_lctx(a, tr.flags, tr.group);
+          bool ta = false, tb = false;
+          try { ron.lib->fns[r](&ca, tr.group, gl, tr.entry, tr.n0); } catch (const std::runtime_error&) { ta = true; }
+          a.exit_idx = ca.exit_idx;
+          a.exit_ps = ca.exit_ps;
+          // The unlinked code, and the loop between its calls.
+          LoopState ls{tr.group, tr.flags};
+          try {
+            uint32_t entry = tr.entry, n0 = tr.n0;
+            int32_t ps = jit::kNoPassStart;
+            for (;;) {
+              jit::Ctx cb = make_lctx(b, ls.flags & ~jit::kFlagLink, ls.group);
+              try {
+                roff.lib->fns[r](&cb, ls.group, static_cast<uint32_t>(__builtin_popcount(ls.group)), entry, n0);
+              } catch (...) {
+                if (cb.exit_ps != jit::kNoPassStart) ps = cb.exit_ps;
+                throw;
+              }
+              if (cb.exit_ps != jit::kNoPassStart) ps = cb.exit_ps;
+              int32_t x = 0;
+              // (An entry that is no stretch start -- the host never makes one -- leaves at once: there is no pass for the loop to end.)
+              if (std::find(starts.begin(), starts.end(), entry) == starts.end() || !loop_step(rs, b, ls, cb.exit_idx, x)) {
+                b.exit_idx = cb.exit_idx;
+                break;
+              }
+              ps = x;   // the next pass starts there: the 256-op run with it
+              if (x < 0 || x >= k) {
+                b.exit_idx = x;
+                break;
+              }
+              entry = static_cast<uint32_t>(x);
+              n0 = 0;
+            }
+            b.exit_ps = ps;
+          } catch (const std::runtime_error&) { tb = true; }
+          ++runs;
+          links += ls.links;
+          spins_counted += ls.spun;
+          splits += ls.splits;
+          bssys += ls.bssys;
+          exits += ls.exits;
+          if (ls.links) ++linked_runs;
+          if (ls.splits && ls.links > ls.splits) ++after_split;
+          if (ta) ++throws;
+          if (!ta && !tb && (ls.flags & jit::kFlagLink) && b.exit_idx >= 0 && b.exit_idx < k && jit::is_ctl(rs.ops[static_cast<size_t>(b.exit_idx)]) && b.budget) {
+            if (b.spins == 63) ++spin_stops;
+            else ++olo_stops;
+          }
+          const bool state = same_g(a, b, !ta) && a.spins == b.spins && std::memcmp(a.pcs, b.pcs, sizeof a.pcs) == 0 && ca.group == ls.group &&
+                             (ls.splits == 0 || ca.olo == b.olo);
+          if (ta != tb || !state) {
+            std::lock_guard<std::mutex> lk(mu);
+            ++failures;
+            if (first_failure.empty())
+              first_failure = "unit " + std::to_string(unit) + " region " + std::to_string(r) + " trial " + std::to_string(t) + " (group " + std::to_string(tr.group) + ", entry " +
+                              std::to_string(tr.entry) + ", n0 " + std::to_string(tr.n0) + ", flags " + std::to_string(tr.flags) + ", olo " + std::to_string(b.olo) + ", " +
+                              std::to_string(ls.links) + " links by the loop, " + std::to_string(ls.splits) + " splits): linked differs from unlinked: exit " + std::to_string(a.exit_idx) +
+                              "/" + std::to_string(b.exit_idx) + " ps " + std::to_string(a.exit_ps) + "/" + std::to_string(b.exit_ps) + " R " +
+                              (std::memcmp(a.R, b.R, sizeof a.R) ? "differs" : "same") + " p " + (std::memcmp(a.p, b.p, sizeof a.p) ? "differs" : "same") + " steps " +
+                              std::to_string(a.steps) + "/" + std::to_string(b.steps) + " tinsts " + std::to_string(a.tinsts) + "/" + std::to_string(b.tinsts) + " budget " +
+                              std::to_string(a.budget) + "/" + std::to_string(b.budget) + " extra " + std::to_string(a.extra) + "/" + std::to_string(b.extra) + " divergent " +
+                              std::to_string(a.divergent) + "/" + std::to_string(b.divergent) + " spins " + std::to_string(a.spins) + "/" + std::to_string(b.spins) + " group " +
+                              std::to_string(ca.group) + "/" + std::to_string(ls.group) + " addresses " + (std::memcmp(a.pcs, b.pcs, sizeof a.pcs) ? "differ" : "same") + " log " +
+                              (a.log == b.log ? "same" : "differs") + " threw " + std::to_string(ta) + "/" + std::to_string(tb);
+          }
+        }
+      }
+    }
+  };
+  const unsigned nthreads = std::min<unsigned>(units, std::max(1u, std::thread::hardware_concurrency()));
+  std::vector<std::thread> pool;
+  for (unsigned i = 0; i < nthreads; ++i) pool.emplace_back(worker);
+  for (auto& th : pool) th.join();
+  std::printf("  link: %u units, %u runs, %u of them linked (%u links: %u splits, %u BSSYs, %u EXITs no lane took, %u counted by the spin rule; %u runs linked on after a split), "
+              "%u stopped by the spin rule, %u by the other lanes' address, %u threw, %u failures\n",
+              units, runs.load(), linked_runs.load(), links.load(), splits.load(), bssys.load(), exits.load(), spins_counted.load(), after_split.load(), spin_stops.load(),
+              olo_stops.load(), throws.load(), failures.load());
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+  if (failures) throw vtest::Failure(first_failure);
+  // The trials must have exercised what they claim to.
+  VCHECK(linked_runs.load() > runs.load() / 10);
+  VCHECK(links.load() > linked_runs.load());
+  VCHECK(splits.load() > runs.load() / 50);
+  VCHECK(after_split.load() > 20);
+  VCHECK(bssys.load() > 50);
+  VCHECK(exits.load() > 50);
+  VCHECK(spins_counted.load() > 20);
+  VCHECK(spin_stops.load() > 5);
+  VCHECK(olo_stops.load() > runs.load() / 50);
+}
+
 VTEST_MAIN
