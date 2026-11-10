@@ -116,7 +116,7 @@ The workloads run at three depths:
 | When | What | Where |
 | --- | --- | --- |
 | Every pull request to this repository | `compute_virus`, `int_virus`, `cache_latency` on one A10 | `ci.yml`, job *pantheon workloads* |
-| Every merge to main, and daily at 06:23 UTC | every workload, on every machine of the matrix in `workloads.yml` (37) | `workloads.yml` |
+| Every merge to main, and daily at 06:23 UTC | every workload, on every machine of the matrix in `workloads.yml` (17) | `workloads.yml` |
 | Every pull request to pantheon | every workload, on two A10s | pantheon's `ci.yml`, job *Workloads on pantheonsim* |
 
 The third row is how a change to a pantheon workload gets an answer before it merges,
@@ -125,17 +125,21 @@ the runner the Action's `source-dir` output points at, so it is the same script 
 other two. The Action caches the simulator build under its source, so after the first
 run the job is the workloads' own build and run, a few minutes.
 
-Each NVIDIA profile gets a machine, alternating CUDA 12.0 and 13.0 within each
-architecture and with GPU counts above one for the multi-GPU paths (for example
-1 x T4 and 2 x A10 on CUDA 12.0; 8 x H100, 4 x H200 and 2 x B200 on CUDA 13.0).
-The matrix, with each machine's profile, count and CUDA version, is the `matrix`
-list in `.github/workflows/workloads.yml`. A profile the toolchain image cannot
-build for (`nvidia/vr200`, compute capability 10.7) is marked there as `not-run`.
+The matrix has one machine per compute capability (sm_75 through sm_121), not one per
+profile, alternating CUDA 12.0 and 13.0 where both can build, with GPU counts above one for the
+multi-GPU paths (for example 1 x T4 and 2 x A10 on CUDA 12.0; 8 x H100, 4 x H200 and 2 x B200 on
+CUDA 13.0). Each machine builds the workloads with pantheon's own Makefile inside `vgpu shell`,
+which reads the architecture off the simulated `nvidia-smi` exactly as it would on the card, so
+cards that share a capability build and run the same code. What differs between them (memory,
+device identity, what `nvidia-smi` and NVML report) is data, and `e2e_device_attributes` and
+`memory_totals` check it on every profile in the regular test run. The matrix, with each
+machine's profile, count and CUDA version, is the `matrix` list in
+`.github/workflows/workloads.yml`. A profile the toolchain image cannot build for
+(`nvidia/vr200`, compute capability 10.7) is marked there as `not-run`.
 
-A *coverage* job fails the pull request that adds a profile without adding it
-to the matrix. Each machine builds the workloads with pantheon's own Makefile
-inside `vgpu shell`, which reads the architecture off the simulated
-`nvidia-smi` exactly as it would on the card.
+A *coverage* job fails the pull request that adds a compute capability without adding a machine
+for it (or a profile that is not a real one). To run a workload on a specific card, dispatch the
+workflow, or run `run_pantheon_workloads.sh` with `VGPU_WORKLOAD_GPU=nvidia/<name>`.
 
 A workload that exits 0 after printing `Skipping: <reason>` (too few GPUs, the NCCL
 library missing, a pantheon-started group that the runner does not form) is reported as
