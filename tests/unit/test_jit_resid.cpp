@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <random>
 #include <stdexcept>
@@ -1475,6 +1476,149 @@ VTEST(jit_linked_regions_equal_the_unlinked_code_and_the_run_loop_between_its_ca
   VCHECK(spins_counted.load() > 20);
   VCHECK(spin_stops.load() > 5);
   VCHECK(olo_stops.load() > runs.load() / 50);
+}
+
+// ---- every form of the generated code, with and without linking (round sp53) ------------------------------------------------------------------------
+//
+// The knobs of the generator are linking, fused runs, register residence and the body specialised for a whole warp. The tests above take them one or two at
+// a time; CI's "linking, the full form" found what none of them could: with linking the regions of a section are merged around `stop` ops, and the
+// generator kept its account of the rows it held in locals across a stop op, so with residence the code after it read local copies that were never loaded
+// (wrong results in the ldsm kernel of sass_tier with more than one warp a block). This test runs regions that mix generated ALU ops, escapes, stores,
+// branches, cont ops, every op linking adds (BSSY, EXIT, CALL, RET, BSYNC) and stop ops, compiled in all sixteen combinations: for linking off and on,
+// the seven other forms against the plainest one (no residence, no specialisation, no fused runs), called once each with the same trial. Registers,
+// predicates, counters, the turn's calls, the spin count, the log of escapes and host calls, the lanes' addresses, the group, the others' place, where the
+// code stopped and where the 256-op run restarted must be equal. (VGPU_JIT_MUTANT=res_stop_keep is the bug.)
+
+VTEST(jit_every_combination_of_linking_fusing_residence_and_specialisation_equals_the_plain_form) {
+  if (VJ_SAN || !have_cxx()) return;
+  const unsigned units = static_cast<unsigned>(std::strtoul(std::getenv("VGPU_JIT_MATRIX_UNITS") ? std::getenv("VGPU_JIT_MATRIX_UNITS") : "3", nullptr, 10));
+  const uint64_t seed0 = std::getenv("VGPU_JIT_RANDOM_SEED") ? std::strtoull(std::getenv("VGPU_JIT_RANDOM_SEED"), nullptr, 10) : 1;
+  const std::string dir = tmp_dir("matrix");
+  std::atomic<unsigned> next{0}, failures{0}, runs{0}, after_stop{0}, stops_fallen{0}, linked_ctl{0};
+  std::mutex mu;
+  std::string first_failure;
+  const auto worker = [&] {
+    for (;;) {
+      const unsigned unit = next.fetch_add(1);
+      if (unit >= units) return;
+      Gen g(seed0 * 7000003u + unit);
+      jit::UnitSpec spec;
+      spec.sm = 80;
+      for (unsigned r = 0; r < 6; ++r) {
+        spec.regions.push_back(graph_region(g, 14 + static_cast<unsigned>(g.u(40)), true, 12));
+        auto& ops = spec.regions.back().ops;
+        for (size_t i = 0; i < ops.size(); ++i) {
+          jit::OpFacts& o = ops[i];
+          const unsigned kind = static_cast<unsigned>(g.u(100));
+          if (o.br) {
+            if (kind < 20) o.call = true, o.aux = 0;
+          } else if (o.form == 0 && !o.store && !o.cont) {   // an escape: some become the ops linking adds, some the loop's ops between merged regions
+            if (kind < 10) o.cont = true, o.hostctl = 1;
+            else if (kind < 20) { o.cont = true; o.hostctl = 2; o.aux = static_cast<uint8_t>(g.u(3)); o.p = g.pred(); o.p2 = g.pred(); }
+            else if (kind < 27) o.cont = true, o.hostctl = 3;
+            else if (kind < 37) o.cont = true, o.hostctl = 4;
+            else if (kind < 55 && i > 0) { jit::OpFacts stop; stop.stop = true; o = stop; }
+          }
+        }
+        if (ops[0].stop) ops[0] = graph_base(g);
+      }
+      // [link][residence | specialise << 1 | fuse << 2]
+      jit::Result res[2][8];
+      std::vector<std::unique_ptr<jit::Engine>> engines;
+      bool ok = true;
+      for (unsigned link = 0; link < 2 && ok; ++link)
+        for (unsigned f = 0; f < 8 && ok; ++f) {
+          jit::Config cfg;
+          cfg.cache_dir = dir + "/u" + std::to_string(unit) + "l" + std::to_string(link) + "f" + std::to_string(f);
+          cfg.link = link;
+          cfg.residence = f & 1;
+          cfg.specialize = f & 2;
+          cfg.fuse = f & 4;
+          engines.push_back(std::make_unique<jit::Engine>(cfg));
+          res[link][f] = engines.back()->obtain(spec);
+          if (!res[link][f].found) {
+            std::lock_guard<std::mutex> lk(mu);
+            ++failures;
+            if (first_failure.empty()) first_failure = "unit " + std::to_string(unit) + ": compile failed: " + res[link][f].message;
+            ok = false;
+          }
+        }
+      if (!ok) continue;
+      std::mt19937_64 rng(seed0 * 15485863u + unit);
+      for (unsigned r = 0; r < spec.regions.size(); ++r) {
+        const jit::RegionSpec& rs = spec.regions[r];
+        const int32_t k = static_cast<int32_t>(rs.ops.size());
+        const std::vector<uint32_t> starts = jit::stretch_starts(rs);
+        std::vector<uint32_t> after;   // the entries that follow a stop op
+        for (uint32_t st : starts)
+          if (st > 0 && rs.ops[st - 1].stop) after.push_back(st);
+        for (unsigned t = 0; t < 40; ++t) {
+          LSim a;
+          randomize_g(a, rng, false);
+          a.seed = rng();
+          Trial tr = draw_trial(rng, rs, t);
+          if (tr.n0 > 256) tr.n0 = 256;
+          if (!after.empty() && t % 4 == 1) tr.entry = after[rng() % after.size()];
+          if (rng() % 3 == 0)
+            for (unsigned i = 0; i < 7; ++i) a.p[i] = static_cast<uint32_t>(rng());
+          const unsigned kind = static_cast<unsigned>(rng() % 10);
+          tr.flags = kind < 4 ? jit::kFlagLink : kind < 9 ? jit::kFlagChain : 0u;
+          a.olo = rng() % 3 ? 1000000 : static_cast<int64_t>(rng() % static_cast<uint64_t>(k + 6)) - 2;
+          a.spins = static_cast<uint32_t>(rng() % 60);
+          for (auto& v : a.pcs) v = -7;
+          a.exit_ok = rng() % 5 != 0;
+          a.call_ok = rng() % 6 != 0;
+          a.starts = &starts;
+          a.k = k;
+          a.gate = rng() % 4 == 0;
+          const uint32_t gl = static_cast<uint32_t>(__builtin_popcount(tr.group));
+          for (unsigned link = 0; link < 2; ++link) {
+            LSim ref = a;
+            jit::Ctx cr = make_lctx(ref, tr.flags, tr.group);
+            bool tref = false;
+            try { res[link][0].lib->fns[r](&cr, tr.group, gl, tr.entry, tr.n0); } catch (const std::runtime_error&) { tref = true; }
+            ref.exit_idx = cr.exit_idx; ref.exit_ps = cr.exit_ps;
+            if (std::find(after.begin(), after.end(), tr.entry) != after.end()) ++after_stop;
+            if (!tref && cr.exit_idx >= 0 && cr.exit_idx < k && rs.ops[static_cast<size_t>(cr.exit_idx)].stop) ++stops_fallen;
+            if (link && ref.extra > 0) ++linked_ctl;
+            for (unsigned f = 1; f < 8; ++f) {
+              LSim b = a;
+              jit::Ctx cb = make_lctx(b, tr.flags, tr.group);
+              bool tb = false;
+              try { res[link][f].lib->fns[r](&cb, tr.group, gl, tr.entry, tr.n0); } catch (const std::runtime_error&) { tb = true; }
+              b.exit_idx = cb.exit_idx; b.exit_ps = cb.exit_ps;
+              ++runs;
+              const bool state = same_g(ref, b, !tref) && ref.spins == b.spins && std::memcmp(ref.pcs, b.pcs, sizeof ref.pcs) == 0 && cr.group == cb.group && cr.olo == cb.olo &&
+                                 cr.over == cb.over;
+              if (tref != tb || !state) {
+                std::lock_guard<std::mutex> lk(mu);
+                ++failures;
+                if (first_failure.empty())
+                  first_failure = "unit " + std::to_string(unit) + " region " + std::to_string(r) + " trial " + std::to_string(t) + " (entry " + std::to_string(tr.entry) + ", group " +
+                                  std::to_string(tr.group) + ", flags " + std::to_string(tr.flags) + "): linking " + std::to_string(link) + ", residence " + std::to_string(f & 1) +
+                                  ", specialisation " + std::to_string((f >> 1) & 1) + ", fused runs " + std::to_string((f >> 2) & 1) + " differs from the plain form: R " +
+                                  (std::memcmp(ref.R, b.R, sizeof ref.R) ? "differs" : "same") + ", p " + (std::memcmp(ref.p, b.p, sizeof ref.p) ? "differs" : "same") + ", exit " +
+                                  std::to_string(ref.exit_idx) + "/" + std::to_string(b.exit_idx) + ", log " + (ref.log == b.log ? "same" : "differs") + ", threw " +
+                                  std::to_string(tref) + "/" + std::to_string(tb);
+              }
+            }
+          }
+        }
+      }
+    }
+  };
+  const unsigned nthreads = std::min<unsigned>(units, std::max(1u, std::thread::hardware_concurrency()));
+  std::vector<std::thread> pool;
+  for (unsigned i = 0; i < nthreads; ++i) pool.emplace_back(worker);
+  for (auto& th : pool) th.join();
+  std::printf("  matrix: %u units, %u comparisons with the plain form (7 forms, linking off and on), %u reference runs entered after a stop op, %u stopped at one, %u linked runs "
+              "that went on past a branch or cont op, %u failures\n", units, runs.load(), after_stop.load(), stops_fallen.load(), linked_ctl.load(), failures.load());
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+  if (failures) throw vtest::Failure(first_failure);
+  VCHECK(after_stop.load() > 40);
+  VCHECK(stops_fallen.load() > 40);
+  VCHECK(linked_ctl.load() > 100);
 }
 
 // ---- the row copies of generated code (round sp53) ---------------------------------------------------------------------------------------------

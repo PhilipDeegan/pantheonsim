@@ -555,7 +555,10 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool
       if (o.stop) {   // an op of the loop's between two merged regions: the code that falls into it leaves, with everything written
         if (fell) {
           flush();
-          rc.sync(s, false);
+          // ... and no row is trusted after it (round sp53; found by CI's "linking, the full form" on the ldsm kernel): the op after a stop op is an entry
+          // that is reached only from the entry table, where no local copy of a row or predicate is valid. Without the `true` the generator went on believing
+          // the copies of the code before the stop op, and with register residence the merged region's next part read rows it had never loaded.
+          rc.sync(s, !mutant("res_stop_keep"));
           leave(std::to_string(i), "  ");
         }
         fell = false;
