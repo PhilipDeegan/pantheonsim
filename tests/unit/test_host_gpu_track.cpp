@@ -169,7 +169,7 @@ constexpr uint64_t kChunks128MiB = (128ull << 20) / kChunkSize;
 
 struct GateWorld {
   std::atomic<uint32_t> slot{0};
-  std::shared_mutex mu;
+  GateLock mu;   // (the production type: Runtime::Impl::mu)
   TrackedMap res;
   std::atomic<uint64_t> pulled{0}, updates{0};
   explicit GateWorld(uint64_t chunks = kChunks128MiB, Where state = Where::Card) {
@@ -313,6 +313,113 @@ VTEST(the_gate_with_128_mib_live_is_much_cheaper_than_the_exclusive_scan_it_repl
   });
   std::printf("gate, 4 threads x %llu reads of 128 MiB: %.3f s now, %.3f s before (%.0fx)\n", static_cast<unsigned long long>(kAccesses), now, before, before / now);
   VCHECK(now * 5 < before);
+}
+
+// ---- sp45: what a thread remembers of settled chunks (GateMemory) must never change what the gate does ----
+// Two worlds take the same random sequence of accesses and of exclusive sections that put chunks back on the card (what a launch on the card does between the
+// simulator's launches): one with the memory on, one with every access taking the lock. Pulls, updates and every chunk state must agree after every step.
+VTEST(a_thread_that_remembers_settled_chunks_does_what_the_locking_gate_does) {
+  for (unsigned seed = 1; seed <= 20; ++seed) {
+    GateWorld fast(64, Where::Card), slow(64, Where::Card);
+    slow.mu.cache_enabled = false;
+    std::mt19937 rng(seed);
+    for (unsigned step = 0; step < 4000; ++step) {
+      const unsigned op = rng() % 40;
+      if (op == 0) {   // a launch on the card: every chunk is the card's again (an exclusive section, as in Runtime::Impl)
+        for (GateWorld* w : {&fast, &slow}) {
+          std::lock_guard<GateLock> g(w->mu);
+          w->res.begin()->second.r.card_launched();
+          w->res.begin()->second.slot->store(64);
+        }
+      } else if (op == 1) {   // the simulator's launch begins: the chunks the card alone holds come back (exclusive too)
+        for (GateWorld* w : {&fast, &slow}) {
+          std::lock_guard<GateLock> g(w->mu);
+          w->pulled += w->res.begin()->second.r.sim_launch().size();
+        }
+      } else {
+        const uint64_t chunk = rng() % 64;
+        const bool write = rng() % 3 == 0;
+        const uint64_t len = rng() % 4 == 0 ? kChunkSize : 8;
+        fast.access(chunk, write, len);
+        slow.access(chunk, write, len);
+      }
+      VCHECK_EQ(fast.pulled.load(), slow.pulled.load());
+      VCHECK_EQ(fast.updates.load(), slow.updates.load());
+      VCHECK_EQ(fast.slot.load(), slow.slot.load());
+      for (uint64_t c = 0; c < 64; ++c) VCHECK(fast.r().at(c) == slow.r().at(c));
+    }
+  }
+}
+
+VTEST(the_generation_changes_with_every_exclusive_section_and_is_odd_inside_one) {
+  GateLock a, b;
+  VCHECK(a.generation() != b.generation());   // two locks never share a number
+  const uint64_t g0 = a.generation();
+  VCHECK((g0 & 1) == 0);
+  a.lock();
+  VCHECK((a.generation() & 1) == 1);
+  a.lock();
+  a.unlock();
+  VCHECK((a.generation() & 1) == 1);   // the outer section is still open
+  a.unlock();
+  VCHECK((a.generation() & 1) == 0);
+  VCHECK(a.generation() != g0);
+}
+
+// ---- sp45: the scalar access path while a card gate is in play asks the gate on EVERY access to a card-valid allocation, remembered or not ----
+namespace {
+struct CountingGate : CardGate {
+  std::atomic<uint64_t> accesses{0}, writes{0};
+  void before_access(uint64_t, uint64_t, bool write) override { ++accesses; if (write) ++writes; }
+  void before_free(uint64_t) override {}
+};
+}  // namespace
+
+VTEST(a_scalar_access_to_a_card_valid_allocation_asks_the_gate_every_time_and_reads_the_right_bytes) {
+  MemoryManager mm(256 << 20);
+  CountingGate gate;
+  mm.set_card_gate(&gate);
+  const uint64_t a = mm.alloc(1 << 20), b = mm.alloc(1 << 20), plain = mm.alloc(1 << 20);
+  // (another thread fills the memory, before any card copy: no gate; this thread's memory of recent lookups stays empty, as it is when a copy is made by a launch)
+  std::thread([&] {
+    for (uint64_t base : {a, b, plain})
+      for (uint64_t i = 0; i < 64; ++i) mm.store_scalar(base + i * 4, 4, (base / 4096 + i) & 0xffffffffu);
+  }).join();
+  VCHECK_EQ(gate.accesses.load(), uint64_t{0});
+  for (uint64_t base : {a, b}) {   // two allocations hold a card copy
+    mm.card_slot(base)->store(1);
+    mm.card_resident_count().fetch_add(1);
+  }
+  uint64_t expected = 0;
+  for (unsigned round = 0; round < 50; ++round)
+    for (uint64_t i = 0; i < 64; ++i) {
+      VCHECK_EQ(mm.load_scalar(a + i * 4, 4), (a / 4096 + i) & 0xffffffffu);   // alternating allocations: a remembered answer for the wrong one must not be used
+      VCHECK_EQ(mm.load_scalar(b + i * 4, 4), (b / 4096 + i) & 0xffffffffu);
+      VCHECK_EQ(mm.load_scalar(plain + i * 4, 4), (plain / 4096 + i) & 0xffffffffu);
+      expected += 2;
+    }
+  VCHECK_EQ(gate.accesses.load(), expected);   // one per access to a card-valid allocation, none for the other one
+  for (uint64_t base : {a, b})   // runs of accesses to one allocation, the case a thread's memory of the last one answers
+    for (unsigned i = 0; i < 200; ++i) {
+      VCHECK_EQ(mm.load_scalar(base + (i % 64) * 4, 4), (base / 4096 + i % 64) & 0xffffffffu);
+      ++expected;
+    }
+  VCHECK_EQ(gate.accesses.load(), expected);
+  mm.store_scalar(a + 8, 4, 77);
+  VCHECK_EQ(gate.writes.load(), uint64_t{1});
+  VCHECK_EQ(mm.load_scalar(a + 8, 4), uint64_t{77});
+  // The card copy goes away: the allocation is an ordinary one again and the gate is not asked.
+  mm.card_slot(a)->store(0);
+  mm.card_resident_count().fetch_sub(1);
+  const uint64_t before = gate.accesses.load();
+  for (unsigned i = 0; i < 100; ++i) VCHECK_EQ(mm.load_scalar(a + 8, 4), uint64_t{77});
+  VCHECK_EQ(gate.accesses.load(), before);
+  // A free voids what a thread remembers of the allocation: the address is an error now, not the old record.
+  VCHECK_EQ(mm.load_scalar(b + 8, 4), (b / 4096 + 2) & 0xffffffffu);   // (b is the allocation this thread remembers)
+  mm.free(b);
+  bool threw = false;
+  try { mm.load_scalar(b + 8, 4); } catch (const Error&) { threw = true; }
+  VCHECK(threw);
 }
 
 VTEST_MAIN

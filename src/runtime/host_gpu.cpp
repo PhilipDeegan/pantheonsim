@@ -157,7 +157,7 @@ struct Runtime::Impl : CardGate {
     bool back_edge = false;  // the code has a loop (a branch to itself or an earlier instruction)
   };
   std::map<std::pair<const sass::Module*, std::string>, Verdict> eligible;
-  std::shared_mutex mu;   // shared: the gate's accesses that change nothing (before_access); exclusive: everything else
+  GateLock mu;   // shared: the gate's accesses that change nothing (before_access); exclusive: everything else
   uint64_t max_bytes = 2ull << 30;
   bool dead = false;
   uint32_t multiprocessors = 0;   // of the simulated profile (and the card: start() checks they agree)
@@ -233,7 +233,7 @@ struct Runtime::Impl : CardGate {
 
   void before_free(uint64_t base) override {
     if (t_internal) return;
-    std::lock_guard<std::shared_mutex> g(mu);
+    std::lock_guard<GateLock> g(mu);
     for (auto it = base == UINT64_MAX ? res.begin() : res.find(base); it != res.end();) {
       Res& a = it->second;
       a.r = Residency(a.r.chunks());   // dropped: nothing of it is valid on the card any more
@@ -527,7 +527,9 @@ Runtime::~Runtime() { delete impl_; }
 
 namespace {
 void print_summary(Runtime::Impl* im) {
-  if (quiet() || !im || im->start_failed) return;   // (a driver that could not be used already said "mode off")
+  if (!im || im->start_failed) return;   // (a driver that could not be used already said "mode off")
+  // VGPU_QUIET silences the prose, not a report that was asked for: VGPU_HOST_GPU_VERIFY and VGPU_HOST_GPU_LOG each exist to be read at the end of the run.
+  if (quiet() && !im->verify && !logging()) return;
   const Stats& s = im->stats;
   std::fprintf(stderr,
                "host_gpu: %llu launches ran on the card, %llu in the simulator (%llu kernels not in the exact set, %llu too small, %llu unsupported launch shapes, %llu failed on the card)\n",
@@ -591,7 +593,7 @@ void Runtime::before_simulated(MemoryManager& mem) {
     impl_->verify_card_ran = false;
     return;
   }
-  std::lock_guard<std::shared_mutex> g(impl_->mu);
+  std::lock_guard<GateLock> g(impl_->mu);
   if (impl_->verify_card_ran) {   // verifying: this launch already ran on the card and the simulator runs it too; the card's copy stays valid
     impl_->verify_card_ran = false;
     return;
@@ -601,7 +603,7 @@ void Runtime::before_simulated(MemoryManager& mem) {
 
 void Runtime::note_simulated(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, double sim_seconds, const MemoryManager* mem,
                              const std::vector<std::vector<uint8_t>>* args) {
-  std::lock_guard<std::shared_mutex> g(impl_->mu);
+  std::lock_guard<GateLock> g(impl_->mu);
   if (impl_->start_failed) return;   // the driver could not be used: nothing to learn for
   InternalScope internal;
   if (g_trace_file) {
@@ -649,7 +651,7 @@ void Runtime::note_simulated(const ptx::EntryFn& fn, const exec::LaunchConfig& c
 bool Runtime::try_launch(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, const std::vector<std::vector<uint8_t>>& args,
                          MemoryManager& mem) {
   Impl& im = *impl_;
-  std::lock_guard<std::shared_mutex> g(im.mu);   // one offloaded launch at a time: the card path shares the reserved window
+  std::lock_guard<GateLock> g(im.mu);   // one offloaded launch at a time: the card path shares the reserved window
   InternalScope internal;
   im.last = {};
   if (im.dead) return false;

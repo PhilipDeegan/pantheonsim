@@ -581,3 +581,125 @@ Unit suite on server2 (Release, g++ 13, `ctest -R '^test_'`, 376 tests): main d4
 * Fix 2's number is a stand-in-driver run: the card "executes" nothing, so verify reports every kernel as different; the cost being measured is the simulator's side of the gate, which does not depend on what the card did.
 * The proof for integer division covers 32-bit forms with one reciprocal estimate; 64-bit division (`I2F.U64.RP`, a `CALL` slow path) is a different sequence and was not looked at.
 * `idiv` and `sidiv` runs in the simulator show the simulator's execution of the idiom is exact; they say nothing about the card, which is what the experiment script is for.
+
+## Round sp44 (host-GPU card experiments)
+
+Branch `sp44-card-results` (main 27f09add merged with `hostgpu-round`, PR #557, head 0ba1a955; no source changed). The card experiments that Rounds sp42 and sp43 left open, run on one real A10G. Compact table: `data/sp44/results.tsv`.
+
+Rig: AWS g5.xlarge (A10G, driver 595.112.07, Ubuntu 24.04, 4 vCPU, g++ 13.3), instance i-09579237d1ff574ac, launched 22:01 UTC, terminated 23:25 UTC (about 1.4 h). Simulator built from a clean `git archive` of 0ba1a955, `RelWithDebInfo`, `-DVGPU_LTO=OFF`, targets `vgpucuda vgpucudart vgpu`. Toolkits: the exhaustive probe was built with nvcc 13.0.88 (PATH forced; the rig default is 13.2); the programs are the cached sm_86 binaries of sp42 (PolyBench/GPU, Rodinia, HeCBench, all built with nvcc 13.0, `-cudart shared`, copied from the local cache, not rebuilt); native `libcudart` 13.0 was never needed. Every run: `VGPU_GPU=nvidia/a10g VGPU_THREADS=4 VGPU_QUIET=1`, one process at a time on the rig.
+
+### B. Exhaustive MUFU probe (`tools/probes/hostgpu_mufu_card_experiment.sh`, stride 1, about 5 minutes)
+
+All four verdicts pass:
+
+```
+VERDICT div PASS (12 RESULT lines, differ=0, stride 1)
+VERDICT sqrtrn PASS (1 RESULT lines, differ=0, stride 1)
+VERDICT rcprn PASS (1 RESULT lines, differ=0, stride 1)
+VERDICT harness PASS
+```
+
+Every exact op tested all 4294967296 patterns with differ=0 (div: the 12 dividends 0x3f800000, 0x40400000, 0x3dcccccd, 0xc0200000, 0x7bf00000, 0x0a000000, 0x3f9e3779, 0x7f7fffff, 0x00000000, 0x7f800000, 0xff800000, 0x7fc00000 against every divisor). The harness's own mutation (one-ulp nudge) is seen by all three ops (differ 8128 to 16256 of 16711936 at stride 257; the three infinity/NaN dividends of div correctly show 0). The bare MUFU forms differ as expected:
+
+| op | differ of 2^32 | share | max ulp | first differing pattern (card / sim) |
+|---|---:|---:|---:|---|
+| rcp | 558,695,088 | 13.0% | 1 | 0x008005ac: 0x7e7ff4a8 / 0x7e7ff4a9 |
+| rsq | 461,534,510 | 10.7% | 2 | 0x00800004: 0x5efffffb / 0x5efffffc |
+| sqrt | 359,384,981 | 8.4% | 1 | 0x00801000: 0x200007ff / 0x20000800 |
+| ex2 | 189,046,181 | 4.4% | 2 | 0x33b8aa3c: 0x3f800000 / 0x3f800001 |
+| lg2 | 1,071,419,683 | 24.9% | 23,947,836 | 0x00800000: 0xc2fbffff / 0xc2fc0000 |
+
+The lg2 max_ulp is an absolute-ulp distance near results that cross zero (log2 of values near 1), not a 23-million-ulp error in the usual sense; the probe's metric is the integer distance of the two bit patterns. No exact op failed, so the exact set is unchanged. Consequence: integer division, `div.rn` (the `VGPU_HOST_GPU_DIV` idiom), `sqrt.rn` and `rcp.rn` are bit-exact on the A10G over every input the probe covers; the bare MUFU ops are not and stay out.
+
+### C. Start-cost A/B (`VGPU_HOST_GPU=exact`, old = `VGPU_HOST_GPU_START_COST=0`, new = default)
+
+Five interleaved runs per cell (long programs: old, new; short programs: plain simulator, old, new), process wall seconds. The plain simulator was not rerun for the four long programs (sp42: 320.9, 405.2, 600+, 110.3 s).
+
+| program | plain sim s | old median (min-max) | new median (min-max) | new vs old |
+|---|---:|---|---|---:|
+| base64e | (320.9) | 8.780 (8.772-8.874) | 8.745 (8.732-8.760) | -0.4% |
+| babelstream | (405.2) | 13.540 (13.501-13.631) | 13.527 (13.517-13.600) | -0.1% |
+| aligned-types | (600+) | 8.386 (8.383-8.405) | 8.329 (8.322-8.340) | -0.7% |
+| FDTD-2D | (110.3) | 4.774 (4.669-4.808) | 4.746 (4.654-4.893) | -0.6% |
+| bfs | 0.017 | 0.017 (0.017-0.020) | 0.017 (0.017-0.019) | 0 |
+| backprop | 0.048 | 0.276 (0.268-0.281) | 0.047 (0.046-0.047) | 5.9x faster |
+| gaussian | 0.022 | 0.246 (0.238-0.257) | 0.022 (0.022-0.022) | 11x faster |
+| pathfinder | 0.014 | 0.243 (0.241-0.249) | 0.014 (0.013-0.014) | 17x faster |
+
+Result: the long programs do not lose. The expected cost of about 0.25 s (driver started after 0.25 s of simulation instead of at the first launch) is not visible: the new rule is equal or 0.03 to 0.06 s faster, which is inside the run-to-run spread for base64e, babelstream and FDTD-2D and just outside it for aligned-types (spread 0.02 s). Why the delayed start costs nothing was not investigated (the driver start is begun in a thread and may overlap simulation; not checked). The short programs stop losing: backprop, gaussian and pathfinder go from 5.9x to 17x slower than the simulator to equal to it (within 1 ms). bfs shows no loss even with `VGPU_HOST_GPU_START_COST=0` (0.017 s in all three modes), unlike sp42's 0.25 s on main d462bc2f: the sp43 change that starts the driver only for a launch that is offloaded already covers it (no bfs launch is offloaded), so this A/B isolates only the cost threshold, not the whole sp43 start change. The programs' stdout was not compared in this table (the filter did not remove every timing line); stdout equality is in D and E.
+
+### D. Division idiom (`VGPU_HOST_GPU_DIV=1`) on the programs with float division
+
+B shows div PASS, so these runs apply. One run per cell (mandelbrot: five interleaved runs), wall seconds; "device" is the `GPU Time in seconds` the PolyBench programs print (the process wall hides it behind the CPU reference). Standard output with time lines removed is identical to the plain simulator in every mode of every program.
+
+| program | sim | exact | exact + DIV=1 | DIV vs sim | device sim / exact / DIV | verify=all in-set launches identical / different |
+|---|---:|---:|---:|---:|---|---|
+| ADI | 0.40 | 0.40 | 0.41 | 0.98x | 0.326 / 0.329 / 0.340 | 2049 / 0 |
+| LU | 30.86 | 11.15 | 11.20 | 2.76x | 30.18 / 10.37 / 10.44 | 4094 / 0 |
+| GRAMSCHM | 274.16 | 269.99 | 273.04 | 1.00x | 46.06 / 43.64 / 43.83 | 3011 (+1506 outside) / 0, run cut at 1500 s |
+| CORR | 63.60 | 63.40 | 63.66 | 1.00x | 23.77 / 23.98 / 23.99 | 2 (+1 outside) / 0, run cut at 400 s |
+| mandelbrot (HeCBench) | 1.197 | 1.196 | 0.99 | 1.21x | - | 2 / 0 |
+| lud (Rodinia) | 0.05 | 0.05 | 0.06 | 0.8x | - | 30 (+16 outside) / 0 |
+| lud (HeCBench) | 0.05 | 0.05 | 0.05 | 1.0x | - | 30 (+16 outside) / 0 |
+
+Verify mode correctness: no launch, in or outside the exact set, differed (`in_set_different` is 0 everywhere). The counts come from the per-launch `host_gpu: verify ... identical` lines, because the summary line is not printed under `VGPU_QUIET=1` (see Findings). GRAMSCHM and CORR verify did not finish inside their caps (each launch runs on both sides; the per-launch cost is the simulator's), so their counts are of the launches that completed.
+
+Which programs gain: only mandelbrot (five runs: sim 1.195-1.198, exact 1.195-1.250, DIV 0.984-0.999; the card runs its kernel in 0.12 ms against a 452 ms simulator estimate, total 6 ms with the push). LU's gain (2.76x) is from `exact` alone (`lu_kernel2`, offloaded in `exact` mode without DIV), DIV adds nothing. ADI, GRAMSCHM and CORR do not gain although DIV makes kernels eligible: the eligible launches are too short to repay a card round trip (`adi_kernel4` sim 0.12 ms against a 1.16 ms card path, `gramschmidt_kernel2` 0.15 ms against 4.3 ms; the log says "stays in the simulator"), `gramschmidt_kernel1` is refused for `MUFU.RSQ`, Rodinia `lud_diagonal` for `MUFU.RCP` and CORR's `std_kernel` for a `CALL.REL.NOINC 0x800` (a slow-path call, not a bare MUFU). `gramschmidt_kernel3` (36 ms in the simulator against a 4.3 ms card path) is the one launch the log shows as worth offloading by size, yet GRAMSCHM did not speed up; why was not investigated (the refused `kernel1` shares its buffers, which may force the data back each iteration; a guess, not measured).
+
+### E. Verify mode on 2DCONV (128 MiB live), with the start-cost fix
+
+Three interleaved runs of `VGPU_HOST_GPU=exact VGPU_HOST_GPU_VERIFY=1`: wall 13.48 s (13.45-13.52) with the default start cost, 13.49 s (13.44-13.68) with `VGPU_HOST_GPU_START_COST=0`, against 0.96 s (0.96 each) for the plain simulator: verify costs 14x the plain run here, finishes, and the start-cost rule does not matter for it. Summary (run without `VGPU_QUIET`): `host_gpu: 128.0 MiB went to the card, 0.0 MiB came back`, `host_gpu_verify: in_set_identical=1 in_set_different=0 other_identical=0 other_different=0`. In sp42 this program's verify did not finish in 150 s (finding 6); sp43's fix makes it 13.5 s on a real card.
+
+### Findings and caveats
+
+* One observation, not fixed: with `VGPU_QUIET=1` the end-of-run summary lines (`host_gpu_verify: in_set_identical=...` and `host_gpu: N launches ran on the card`) are not printed, although `VGPU_HOST_GPU_VERIFY` was requested; the per-launch verify lines are. Repro on the rig: `VGPU_GPU=nvidia/a10g VGPU_HOST_GPU=exact VGPU_HOST_GPU_VERIFY=1 VGPU_QUIET=1 ./2DCONV 2>&1 >/dev/null | tail` prints nothing; without `VGPU_QUIET=1` it prints both lines. The card experiment script's follow-up text ("read the last two lines") needs the variable unset. No result above is affected (counted from the per-launch lines).
+* No exact op failed; no verify run found a difference; no bug in the exact set was found.
+* One run per cell in D (five for mandelbrot): the 2.76x of LU and the 1.21x of mandelbrot are stable by the repeats and by sp42 (LU 11.42 s), the others are single runs of unchanged times. The plain simulator was not rerun for the long programs of C.
+* The probe was built with toolkit 13.0.88 (card results of div, sqrtrn and rcprn do not depend on it: the idiom is the card's own division sequence, compiled in the probe); the 13.2 toolkit on the rig was not used for any program. Whether nvcc 13.2 emits a different division sequence was not tested.
+* Other cards (sm_75 to sm_120) were not run; the probe's answer is the A10G's (sm_86).
+* Not run: PolyBench 2DCONV outside of E, the other 56 programs of sp42, the second half of the experiment script's list for adam, mask, md5hash, matrixT (HeCBench) and hotspot, srad_v2 (Rodinia), which need their reduced arguments; the idiom's ops on them are covered by B.
+
+## Round sp45 (verify-mode host side)
+
+Two items, both measured on server2 (Zen 5, 4 simulator threads, `-O3` without LTO, stand-in driver with `STUB_CARD_OK=1` so verify believes each launch ran on the card; the program's result is the simulator's whatever the card did). `perf` is not allowed on server2 (`perf_event_paranoid` 4, no root), so the profile is a SIGPROF sampler preloaded into the program (1 ms, instruction pointer, symbolised against the library's symbol table): a sample set, not a call graph.
+
+### 1. The summary under `VGPU_QUIET=1`
+
+`print_summary` returned at once under `VGPU_QUIET=1`, so `VGPU_HOST_GPU_VERIFY=1` and `VGPU_HOST_GPU_LOG=1` runs lost the two lines they exist for (`host_gpu: N launches ran on the card ...`, `host_gpu_verify: in_set_identical=...`). It now prints when verify or the log is asked for, quiet or not; quiet alone still prints nothing, and a driver that could not start still prints nothing (it already said "mode off"). Test: `e2e_host_gpu_stub` step 9 (quiet alone: no summary; quiet with LOG: the launches line; quiet with VERIFY: both lines, and the output equals the mode-off output). Mutation: restoring `if (quiet()) return;` fails the three summary checks.
+
+### 2. Where verify's host-side time went (2DCONV, 128 MiB live, `VGPU_HOST_GPU_VERIFY=1`)
+
+Plain simulation 0.41 s; sp43's verify 3.8 to 5.2 s here (the 7 s of sp43 was a slower run on the same box; the first run of a series is the slow one). Samples of the sp43 build: the gate's `std::shared_mutex` (lock, unlock and the map walk in `gate_access`) 48%, the memory manager's table lock taken twice per access (`find_ordinary_miss` finds the card-valid allocation and returns "miss" under the lock, then `resolve()` takes the lock and looks it up again) 35%, the simulator's own scalar path the rest. Switching the gate off (experiment only) took the run to 2.25 s, so the gate was about 2 s of the 4.
+
+Changes, each measured in turn (verify wall, 2DCONV): sp43 3.9 to 5.1 s, then
+
+| step | verify wall |
+|---|---:|
+| gate lock `std::shared_mutex` replaced by `BigReaderLock` (per-thread reader slots) | 2.69 s |
+| a thread remembers up to four settled chunks (`GateMemory`), answered from the lock's generation with no lock and no map walk | 2.36 s |
+| the scalar path asks the gate itself for the card-valid allocation its lookup found (one table lock per access, not two) | 2.17 s |
+| and remembers that allocation per thread under the table lock's epoch (no table lock, no map) | 1.65 s |
+
+What is left (1.65 s against 0.41 plain) is the simulator's per-lane scalar path: while an allocation has a card copy the batched and hot-location fast paths are off by design, and the profile is `exec_mem`, `mem_read`, `load_scalar`, `resolve_scalar` with the locks at 5%.
+
+Why it is safe. `GateMemory` only skips accesses the gate would have left alone: a settled chunk (a read finds it not the card's alone, a write finds it the simulator's alone) stays settled during a launch because every transition goes toward settled; every other change (a launch on the card, the simulator's launch start, a free, a table sync) is made in an exclusive section, and `GateLock` changes its generation at the start (odd) and the end of each one, so a remembered answer is void while one is open and after it. The memory manager's card entry is checked on every hit for `card_valid != 0` (the gate is still asked every access) and is voided by the table epoch as the lookup memory's ways are. The default path (no card gate: `card_resident_ == 0`) takes the code it took before; `find_ordinary` gained a defaulted parameter and the plain runs are unchanged (below).
+
+Interleaved runs, base = the head of `hostgpu-round`, new = this branch (5 pairs each, seconds; the program's output with its timing lines removed was identical in every pair, and the per-launch verify results and exit codes were the same):
+
+| case | base (median, range) | new (median, range) | ratio |
+|---|---:|---:|---:|
+| 2DCONV verify (128 MiB) | 4.79 (4.73-7.99) | 1.63 (1.63-1.76) | 2.9x |
+| 3DCONV verify | 16.64 (16.53-17.81) | 13.46 (13.28-13.67) | 1.24x |
+| ATAX verify | 17.93 (17.81-21.11) | 4.17 (4.15-4.27) | 4.3x |
+| 2DCONV plain | 0.412 (0.407-0.425) | 0.408 (0.406-0.410) | 1.0x |
+| 3DCONV plain | 0.200 (0.198-0.207) | 0.205 (0.198-0.210) | 1.0x (noise) |
+
+Single runs of other programs, base to new, verify: BICG 1.81 to 0.66 s; `VGPU_HOST_GPU_VERIFY=all` is the same as `1` on these. Programs that did not finish in 150 s in both (2MM verify) were not compared.
+
+Tests (unit, wired into CI as `test_host_gpu_track`): `a_thread_that_remembers_settled_chunks_does_what_the_locking_gate_does` (20 seeds x 4,000 steps of random accesses and exclusive sections against a copy with the memory off: pulls, updates, slot and every chunk state equal after every step), `the_generation_changes_with_every_exclusive_section_and_is_odd_inside_one`, `a_scalar_access_to_a_card_valid_allocation_asks_the_gate_every_time_and_reads_the_right_bytes` (gate called once per access to a card-valid allocation including runs on one allocation, none after the copy goes away, an error after a free). Mutants, all caught: no generation change (2 tests fail), a remembered chunk always write-settled (1), the memory manager's card entry skipping the gate (1), the card entry not voided by the epoch (1).
+
+### Caveats
+
+* The card was a stand-in: verify's comparison is not exercised for real here (the sp44 A10G run is the card evidence); what is shown is the host side's cost and that the outputs did not move.
+* Not run on a real card or in the TSan job locally (no tests on WSL); `GateMemory` is a `thread_local` zero-initialised struct and the new atomics are acquire/release, so TSan has nothing plain to flag, but CI is the check.
+* The remaining gap to plain simulation would need the batched and hot-location paths to work with a card copy, a hot-path change in `MemoryManager` that was not attempted.
