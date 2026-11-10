@@ -45,6 +45,9 @@ class MemoryManager::Spec {
     // The last page asked for (a block's accesses are mostly near one another).
     uint64_t last_slot = ~uint64_t{0};
     Word* last_page = nullptr;
+    // The allocation the last kept piece was in.
+    uint64_t keep_base = 1, keep_end = 0;
+    const void* keep_alloc = nullptr;
   };
 
   ~Spec() {
@@ -208,6 +211,14 @@ MemoryManager::SpecOutcome MemoryManager::spec_end() {
 void MemoryManager::spec_keep(uint64_t addr, uint64_t len) const {
   Spec::Worker& w = *t_spec_worker;
   if (w.kept.size() + len > Spec::kKeepLimit) spec_refuse("the undo log passed its limit");
+  // Wholly inside the allocation the last piece was in (the table cannot change during a launch: an allocation or a free stops the trial).
+  if (addr >= w.keep_base && addr + len <= w.keep_end) {
+    const size_t at = w.kept.size();
+    w.kept.resize(at + len);
+    read_chunks(*static_cast<const Allocation*>(w.keep_alloc), addr - w.keep_base, w.kept.data() + at, len);
+    w.kept_at.emplace_back(addr, len);
+    return;
+  }
   SharedGuard table_guard(table_lock_.get());
   const uint64_t end = addr + len;
   while (addr < end) {
@@ -219,7 +230,10 @@ void MemoryManager::spec_keep(uint64_t addr, uint64_t len) const {
       continue;
     }
     const auto it = std::prev(up);
-    const uint64_t n = std::min(end, it->first + it->second.size) - addr;
+    w.keep_base = it->first;
+    w.keep_end = it->first + it->second.size;
+    w.keep_alloc = &it->second;
+    const uint64_t n = std::min(end, w.keep_end) - addr;
     const size_t at = w.kept.size();
     w.kept.resize(at + n);
     read_chunks(it->second, addr - it->first, w.kept.data() + at, n);
@@ -228,27 +242,24 @@ void MemoryManager::spec_keep(uint64_t addr, uint64_t len) const {
   }
 }
 
-// A block reads [addr, addr + len).
-void MemoryManager::spec_read(uint64_t addr, uint64_t len) const {
-  Spec& s = *spec_;
-  if (s.stopped.load(std::memory_order_relaxed)) throw SpecStop{};
-  Spec::Worker* wp = t_spec_worker;
-  if (!wp) spec_refuse("a thread outside the launch used device memory");
-  if (len == 0) return;
+// A block reads [addr, addr + len) (len > 0; the trial is on and this thread is `worker`).
+[[gnu::always_inline]] inline void MemoryManager::spec_read_in(Spec& s, void* worker, uint64_t addr, uint64_t len) const {
   const uint64_t off = addr - s.base;
-  // Outside the device's range: host memory (pinned, managed), which no block of a trial can write (spec_write), or
+  // Outside the device's range: host memory (pinned, managed), which no block of a trial can write (spec_write_in), or
   // nothing at all, which the access itself reports.
   if (off >= s.span) return;
-  Spec::Worker& w = *wp;
+  Spec::Worker& w = *static_cast<Spec::Worker*>(worker);
   const uint32_t tag = w.tag;
   const uint64_t g1 = (std::min(off + len, s.span) - 1) / Spec::kGranule;
   for (uint64_t g = off / Spec::kGranule; g <= g1; ++g) {
     Spec::Word& word = s.word(w, g);
     uint32_t v = word.load(std::memory_order_acquire);
+    if (v == Spec::kMany || v == tag || v == (tag | Spec::kWrite)) [[likely]] continue;
     for (;;) {
-      if (v == Spec::kMany || v == tag || v == (tag | Spec::kWrite)) break;
       if (v == 0) {
         if (word.compare_exchange_weak(v, tag, std::memory_order_acq_rel)) break;
+      } else if (v == Spec::kMany || v == tag || v == (tag | Spec::kWrite)) {
+        break;
       } else if (v & Spec::kWrite) {
         spec_refuse("a block read what another block wrote");
       } else if (word.compare_exchange_weak(v, Spec::kMany, std::memory_order_acq_rel)) {
@@ -260,18 +271,13 @@ void MemoryManager::spec_read(uint64_t addr, uint64_t len) const {
 
 // A block is about to write [addr, addr + len): it comes to own every word of it, and the bytes of the words it did
 // not own yet are kept first.
-void MemoryManager::spec_write(uint64_t addr, uint64_t len) const {
-  Spec& s = *spec_;
-  if (s.stopped.load(std::memory_order_relaxed)) throw SpecStop{};
-  Spec::Worker* wp = t_spec_worker;
-  if (!wp) spec_refuse("a thread outside the launch used device memory");
-  if (len == 0) return;
+[[gnu::always_inline]] inline void MemoryManager::spec_write_in(Spec& s, void* worker, uint64_t addr, uint64_t len) const {
   const uint64_t off = addr - s.base;
   // A store the shadow has no word for (host memory another thread or process may share; an address that is no
   // allocation's) cannot be undone or checked: the launch runs in order.
   if (off >= s.span || len > s.span - off) spec_refuse("a block wrote outside the device's own memory");
   if (s.host_maps && host_maps_ && host_maps_->may_overlap(addr, addr + len - 1)) spec_refuse("a block wrote host-mapped memory");
-  Spec::Worker& w = *wp;
+  Spec::Worker& w = *static_cast<Spec::Worker*>(worker);
   const uint32_t mine = w.tag | Spec::kWrite;
   const uint64_t g1 = (off + len - 1) / Spec::kGranule;
   uint64_t run = ~uint64_t{0};   // the first granule of the run of words taken just now, not kept yet
@@ -301,16 +307,43 @@ void MemoryManager::spec_write(uint64_t addr, uint64_t len) const {
   keep(g1 + 1);
 }
 
+// The trial's worker of the calling thread, after the two tests every hook makes first.
+[[gnu::always_inline]] inline void* MemoryManager::spec_worker() const {
+  if (spec_->stopped.load(std::memory_order_relaxed)) throw SpecStop{};
+  Spec::Worker* w = t_spec_worker;
+  if (!w) spec_refuse("a thread outside the launch used device memory");
+  return w;
+}
+
+void MemoryManager::spec_read(uint64_t addr, uint64_t len) const {
+  void* w = spec_worker();
+  if (len) spec_read_in(*spec_, w, addr, len);
+}
+
+void MemoryManager::spec_write(uint64_t addr, uint64_t len) const {
+  void* w = spec_worker();
+  if (len) spec_write_in(*spec_, w, addr, len);
+}
+
 void MemoryManager::spec_read_each(const uint64_t* addrs, size_t count, uint32_t size) const {
-  for (size_t i = 0; i < count; ++i) spec_read(addrs[i], size);
+  void* w = spec_worker();
+  Spec& s = *spec_;
+  if (size)
+    for (size_t i = 0; i < count; ++i) spec_read_in(s, w, addrs[i], size);
 }
 
 void MemoryManager::spec_write_each(const uint64_t* addrs, size_t count, uint32_t size) const {
-  for (size_t i = 0; i < count; ++i) spec_write(addrs[i], size);
+  void* w = spec_worker();
+  Spec& s = *spec_;
+  if (size)
+    for (size_t i = 0; i < count; ++i) spec_write_in(s, w, addrs[i], size);
 }
 
 void MemoryManager::spec_write_strided(uint64_t a0, int64_t stride, size_t count, uint32_t size) const {
-  for (size_t i = 0; i < count; ++i) spec_write(a0 + static_cast<uint64_t>(stride) * i, size);
+  void* w = spec_worker();
+  Spec& s = *spec_;
+  if (size)
+    for (size_t i = 0; i < count; ++i) spec_write_in(s, w, a0 + static_cast<uint64_t>(stride) * i, size);
 }
 
 }  // namespace vgpu

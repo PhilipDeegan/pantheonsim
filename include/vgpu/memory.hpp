@@ -686,6 +686,9 @@ class MemoryManager {
   void spec_write_each(const uint64_t* addrs, size_t count, uint32_t size) const;
   void spec_write_strided(uint64_t a0, int64_t stride, size_t count, uint32_t size) const;
   [[noreturn]] void spec_refuse(const char* why) const;
+  void spec_read_in(Spec& s, void* worker, uint64_t addr, uint64_t len) const;
+  void spec_write_in(Spec& s, void* worker, uint64_t addr, uint64_t len) const;
+  void* spec_worker() const;
   // The bytes of ordinary allocations in [addr, addr + len), for the undo log: appends (address, bytes) pieces to the calling worker's log.
   void spec_keep(uint64_t addr, uint64_t len) const;
   size_t memo_host_map_count() const;

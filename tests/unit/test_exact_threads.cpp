@@ -515,6 +515,16 @@ VTEST(blocks_may_share_what_they_only_read_and_keep_what_they_alone_write_and_a_
     VCHECK(std::string(out.why) == "a block wrote what another block read");
     VCHECK(all() == init);
   }
+  {
+    // ... and so does the write of the block that read it last: it is not the only reader.
+    Trial t(mem);
+    mem.load_scalar(a + 400, 4);
+    mem.spec_block(1);
+    mem.load_scalar(a + 400, 4);
+    VCHECK(stops([&] { mem.store_scalar(a + 400, 4, 3); }));
+    VCHECK(!t.end().committed);
+    VCHECK(all() == init);
+  }
 }
 
 VTEST(a_device_with_memory_the_shadow_cannot_see_is_not_tried) {
