@@ -3422,6 +3422,13 @@ if(TARGET vgpucublas)
     ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
     TIMEOUT 300)
 
+  add_test(NAME e2e_spin_claim_nanosleep
+           COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_spin_claim_nanosleep.sh)
+  set_tests_properties(e2e_spin_claim_nanosleep PROPERTIES
+    DEPENDS vgpucudart
+    ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
+    TIMEOUT 300)
+
   add_test(NAME e2e_spin_lock_cross_warp
            COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_spin_lock_cross_warp.sh)
   set_tests_properties(e2e_spin_lock_cross_warp PROPERTIES
