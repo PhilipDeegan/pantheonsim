@@ -187,6 +187,16 @@ struct RowCtx {
 
 // The C++ for a generated op: a block that reads `R` (the register file), `c` (the Ctx) and `ex` (the executing lanes).
 std::string gen_op_body(const OpFacts& o, RowCtx& rc);
+// Fused runs (round sp48, docs/perf-design/rounds/11-rounds-sp36-sp41.md). A run of consecutive ops that only read and write register rows, each for the
+// whole group and of a form whose result in a lane depends on that lane alone, is generated as one loop over the warp's four blocks of eight lanes
+// with every op of the run inside it: a row the run writes is a local vector until the block's end, so the value an op reads from an earlier op of the
+// run comes from a host register (the op-by-op form stores every result's 32 lanes and loads them again). Each row is read from the register file once,
+// at its first use, and each row written is stored once, at the block's end; the result, lane for lane, is what the ops one after the other give,
+// because no op of the run reads a lane other than its own. `fusable` says whether an op may be in a run; `gen_fused_run` writes the loop for `n`
+// such ops (`full`: for a whole warp, where a result is the row; otherwise the lanes outside `ex` keep the register's value). The text reads `R`,
+// `c` and `ex`. Only the AVX2 level and only without register residence (Engine::source).
+bool fusable(const OpFacts& o);
+std::string gen_fused_run(const OpFacts* ops, uint32_t n, bool full);
 struct RegionSpec {
   std::vector<OpFacts> ops;
   uint32_t first = 0;          // the section's op its first op is (make_unit sets it; merging needs it; not part of the metadata)
@@ -217,6 +227,7 @@ struct Config {
   bool residence = true;            // keep register-file rows in locals within a region (from_env: off, VGPU_JIT_RESIDENCE=1: on)
   bool link = false;                // go on past a branch or cont op in a diverged warp while the chain would pick the group again (Ctx::olo; from_env: VGPU_JIT_LINK=1 turns it on)
   bool specialize = true;           // also generate the body for a whole warp (all 32 lanes) apart from the one for any group (from_env: off, VGPU_JIT_SPECIALIZE=1: on; off is only the general one: half the code, a faster compile)
+  bool fuse = false;                // generate runs of register-only ops block by block of eight lanes (gen_fused_run; from_env: VGPU_JIT_FUSE=1 turns it on)
   unsigned timeout_s = 120;         // wall limit of one compile
   unsigned mem_mb = 4096;           // RLIMIT_AS of the compiler
   // For tests: replaces dlopen (returns null and fills the error on a failure), and the ISA level the key and flags use.
@@ -260,7 +271,7 @@ class Engine {
   explicit Engine(Config cfg);
   ~Engine();
   // The C++ the generator writes for the unit (deterministic: a function of the spec only).
-  static std::string source(const UnitSpec& spec, bool avx2 = true, bool residence = true, bool specialize = true, bool link = false);
+  static std::string source(const UnitSpec& spec, bool avx2 = true, bool residence = true, bool specialize = true, bool link = false, bool fuse = false);
   // The words the object's metadata array must hold for the spec.
   static std::vector<uint32_t> meta(const UnitSpec& spec);
   // The 32-hex-digit key: the source, the compiler's identity, flags, ISA level, ABI and generator versions. Empty (and `why` set) with no compiler.
@@ -412,7 +423,8 @@ enum ExitWhy : unsigned {
   kExBsync,          // ... at a BSYNC
   kExExit,           // ... at an EXIT that lanes of the group take
   kExExitNone,       // ... at an EXIT that no lane of the group takes (a guard or a condition holds for none: the group goes on)
-  kExOtherCtl,       // ... at a BAR, YIELD, CALL, RET or WARPSYNC
+  kExCallRet,        // ... at a CALL or a RET
+  kExOtherCtl,       // ... at a BAR, YIELD or WARPSYNC
   kExBraOther,       // ... at a branch that is in no compiled region
   kExStraight,       // ... at a straight op that is in no compiled region
   kExHandler,        // ... at an op with a handler that is not straight (SHFL, VOTE, ...)

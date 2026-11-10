@@ -494,6 +494,135 @@ VTEST(jit_residence_random_regions_equal_the_register_file_code) {
   if (failures) throw vtest::Failure(first_failure);
 }
 
+// ---- fused runs (round sp48) --------------------------------------------------------------------------------------------------------------
+//
+// Runs of register-only ops generated block by block of eight lanes (jit.hpp, gen_fused_run) against the same regions generated op by op. The
+// regions are mostly ops of the fusable forms on a small register file (a destination is often a later source, or its own; rows are written
+// twice; RZ destinations; every source kind and modifier), with guarded ops, other forms and escapes between the runs. Both objects run on the
+// same random register file and group (a whole warp, halves, one lane, any lanes): registers, predicates, counters and what every escape sees
+// must be identical. The test also holds the generator to making runs at all (a generator that never fuses would pass the comparison).
+VTEST(jit_fused_runs_equal_the_op_by_op_code) {
+  if (VJ_SAN) return;
+  jit::Config on, off;
+  on.residence = off.residence = false;
+  on.specialize = off.specialize = false;
+  on.fuse = true;
+  {
+    jit::Engine e(off);
+    if (e.compiler_id().empty()) {
+      std::printf("  (no C++ compiler on PATH: skipped)\n");
+      return;
+    }
+  }
+  const unsigned units = static_cast<unsigned>(std::strtoul(std::getenv("VGPU_JIT_RANDOM_UNITS") ? std::getenv("VGPU_JIT_RANDOM_UNITS") : "4", nullptr, 10));
+  const unsigned nreg = 12;
+  const uint64_t seed0 = std::getenv("VGPU_JIT_RANDOM_SEED") ? std::strtoull(std::getenv("VGPU_JIT_RANDOM_SEED"), nullptr, 10) : 1;
+  const char* t = std::getenv("TMPDIR");
+  std::string tmpl = std::string(t && *t ? t : "/tmp") + "/vgpu-test-jit-fuse.XXXXXX";
+  std::vector<char> b(tmpl.begin(), tmpl.end());
+  b.push_back(0);
+  if (!::mkdtemp(b.data())) throw vtest::Failure("mkdtemp failed");
+  const std::string dir = b.data();
+  on.cache_dir = dir + "/on";
+  off.cache_dir = dir + "/off";
+  unsigned failures = 0, runs = 0, fused_ops = 0, fused_runs = 0, units_fused = 0;
+  std::string first_failure;
+  for (unsigned unit = 0; unit < units; ++unit) {
+    Gen g(seed0 * 2000003u + unit);
+    jit::UnitSpec spec;
+    spec.sm = 80;
+    for (unsigned r = 0; r < nreg; ++r) {
+      jit::RegionSpec rs;
+      const unsigned n = 6 + static_cast<unsigned>(g.u(40));
+      for (unsigned i = 0; i < n; ++i) {
+        jit::OpFacts o = g.op();
+        if (g.coin(75)) {   // a fusable op: one of the forms, for the whole group, in the variant the fused form takes
+          static const Form forms[] = {Form::Mov, Form::Iadd3, Form::Imad, Form::Lop3, Form::Lea, Form::Ffma, Form::Fadd, Form::Fmul};
+          const Form f = forms[g.u(sizeof forms / sizeof forms[0])];
+          jit::OpFacts q;
+          q.lo = o.lo; q.hi = o.hi; q.cls = o.cls;
+          q.form = static_cast<uint8_t>(f);
+          q.dst = g.dreg();
+          const bool flt = f == Form::Ffma || f == Form::Fadd || f == Form::Fmul;
+          for (auto& x : q.s) x = g.src(flt);
+          if (f == Form::Iadd3) q.a = static_cast<uint32_t>(g.u(4));
+          if (f == Form::Lop3) q.a = static_cast<uint32_t>(g.u(256));
+          if (f == Form::Lea) { q.a = static_cast<uint32_t>(g.u(34)); q.aux = g.coin(50) ? 4 : 0; }
+          if (jit::fusable(q)) o = q;
+        }
+        rs.ops.push_back(o);
+      }
+      for (size_t i = 0; i < rs.ops.size();) {   // the runs the generator has to make of this region (entered at its first op only)
+        size_t j = i;
+        while (j < rs.ops.size() && jit::fusable(rs.ops[j])) ++j;
+        if (j - i >= 2) { ++fused_runs; fused_ops += static_cast<unsigned>(j - i); }
+        i = j > i ? j : i + 1;
+      }
+      spec.regions.push_back(std::move(rs));
+    }
+    jit::Engine eon(on), eoff(off);
+    const jit::Result ron = eon.obtain(spec), roff = eoff.obtain(spec);
+    if (!ron.found || !roff.found) {
+      ++failures;
+      if (first_failure.empty()) first_failure = "unit " + std::to_string(unit) + ": compile failed: " + (ron.found ? roff.message : ron.message);
+      continue;
+    }
+    if (ron.key != roff.key) ++units_fused;   // (the key hashes the source: equal keys mean the fused form was not generated, e.g. no AVX2)
+    std::mt19937_64 rng(seed0 * 104729u + unit);
+    for (unsigned r = 0; r < nreg; ++r) {
+      for (unsigned trial = 0; trial < 7; ++trial) {
+        Sim a, bsim;
+        randomize(a, rng);
+        if (trial == 6)   // float corners in every row: NaNs with payloads, infinities, zeros of both signs, denormals
+          for (auto& v : a.R) v = g.special();
+        uint32_t group = trial < 2 || trial == 6 ? 0xffffffffu : trial == 2 ? 0x0000ffffu : trial == 3 ? 0x00000001u : static_cast<uint32_t>(rng()) | 1u;
+        if (trial == 5) group = 0xffffu << 16;
+        bsim = a;
+        a.seed = bsim.seed = rng();
+        const bool stats = trial & 1;
+        jit::Ctx ca = make_ctx(a, stats), cb = make_ctx(bsim, stats);
+        const uint32_t gl = static_cast<uint32_t>(__builtin_popcount(group));
+        ron.lib->fns[r](&ca, group, gl, 0, 0);
+        roff.lib->fns[r](&cb, group, gl, 0, 0);
+        ++runs;
+        if (!same(a, bsim)) {
+          ++failures;
+          if (first_failure.empty())
+            first_failure = "unit " + std::to_string(unit) + " region " + std::to_string(r) + " trial " + std::to_string(trial) + ": differs (R " +
+                            (std::memcmp(a.R, bsim.R, sizeof a.R) ? "differs" : "same") + ", p " + (std::memcmp(a.p, bsim.p, sizeof a.p) ? "differs" : "same") +
+                            ", counters " + (a.insts == bsim.insts && a.tinsts == bsim.tinsts && std::memcmp(a.by_class, bsim.by_class, sizeof a.by_class) == 0 ? "same" : "differ") +
+                            ", escape logs " + (a.log == bsim.log ? "same" : "differ") + ")";
+        }
+      }
+    }
+  }
+  std::printf("  fused: %u units (%u with fused code), %u runs of %u ops to fuse, %u region runs, %u failures\n", units, units_fused, fused_runs, fused_ops, runs, failures);
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+  if (failures) throw vtest::Failure(first_failure);
+  VCHECK(fused_runs >= 20u * units);   // (the regions hold runs: about 60 a unit)
+  // The generator makes them where it can: the text of a fused run is in the source exactly when the level is AVX2 and residence is off.
+  {
+    jit::UnitSpec one;
+    one.sm = 80;
+    jit::RegionSpec rs;
+    for (unsigned i = 0; i < 3; ++i) {
+      jit::OpFacts o;
+      o.form = static_cast<uint8_t>(Form::Iadd3);
+      o.dst = static_cast<uint16_t>(i);
+      for (auto& x : o.s) { x.kind = 0; x.off = (i + 1) * 32u; }
+      rs.ops.push_back(o);
+    }
+    one.regions.push_back(rs);
+    const auto has = [&](bool avx2, bool residence, bool fuse) { return jit::Engine::source(one, avx2, residence, false, false, fuse).find("fused") != std::string::npos; };
+    VCHECK(has(true, false, true));
+    VCHECK(!has(true, false, false));
+    VCHECK(!has(false, false, true));
+    VCHECK(!has(true, true, true));
+    if (units_fused == 0) std::printf("  (this host's JIT level is not AVX2: the fused form was not compiled or run)\n");
+  }
+}
+
 // ---- control flow in generated code (milestone 5) ------------------------------------------------------------------------------------------------
 //
 // Regions with branches and cont ops. Two checks: (1) a region of escapes, branches and cont ops against a model of the run loop's own rules

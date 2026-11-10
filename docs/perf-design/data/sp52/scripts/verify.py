@@ -52,7 +52,7 @@ def main():
     a = ap.parse_args()
     builds = dict(x.split("=") for x in a.builds.split(","))
     os.makedirs(a.work, exist_ok=True)
-    allp = real.manifest(a.corp, ["polybench", "rodinia", "hecbench", "samples"])
+    allp = real.manifest(a.corp, ["polybench", "rodinia", "hecbench"] + (["samples"] if os.path.exists(os.path.join(a.corp, "samples/sim_main.txt")) else []))
     byid = {p[0] + "/" + p[1]: p for p in allp}
     ref = sp.parse_side(a.ref, builds); vs = [sp.parse_side(v, builds) for v in a.variants.split(",")]
     bad = 0

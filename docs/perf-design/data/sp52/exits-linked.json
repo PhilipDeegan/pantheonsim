@@ -1,0 +1,607 @@
+{
+ "hecbench/black-scholes-cuda": {
+  "rc": 0,
+  "wall": 16.82,
+  "exits": {
+   "uniform-branch-taken": [
+    10936500,
+    10936500,
+    1562357
+   ],
+   "store-gate": [
+    1562358,
+    0,
+    0
+   ],
+   "bsync": [
+    40621286,
+    12498857,
+    0
+   ],
+   "exit": [
+    4,
+    0,
+    0
+   ],
+   "bar-yield-call-ret-warpsync": [
+    15623570,
+    12498856,
+    0
+   ]
+  },
+  "calls": 67181361,
+  "insts": 1120210033,
+  "gen": 878044691,
+  "continued": 149986286,
+  "link": {
+   "in-diverged-warps": 37496568,
+   "calls-with-a-split": 6249429
+  },
+  "fill_wall": 28.47
+ },
+ "polybench/LU": {
+  "rc": 0,
+  "wall": 24.27,
+  "exits": {
+   "store-gate": [
+    45829464,
+    0,
+    35340
+   ],
+   "bsync": [
+    35340,
+    0,
+    0
+   ],
+   "exit": [
+    45950802,
+    0,
+    0
+   ],
+   "straight-op-outside-regions": [
+    35340,
+    0,
+    0
+   ]
+  },
+  "calls": 91815606,
+  "insts": 1639194203,
+  "gen": 1456507895,
+  "continued": 453676494,
+  "link": {
+   "in-diverged-warps": 0,
+   "calls-with-a-split": 0
+  },
+  "fill_wall": 26.09
+ },
+ "rodinia/gaussian": {
+  "rc": 0,
+  "wall": 3.31,
+  "exits": {
+   "store-gate": [
+    2821026,
+    0,
+    0
+   ],
+   "bsync": [
+    6215,
+    0,
+    0
+   ],
+   "exit": [
+    5662151,
+    0,
+    0
+   ]
+  },
+  "calls": 8489392,
+  "insts": 153248326,
+  "gen": 137656037,
+  "continued": 51717249,
+  "link": {
+   "in-diverged-warps": 0,
+   "calls-with-a-split": 0
+  },
+  "fill_wall": 6.28
+ },
+ "rodinia/hotspot": {
+  "rc": 0,
+  "wall": 0.81,
+  "exits": {
+   "store-gate": [
+    191718,
+    0,
+    0
+   ],
+   "bsync": [
+    575182,
+    443350,
+    0
+   ],
+   "exit": [
+    287592,
+    0,
+    0
+   ],
+   "bar-yield-call-ret-warpsync": [
+    575176,
+    0,
+    0
+   ],
+   "interpreter-op": [
+    287584,
+    0,
+    0
+   ]
+  },
+  "calls": 1917252,
+  "insts": 64862806,
+  "gen": 45163308,
+  "continued": 9202842,
+  "link": {
+   "in-diverged-warps": 0,
+   "calls-with-a-split": 443350
+  },
+  "fill_wall": 5.85
+ },
+ "polybench/SYRK": {
+  "rc": 0,
+  "wall": 4.9,
+  "exits": {
+   "store-gate": [
+    32744,
+    0,
+    0
+   ],
+   "straight-op-outside-regions": [
+    32750,
+    0,
+    0
+   ]
+  },
+  "calls": 65494,
+  "insts": 194174636,
+  "gen": 91241398,
+  "continued": 2587214,
+  "link": {
+   "in-diverged-warps": 0,
+   "calls-with-a-split": 0
+  },
+  "fill_wall": 8.22
+ },
+ "polybench/SYR2K": {
+  "rc": 0,
+  "wall": 9.46,
+  "exits": {
+   "store-gate": [
+    32752,
+    0,
+    0
+   ],
+   "exit": [
+    65518,
+    0,
+    32759
+   ]
+  },
+  "calls": 65511,
+  "insts": 399168240,
+  "gen": 227183504,
+  "continued": 4389664,
+  "link": {
+   "in-diverged-warps": 0,
+   "calls-with-a-split": 0
+  },
+  "fill_wall": 11.49
+ },
+ "polybench/JACOBI1D": {
+  "rc": 0,
+  "wall": 0.86,
+  "exits": {
+   "store-gate": [
+    2549148,
+    0,
+    0
+   ],
+   "exit": [
+    39831,
+    0,
+    0
+   ]
+  },
+  "calls": 2588979,
+  "insts": 44577068,
+  "gen": 33140864,
+  "continued": 12705905,
+  "link": {
+   "in-diverged-warps": 0,
+   "calls-with-a-split": 0
+  },
+  "fill_wall": 2.04
+ },
+ "polybench/JACOBI2D": {
+  "rc": 0,
+  "wall": 0.54,
+  "exits": {
+   "store-gate": [
+    1269517,
+    0,
+    0
+   ],
+   "exit": [
+    81843,
+    0,
+    0
+   ]
+  },
+  "calls": 1351360,
+  "insts": 31062306,
+  "gen": 26060896,
+  "continued": 8819746,
+  "link": {
+   "in-diverged-warps": 0,
+   "calls-with-a-split": 0
+  },
+  "fill_wall": 1.76
+ },
+ "polybench/3DCONV": {
+  "rc": 0,
+  "wall": 0.62,
+  "exits": {
+   "store-gate": [
+    514302,
+    0,
+    0
+   ],
+   "exit": [
+    132634,
+    0,
+    0
+   ]
+  },
+  "calls": 646936,
+  "insts": 27716738,
+  "gen": 21673692,
+  "continued": 2973458,
+  "link": {
+   "in-diverged-warps": 0,
+   "calls-with-a-split": 0
+  },
+  "fill_wall": 1.56
+ },
+ "polybench/2DCONV": {
+  "rc": 0,
+  "wall": 0.66,
+  "exits": {
+   "store-gate": [
+    521698,
+    0,
+    0
+   ],
+   "exit": [
+    8278,
+    0,
+    0
+   ]
+  },
+  "calls": 529976,
+  "insts": 21383388,
+  "gen": 16174558,
+  "continued": 4166202,
+  "link": {
+   "in-diverged-warps": 0,
+   "calls-with-a-split": 0
+  },
+  "fill_wall": 1.41
+ },
+ "rodinia/lud": {
+  "rc": 0,
+  "wall": 2.91,
+  "exits": {
+   "store-gate": [
+    2014,
+    1984,
+    0
+   ],
+   "bsync": [
+    32634,
+    0,
+    0
+   ],
+   "exit": [
+    1984,
+    0,
+    0
+   ],
+   "bar-yield-call-ret-warpsync": [
+    681263,
+    0,
+    0
+   ],
+   "straight-op-outside-regions": [
+    416,
+    0,
+    0
+   ]
+  },
+  "calls": 718311,
+  "insts": 19713748,
+  "gen": 16739811,
+  "continued": 3542302,
+  "link": {
+   "in-diverged-warps": 0,
+   "calls-with-a-split": 1984
+  },
+  "fill_wall": 10.08
+ },
+ "rodinia/backprop": {
+  "rc": 0,
+  "wall": 0.52,
+  "exits": {
+   "bar-yield-call-ret-warpsync": [
+    520625,
+    0,
+    0
+   ]
+  },
+  "calls": 520625,
+  "insts": 12104322,
+  "gen": 8980612,
+  "continued": 650760,
+  "link": {
+   "in-diverged-warps": 0,
+   "calls-with-a-split": 0
+  },
+  "fill_wall": 1.71
+ },
+ "rodinia/pathfinder": {
+  "rc": 0,
+  "wall": 0.54,
+  "exits": {
+   "bsync": [
+    18312,
+    9,
+    0
+   ],
+   "bar-yield-call-ret-warpsync": [
+    707066,
+    0,
+    0
+   ],
+   "straight-op-outside-regions": [
+    18320,
+    0,
+    0
+   ]
+  },
+  "calls": 743698,
+  "insts": 8656632,
+  "gen": 5681928,
+  "continued": 527510,
+  "link": {
+   "in-diverged-warps": 0,
+   "calls-with-a-split": 9
+  },
+  "fill_wall": 1.44
+ },
+ "hecbench/bilateral-cuda": {
+  "rc": 0,
+  "wall": 1.01,
+  "exits": {
+   "split-branch": [
+    7,
+    0,
+    0
+   ],
+   "uniform-branch-taken": [
+    140568,
+    140568,
+    70275
+   ],
+   "uniform-branch-not-taken": [
+    49,
+    49,
+    15
+   ],
+   "register-only-op": [
+    55,
+    55,
+    0
+   ],
+   "turn-budget": [
+    1532,
+    0,
+    0
+   ],
+   "store-gate": [
+    3057,
+    0,
+    0
+   ],
+   "bssy-nop": [
+    1009,
+    0,
+    0
+   ],
+   "bsync": [
+    2362523,
+    70279,
+    0
+   ],
+   "bar-yield-call-ret-warpsync": [
+    446,
+    0,
+    0
+   ],
+   "straight-op-outside-regions": [
+    6104,
+    0,
+    0
+   ],
+   "interpreter-op": [
+    2016,
+    0,
+    0
+   ]
+  },
+  "calls": 2447076,
+  "insts": 78827416,
+  "gen": 63047523,
+  "continued": 10490920,
+  "link": {
+   "in-diverged-warps": 140730,
+   "calls-with-a-split": 70274
+  },
+  "fill_wall": 19.17
+ },
+ "hecbench/bh-cuda": {
+  "rc": 0,
+  "wall": 0.62,
+  "exits": {
+   "uniform-branch-taken": [
+    1603,
+    1603,
+    0
+   ],
+   "register-only-op": [
+    1405,
+    1405,
+    0
+   ],
+   "turn-budget": [
+    1281,
+    0,
+    256
+   ],
+   "store-gate": [
+    1,
+    1,
+    0
+   ],
+   "bsync": [
+    1471915,
+    1875,
+    0
+   ],
+   "exit": [
+    684,
+    0,
+    456
+   ],
+   "bar-yield-call-ret-warpsync": [
+    11928,
+    8920,
+    0
+   ],
+   "handler-op": [
+    8205,
+    6825,
+    0
+   ],
+   "interpreter-op": [
+    549845,
+    0,
+    0
+   ]
+  },
+  "calls": 2046155,
+  "insts": 42259517,
+  "gen": 31157850,
+  "continued": 5567253,
+  "link": {
+   "in-diverged-warps": 12793,
+   "calls-with-a-split": 7102
+  },
+  "fill_wall": 6.87
+ },
+ "hecbench/silu-cuda": {
+  "rc": 0,
+  "wall": 0.37,
+  "exits": {
+   "store-gate": [
+    260924,
+    0,
+    0
+   ],
+   "bsync": [
+    804539,
+    0,
+    0
+   ],
+   "exit": [
+    39752,
+    0,
+    0
+   ]
+  },
+  "calls": 1105215,
+  "insts": 27429933,
+  "gen": 21660451,
+  "continued": 3902194,
+  "link": {
+   "in-diverged-warps": 0,
+   "calls-with-a-split": 0
+  },
+  "fill_wall": 10.67
+ },
+ "hecbench/aop-cuda": {
+  "rc": 0,
+  "wall": 1.81,
+  "exits": {
+   "store-gate": [
+    984,
+    0,
+    0
+   ],
+   "bsync": [
+    98976,
+    0,
+    0
+   ],
+   "exit": [
+    990,
+    0,
+    0
+   ],
+   "straight-op-outside-regions": [
+    87670,
+    0,
+    0
+   ]
+  },
+  "calls": 188620,
+  "insts": 7027593,
+  "gen": 4209360,
+  "continued": 741189,
+  "link": {
+   "in-diverged-warps": 0,
+   "calls-with-a-split": 0
+  },
+  "fill_wall": 4.26
+ },
+ "hecbench/bitonic-sort-cuda": {
+  "rc": 0,
+  "wall": 0.21,
+  "exits": {
+   "bsync": [
+    23399,
+    0,
+    0
+   ],
+   "exit": [
+    395836,
+    83633,
+    0
+   ]
+  },
+  "calls": 419235,
+  "insts": 16892271,
+  "gen": 13542593,
+  "continued": 1260373,
+  "link": {
+   "in-diverged-warps": 0,
+   "calls-with-a-split": 83633
+  },
+  "fill_wall": 1.21
+ }
+}

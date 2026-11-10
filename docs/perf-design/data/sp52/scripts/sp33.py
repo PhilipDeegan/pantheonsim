@@ -107,7 +107,7 @@ def main():
     builds = dict(x.split("=") for x in a.builds.split(","))
     sides = [parse_side(s, builds) for s in a.sides.split(",")]
     os.makedirs(a.work, exist_ok=True)
-    allp = real.manifest(a.corp, ["polybench", "rodinia", "hecbench", "samples"])
+    allp = real.manifest(a.corp, ["polybench", "rodinia", "hecbench"] + (["samples"] if os.path.exists(os.path.join(a.corp, "samples/sim_main.txt")) else []))
     byid = {p[0] + "/" + p[1]: p for p in allp}
     res = json.load(open(a.out)) if os.path.exists(a.out) else {}
     for pid in a.progs.split(","):

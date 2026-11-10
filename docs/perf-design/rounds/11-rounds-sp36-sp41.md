@@ -710,3 +710,315 @@ The bar set beforehand was 5 % or more on at least three compute-bound programs.
 * How many of the executed ops ran in fused runs was not counted (the statistics have no counter for it and the cache keeps no source).
 * Not measured for the fused form: the cold run (a run is written twice, so the compile is larger), the full form (`VGPU_JIT_RESIDENCE=1`: fused runs are off there), AVX-512 (16 lanes a register), the seven `e2e_sass_jit` shards with `VGPU_JIT_FUSE=1`, a sanitizer build, a build without the mutation hooks, g++-12. The unit test and the five programs' same-bits comparison are what holds the patch.
 * Cleanup: the scratch tree of this round on server3 (`~/.cache/sp48`) was removed by exact path.
+
+
+## Round sp52 (linking): keeping execution inside generated code across region exits (branch `sp52-region-linking`, base `origin/main` 7b90cee5)
+
+Question: round sp48 found that with the JIT on (`VGPU_JIT=1`) 24 to 40 % of the micro-ops of a compute-bound program are in the run loop *between* two calls of generated code, and that generated code is left every 8 to 14 guest instructions. This round is stage 0 of that round's block-compiler design: (1) count why generated code is left, program by program, and what the loop does then; (2) keep execution inside generated code across the exits that dominate, with every counter, the step budget, the turn's calls and the scheduler's order exactly as the loop has them; (3) measure it against the unlinked JIT on one binary, with a control; (4) hold it with a differential test and mutants; (5) if it clears 5 % on three programs, put round sp48's fused runs on top and measure the two together.
+
+Host: server3 (Ryzen 7 PRO 8840U, Zen 4, 8 cores / 16 threads, g++ 13.3), shared with other sessions of this round: every build, test and timed run under `flock /tmp/pantheonsim-builder.lock`, `nice -n 19`, `-j3`. Builds are Release, `-g1`, **without LTO** (`-DVGPU_LTO=OFF`: one build tree, many rebuilds), with the mutation hooks compiled in (inert without `VGPU_JIT_MUTANT`). Programs: the prebuilt sm_86 binaries of `tools/bench/real` (PolyBench/GPU, Rodinia, HeCBench), `VGPU_GPU=nvidia/rtx3060`, the sizes of `real.py`. Scripts and raw data: `docs/perf-design/data/sp52/`. `perf` is not usable on this host without root (`perf_event_paranoid` 4), so this round has counts and wall times, not profiles; the profiles are round sp48's.
+
+### Stage 1: why generated code is left
+
+Method. `VGPU_JIT_STATS=1` now also classifies every region call's end (`jit_exit_why` in `src/sass/tier_ops.inc`: the host works the reason out from the state the generated code left, which is the state before the op it stopped at; nothing is added to generated code and nothing is counted without the statistics). `scripts/count.py` runs each program twice with `VGPU_JIT=1 VGPU_JIT_THRESHOLD=100000 VGPU_JIT_SYNC=1`, one thread, on a private cache and keeps the second (warm) run. The reasons:
+
+* **split branch**: a BRA that some lanes of the group take and some do not.
+* **uniform branch, taken / not taken**: a BRA the whole group takes, or none of it, at which the generated code could not go on because the loop's chain conditions do not hold. In these programs that always means a *diverged warp*: other runnable lanes of the warp stand at another address, so the loop's chain has to pick the group at the lowest address after every pass.
+* **register-only op**: the same for S2R, SEL, PLOP3, the uniform datapath (ops that end a pass only for the scheduler's sake).
+* **store gate**: a warp's first store to global memory ends its turn, once (the loop's rule; every warp of a kernel that stores pays it once).
+* **to compiled region**: the generated code left its region (the end, the 200-op cap, a branch out) at an op that is an entry of another compiled region: a trip through the host for nothing.
+* **BSSY**, **BSYNC**, **EXIT** (lanes leave), **EXIT, no lane leaves** (the guard or the condition holds for no lane of the group: the bounds test of a kernel, `@P0 EXIT`, in a warp that is inside the grid), **BAR / YIELD / CALL / RET / WARPSYNC**: the region ended before an op the loop runs.
+* **straight op outside regions**, **interpreter op**: the next op is in no compiled region (too short a run, not hot, or no handler).
+
+Share of the region calls that ended for each reason (percent; unlinked JIT, warm cache, one thread; `exits-unlinked.json`, table by `scripts/exittable.py`). The first five rows are round sp48's programs; the others are the further JIT-reaching programs of the A/B below.
+| program | region calls M | warp instructions a call | split branch | uniform branch, taken | uniform branch, not taken | register-only op | store gate | to compiled region | BSSY | BSYNC | EXIT (lanes leave) | EXIT, no lane leaves | BAR / YIELD / CALL / RET / WARPSYNC | straight op outside regions | interpreter op | other |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| hecbench/black-scholes-cuda | 115.61 | 7.9 | 5.1 | 14.1 | 19.2 | 2.6 | 1.3 | 3.8 | 16.7 | 21.8 | 0.0 | 1.3 | 14.1 | 0.0 | 0.0 | 0.0 |
+| polybench/LU | 136.62 | 11.7 | 0.0 | 0.0 | 0.0 | 0.0 | 33.5 | 0.0 | 0.0 | 0.0 | 33.6 | 32.8 | 0.0 | 0.0 | 0.0 | 0.0 |
+| rodinia/gaussian | 15.45 | 9.5 | 0.0 | 0.0 | 0.0 | 0.0 | 18.2 | 0.0 | 0.0 | 0.0 | 36.7 | 45.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+| rodinia/hotspot | 3.35 | 14.1 | 0.0 | 0.0 | 0.0 | 0.0 | 5.7 | 25.7 | 17.1 | 0.0 | 0.0 | 0.0 | 34.3 | 8.6 | 8.6 | 0.0 |
+| polybench/SYRK | 0.10 | 1976.6 | 0.0 | 0.0 | 0.0 | 0.0 | 33.3 | 0.0 | 0.0 | 0.0 | 33.3 | 33.3 | 0.0 | 0.0 | 0.0 | 0.0 |
+| polybench/SYR2K | 0.10 | 4062.0 | 0.0 | 0.0 | 0.0 | 0.0 | 33.3 | 0.0 | 0.0 | 0.0 | 33.3 | 33.3 | 0.0 | 0.0 | 0.0 | 0.0 |
+| polybench/JACOBI1D | 3.82 | 7.0 | 0.0 | 0.0 | 0.0 | 0.0 | 33.3 | 0.0 | 0.0 | 0.0 | 1.0 | 65.6 | 0.0 | 0.0 | 0.0 | 0.0 |
+| polybench/JACOBI2D | 2.54 | 11.8 | 0.0 | 0.0 | 0.0 | 0.0 | 50.0 | 0.0 | 0.0 | 0.0 | 3.2 | 46.8 | 0.0 | 0.0 | 0.0 | 0.0 |
+| polybench/3DCONV | 1.03 | 26.5 | 0.0 | 0.0 | 0.0 | 0.0 | 49.8 | 0.0 | 0.0 | 0.0 | 12.8 | 37.4 | 0.0 | 0.0 | 0.0 | 0.0 |
+| polybench/2DCONV | 1.04 | 20.0 | 0.0 | 0.0 | 0.0 | 0.0 | 50.0 | 0.0 | 0.0 | 0.0 | 0.8 | 49.2 | 0.0 | 0.0 | 0.0 | 0.0 |
+| rodinia/lud | 0.78 | 25.4 | 0.0 | 0.0 | 0.3 | 0.0 | 0.0 | 0.0 | 4.1 | 4.1 | 0.3 | 0.0 | 91.2 | 0.0 | 0.0 | 0.0 |
+| rodinia/backprop | 0.65 | 19.4 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 20.0 | 0.0 | 80.0 | 0.0 | 0.0 | 0.0 |
+| rodinia/pathfinder | 0.76 | 11.3 | 0.0 | 0.0 | 0.0 | 0.0 | 2.4 | 0.0 | 0.0 | 2.4 | 0.0 | 0.0 | 92.8 | 2.4 | 0.0 | 0.0 |
+| hecbench/bilateral-cuda | 4.57 | 14.2 | 1.5 | 3.0 | 4.5 | 3.0 | 0.0 | 0.0 | 34.4 | 25.0 | 0.0 | 0.0 | 25.9 | 2.6 | 0.0 | 0.0 |
+| hecbench/bh-cuda | 4.14 | 9.8 | 0.2 | 0.0 | 0.0 | 0.3 | 0.0 | 15.1 | 35.0 | 35.5 | 0.0 | 0.0 | 0.2 | 0.0 | 13.3 | 0.2 |
+| hecbench/silu-cuda | 2.06 | 11.7 | 0.0 | 0.0 | 0.0 | 0.0 | 8.7 | 7.6 | 31.1 | 23.3 | 1.9 | 11.7 | 15.6 | 0.0 | 0.0 | 0.0 |
+| hecbench/aop-cuda | 0.28 | 22.2 | 0.0 | 0.0 | 0.0 | 0.0 | 31.8 | 0.0 | 0.0 | 4.5 | 0.0 | 31.8 | 0.0 | 31.8 | 0.0 | 0.0 |
+| hecbench/bitonic-sort-cuda | 0.49 | 32.8 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 43.0 | 0.0 | 43.0 | 13.9 | 0.0 | 0.0 | 0.0 | 0.0 |
+
+Of the same calls, how many ended in a diverged warp, and how many calls of generated code ran nothing at all (the entry's own checks failed):
+
+| program | calls of generated code M (with those that ran nothing) | ran nothing % | in a diverged warp % | of the diverged ones: split / uniform branch / register-only op / other % |
+|---|---:|---:|---:|---|
+| hecbench/black-scholes-cuda | 121.86 | 5.1 | 62.8 | 2 / 53 / 4 / 41 |
+| polybench/LU | 136.62 | 0.0 | 0.0 | - / - / - / - |
+| rodinia/gaussian | 15.45 | 0.0 | 0.0 | - / - / - / - |
+| rodinia/hotspot | 3.35 | 0.0 | 0.0 | - / - / - / - |
+| polybench/SYRK | 0.10 | 0.0 | 0.0 | - / - / - / - |
+| polybench/SYR2K | 0.10 | 0.0 | 0.0 | - / - / - / - |
+| polybench/JACOBI1D | 3.82 | 0.0 | 0.0 | - / - / - / - |
+| polybench/JACOBI2D | 2.54 | 0.0 | 0.0 | - / - / - / - |
+| polybench/3DCONV | 1.03 | 0.0 | 0.0 | - / - / - / - |
+| polybench/2DCONV | 1.04 | 0.0 | 0.0 | - / - / - / - |
+| rodinia/lud | 0.78 | 0.0 | 0.6 | 0 / 50 / 0 / 50 |
+| rodinia/backprop | 0.65 | 0.0 | 0.0 | - / - / - / - |
+| rodinia/pathfinder | 0.76 | 0.0 | 0.0 | 0 / 0 / 0 / 100 |
+| hecbench/bilateral-cuda | 4.71 | 3.0 | 13.4 | 0 / 56 / 22 / 22 |
+| hecbench/bh-cuda | 4.14 | 0.0 | 0.8 | 9 / 11 / 34 / 46 |
+| hecbench/silu-cuda | 2.06 | 0.0 | 0.0 | - / - / - / - |
+| hecbench/aop-cuda | 0.28 | 0.0 | 0.0 | - / - / - / - |
+| hecbench/bitonic-sort-cuda | 0.49 | 0.0 | 0.0 | - / - / - / - |
+
+What the counts say:
+
+* **Two kinds of program, and neither is what round sp48's averages suggested.** In the *short kernels* (LU, gaussian, SYRK, SYR2K, the JACOBIs, the convolutions: a kernel of 10 to 30 instructions launched over and over, no loop or one loop) a warp makes two or three region calls in its whole life, and they end at exactly three places: the bounds test's `EXIT` that no lane takes (33 to 66 % of the calls), the store gate (18 to 50 %), and the final `EXIT`. Nothing diverges. "The run loop between two region calls" is here the loop's per-pass work at an EXIT that does nothing, plus a warp's life (start, the gate's yield, the end), and only the first of these is removable. In the *diverged programs* (black-scholes, bilateral, bh) the exits are what round sp48's design named: 63 % of black-scholes' region calls end in a diverged warp, at a uniform branch (33 % of all calls: every lane of the group agrees, but the loop must ask its chain because other lanes stand elsewhere), a BSSY (17 %), a BSYNC (22 %), a CALL or RET (14 %: a function its kernel calls is not inlined), a branch that really splits the group (5 %).
+* **Straight "direct chaining of a region's exit to the next region's entry" is a small share**: `to compiled region` is 0 % in the short kernels, 4 % in black-scholes, 15 % in bh, 26 % in hotspot (its two functions and its long main body are several regions). It becomes the larger share only once CALL, RET and BSSY stop ending regions, because then the next op is, more often than not, compiled code.
+* **What is not removable by linking**: the store gate (a rule of the scheduler: a warp's first store ends its turn), an EXIT that lanes take, BSYNC (the lanes wait and another group runs), barriers (`BAR.SYNC`: 80 to 93 % of the calls of the Rodinia shared-memory programs lud, backprop, pathfinder end there). Together these are a floor of two region calls a warp for a kernel that stores and exits.
+* **What the loop does per exit**, from the code (`tier_run_t`, "The instruction that ends the run" and "The chain"): the region call returns through `jit_run_region` (exit index and pass start read back); the loop runs the op by its general path (guard, three counter adds, the op's own lines, the group's 32 program counters written); the chain tests seven conditions, reads the runnable set and picks the next group (nothing to read when the pass left the group at one address and no other lane can run; else `pick_group` over the 32 addresses, which is the case after an EXIT and in every diverged warp); the next pass is set up (register file pointer, limits, `cstate`), finds the region entry (`region_at`), works out the chain bit and calls `jit_run_region` again (context fields, the indirect call, the entry `switch`, the stretch's bound check). Round sp48 measured this path as a whole (no hot line: `pick_group` 5.5 % and `pick_group_avx2` 5.8 % of black-scholes, `jit_run_region` 4.5 to 7.2 %, the rest spread). Its cost per exit is measured below from the time linking saves: **27 to 34 ns for each op the generated code takes over** (on the order of a hundred cycles), the same within 25 % for an untaken EXIT in a whole warp and for a branch in a diverged one.
+
+So the exits to link, in the order of what they are worth: the untaken EXIT (the short kernels), uniform branches and register-only ops in a diverged warp, BSSY, CALL and RET, the split branch, and with those in place the jumps between regions.
+
+### What was built: linking (`VGPU_JIT_LINK=1`, off by default)
+
+Nothing changes with the variable unset: the generator writes the text it wrote before for the same regions (the `Ctx` layout grew, so ABI 4 and generator 5: every cached object is compiled once more), the run loop without tier 2 is the instantiation it was, and the loop with tier 2 has a few tests and stores more around a region call (whether a pass is a diverged warp's, the group handed over and compared on the way back). With `VGPU_JIT_LINK=1` (read once, by the host and by `jit::Config::from_env`; the objects have their own keys and selections) five things change, in the order the counts above asked for them. Each replaces work the run loop does *between* two region calls by a few lines of generated code that reach the same state, and each leaves, with nothing of the op done, whenever the loop would do something else.
+
+1. **Ops that end a pass only for the scheduler's sake are ops of a region.** A BSSY (the lanes join the barrier, the barrier's nesting stamp is renewed, whatever the guard says: the host's `Ctx::ctl`), an EXIT that no lane of the group takes (the bounds test of a kernel in every warp but those at the edge of the grid: the generated code works out the lanes that leave from the guard and the conditions; when there are none and the host's `Ctx::exit0` says the loop itself would have run the EXIT (no lane of the warp waits, no block barrier has an arrival), the op is counted and the group goes on; lanes that leave are the loop's), a CALL.REL to a fixed place of the section (a branch the lanes its guard lets run take, without a BRA's spin rule and divergent-branch count, and only when the place is not a function the simulator provides: `Ctx::callok`, the loop's own test) and a RET.REL (the host's `Ctx::ret` reads the register pair as the loop does; when the whole group returns to one op of the section, the generated code jumps there through the table of the region's entries). For all four the loop's general path is "count it, set the group's lanes to the next address (a CALL's or a RET's target), end the pass" and its chain then starts the next pass exactly there, charging the turn one call: the generated code counts the op, decrements `Warp::budget`, increments `Warp::extra`, restarts the 256-op run and goes on, which is what it already did for S2R, SEL and uniform branches (round sp33).
+
+2. **A diverged warp no longer ends generated code at every branch and register-only op.** Before, the generated code went on past such an op only when the group was every runnable lane of the warp (`kFlagChain`); in a warp whose lanes stand at several addresses the loop ends the pass, and its chain picks the group at the lowest address among the runnable lanes (`pick_group`). That is this group again exactly when the place it goes to is strictly below every other runnable lane, and the other lanes do not move while this group runs. So the host works out the lowest address of the other runnable lanes once a pass (`JitFrame::olo`, one `pick_group` over the other lanes, at the first region call of a pass whose chain conditions fail only because of them) and hands it over as a region-relative op index (`Ctx::olo`, `kFlagLink`); the generated code compares the op it goes to with it (`x < olo`, two integers) where the loop would read 32 program counters. The loop's spin rule is kept exactly: a taken backward BRA while other lanes can run increments `Warp::spins`, and the 64th, which makes the group give way, is left to the loop (`Ctx::spins`).
+
+3. **A branch that splits the group is run by the generated code.** The lanes' addresses are set by the host's `select_pcs` (`Ctx::split`), the turn is charged, and the generated code goes on with the half at the lower address, which is the group the chain would pick, when that address is strictly below every other runnable lane (and, for a backward branch, the spin rule allows). The other half becomes one more group of other lanes (`olo = min(olo, its address)`), the chain bit becomes the link bit, `group` and `glanes` are variables of the generated function from then on. On the way out the host takes the new group, the op its lanes' addresses were set to (the pass's "first op" for the loop's own rule of when addresses are stale) and the new `olo` (`Ctx::group`, `Ctx::pcs_at`).
+
+4. **The selected regions of a section are one function** (`Engine::merge_regions`). The object used to hold one function per hot region, so a branch, a call or a return from one region into another, and the fall-through at the 200-op cap, went through the host. Now the selected regions are merged into one region that spans from the first one's first op to the last one's last; the ops in between (ops the generated code does not run: BSYNC, barriers, interpreter ops, regions that were not selected) are `stop` ops: no code, no entry, and a branch to one or a fall into one leaves. Selection, the share rule, the hot rule and the counting are per region as before; only the published object differs (`Unit::merged`, a placeholder region filled in before `active` is published).
+
+5. **Statistics** (with `VGPU_JIT_STATS=1`, linking or not): why each region call ended, classified by the host from the state the generated code left (`jit_exit_why`, `jit::ExitWhy`; one `jit: exit <reason>: n (diverged warp d, nothing run z)` line a reason, before the summary line), and with linking the ops linked in a diverged warp and the calls that ran a split. This is what the tables of this round are made of.
+
+What still ends generated code, by design: BSYNC (the lanes wait, another group runs), an EXIT that lanes take, the store gate (once a warp), a branch, call or return that lands at or above another runnable lane (the scheduler's lowest-address rule: the other group runs first), the 64th spin, the turn's last call, the 256-op run and the step budget, barriers, YIELD, WARPSYNC, and every op the generated code has no form for.
+
+Invalidation. A link is a `goto` inside one compiled function of one object; there is no patched jump and no table of links. An object is immutable, is never unloaded while the process runs (`jit::Loaded`), and a section is published once (`Unit::active`, then `Ready`): the engine has no recompilation and no eviction of a loaded region, so there is nothing to invalidate. If either is added later, the unit of invalidation is the object: the merged function is replaced as a whole.
+
+Exactness, in one place. The generated code never does more than the loop would have done by the time the loop reached the same op with the same group: every link is taken only when the loop's next pass would start with exactly that group at exactly that op, the turn's calls (`budget`, `extra`), the 256-op run, the step count, the spin count, the divergent-branch count and every instruction counter are written as the loop writes them, and every "no" leaves before the op so that the loop runs it by its own code. Lanes' program counters are set where the loop needs them (a split sets both halves; elsewhere the group's are set where the pass stops, as for any run of the tier).
+
+### Tests and mutants
+
+Two tests hold linking, both CMake-wired and framework-free, both run on hosted CI (no card, no nvcc; they need a host C++ compiler like the other JIT tests and are skipped in sanitizer builds as those are):
+
+* **`jit_linked_regions_equal_the_unlinked_code_and_the_run_loop_between_its_calls`** (`tests/unit/test_jit_resid.cpp`, ctest `test_jit_resid`): the differential test, linked against unlinked. Random regions of escapes, branches and cont ops, a fifth of the cont ops each a BSSY, an EXIT with conditions and a RET, a fifth of the branches CALLs, a few `stop` ops; each unit compiled with and without linking. A trial draws a group, an entry, the pass's op count, the turn's calls, the step budget, the spin count, where the other lanes stand (far above, inside or around the region, below it), whether the chain bit, the link bit or neither is up, and lane-varying predicates in a third of the trials so that branches split. The linked code is called once. The unlinked code is called again and again with the run loop's part between two calls played by the test from the loop's own rules (`loop_step`: the general path of a BRA, of a branch that splits the group, of a register-only op, a BSSY, an untaken EXIT, a CALL, a RET; the spin rule; the chain's conditions and its pick of the lowest address). Registers, predicates, every counter, the turn's calls, the spin count, the log of every escape and host call in order, the lanes' addresses a split set, the group the code ends with, the op it stops at and where the 256-op run restarted must be equal; faults thrown inside escapes included. The test fails if the trials did not link (counts of linked runs, links, splits, links after a split, BSSYs, EXITs, CALLs, RETs, spins counted, stops by the spin rule and by the other lanes' address all have a floor), and it checks that the text of linking is in the source exactly when the option is on.
+* **`the_groups_of_a_diverged_warp_loop_apart_and_meet_where_the_chain_picks_them`** (`tests/unit/test_sass_chain_cont.cpp`; ctest `test_sass_chain_cont` runs it tier against interpreter, `test_sass_chain_cont_jit` with the JIT forced on, the new `test_sass_chain_cont_jit_link` with `VGPU_JIT_LINK=1`): hand-assembled sm_86 kernels through the whole engine, words, every launch counter and the clock readings against the interpreter (`VGPU_FASTPATH=0`). Three kernels: two groups of a warp that loop apart, each loop loading, incrementing and storing one shared word around S2Rs, the group at the lower address looping until the spin rule lets the other in, and meeting either at the tail or at the second loop's first instruction (the `olo` rule both ways, equality included); the same loops between a BSSY and the BSYNC both groups come to (the group that arrives first must wait: the BSSY is an op of a generated region and entering the lanes in the barrier is the host's call); a loop that calls a function and returns from it through R8:R9 with the warp split once by the loop's branch (the function below the loop: calls and returns are linked; above the tail: the waiting half runs first at every call). With two warps the place where a 4096-call turn ends decides which updates of the shared word are lost, so the saved calls must be charged exactly. With linking asked for, the test also requires that linking happened (`jit::stats().linked` above 1000; 3,610 in the run below).
+
+The other run-loop tests have `_jit_link` legs too (`test_sass_store_gate`, `test_sass_alu_runs`, `test_sass_dispatch_counts`), and `run_sass_jit.sh`'s `modes` stage has two `linking` forms (the cheap and the full form of the generated code on `sass_tier`).
+
+Mutants (`-DVGPU_JIT_MUTANTS=ON`, `VGPU_JIT_MUTANT=<name>`, `scripts/mutants.sh`, log `mutants.log`): the pristine build passes both tests; every mutant fails at least one.
+| mutant | what is wrong | unit test: runs that differ (of 4,320) | SASS test |
+|---|---|---:|---|
+| `link_flag` | the generated code links whatever the host says (neither the chain bit nor the link bit is asked for) | 206 | passes |
+| `link_olo` | the other lanes' lowest address is not compared: the group goes on wherever it lands | 518 | fails |
+| `link_olo_eq` | the comparison is `<=`: a group that lands exactly where other lanes stand goes on alone instead of meeting them | 70 | fails |
+| `link_spin` | a taken backward branch while other lanes can run is not counted by the spin rule | fails | fails |
+| `link_spin_limit` | the 64th such branch is linked instead of left to the loop (the group never gives way) | 65 | fails |
+| `link_nosplit` | a branch that splits the group is never run by the generated code (the test's floor of splits fails: nothing is wrong with the results) | fails | passes |
+| `link_split_pcs` | a split does not set the lanes' addresses | fails | fails |
+| `link_split_olo` | the half left behind is not taken into the other lanes' lowest address | 315 | passes |
+| `link_split_fl` | after a split the chain bit stays up (the spin rule is not applied afterwards) | 32 | passes |
+| `link_split_group` | the generated code goes on with the half at the higher address | 338 | fails |
+| `link_split_glanes` | the lane count is not worked out again after a split (counters) | 218 | fails |
+| `link_bssy` | a BSSY in a region does not enter the lanes in the barrier | 102 | fails |
+| `link_bssy_ex` | a BSSY no lane runs does not renew the barrier's stamp | 17 | passes |
+| `link_exit_go` | an EXIT is gone past although lanes leave | 105 | fails |
+| `link_exit_cb` | an EXIT no lane takes is gone past without asking whether the loop would run it | 76 | passes |
+| `link_call_cb` | a CALL is run without asking whether its target is a function the simulator provides | 371 | passes |
+| `host_olo` | the host tells the generated code that the other lanes stand above everything | passes (not the generator's) | fails |
+| `host_spins` | the host hands the generated code a spin counter that is not the warp's | passes (not the generator's) | fails |
+
+The pristine build: the unit test's 4,320 runs are equal (1,050 of them linked, 3,932 links: 373 splits, 223 BSSYs, 174 untaken EXITs, 1,300 CALLs, 116 RETs, 600 counted by the spin rule, 164 runs linked on after a split; 131 runs stopped by the spin rule, 683 by the other lanes' address), and the SASS test's kernels equal the interpreter with 3,610 ops linked in diverged warps. `link_nosplit` is not a wrong result but an absent feature: the test fails on its floor of splits. The tests of the measured build (`tests.log`): `test_jit`, `test_jit_share`, `test_jit_resid` (its older graph tests too: 2,880 runs against the model of the run loop, 0 failures) and the four run-loop tests, each plain, with the JIT and with the JIT and linking (twelve legs): all pass.
+
+The measured build is commit 9e9b87e5 of this branch. The branch head adds the statistics' two later changes (the exit lines before the summary line, CALL and RET counted apart from barriers), a guard in `Engine::merges`, the fused runs and the documents; it was built again and `test_jit` (25 tests), `test_jit_resid` (5, with the linking test and the fused-run test) and `test_sass_chain_cont` with the JIT, linking and fusing pass on it; `test_jit_share` (6) and `test_sass_chain_cont` plain and with the JIT and linking passed on the build just before the fused runs were applied, and that build's counts of four programs are those of the measured build to the last region call.
+
+### Results (warm cache, 5 interleaved runs a side, medians of whole-process wall seconds, spread = (max - min) / median)
+
+Protocol: round 15's driver (`scripts/sp33.py`): `VGPU_THREADS=1`, `taskset -c 6`, `VGPU_JIT=1 VGPU_JIT_THRESHOLD=100000 VGPU_JIT_SYNC=1` on a private cache per side filled by an untimed first run, sides alternated (A B C, then C B A), one hold of the machine lock per program (per round for the two long ones), 1-minute load 1.0 to 1.4. The JIT's statistics are **off** in the timed runs (they add atomic adds and, now, the exit classification to every region call; round sp48 timed with them on). All sides are one build (a copy of the libraries taken before the tree was rebuilt), so "JIT" against "linked" is one environment variable; "JIT again" is a second side with the settings of "JIT" and its own cache: the noise floor. The counts beside the times are from separate runs with the statistics on (`exits-unlinked.json`, `exits-linked.json`).
+| program | JIT s (spread) | JIT again s (spread) | linked s (spread) | **JIT / linked** | control JIT / JIT again | outputs |
+|---|---:|---:|---:|---:|---:|---|
+| hecbench/black-scholes-cuda | 19.666 (1%) | 19.661 (1%) | 16.261 (1%) | **1.209** | 1.000 | same |
+| polybench/LU | 24.528 (4%) | 24.143 (6%) | 22.825 (2%) | **1.075** | 1.016 | same |
+| rodinia/gaussian | 3.373 (1%) | 3.362 (1%) | 3.178 (1%) | **1.061** | 1.003 | same |
+| rodinia/hotspot | 0.872 (16%) | 0.869 (1%) | 0.782 (3%) | **1.116** | 1.004 | same |
+| polybench/SYRK | 4.917 (2%) | 4.900 (4%) | 4.909 (2%) | **1.002** | 1.003 | same |
+
+geometric mean JIT / linked: **1.0905** over 5 programs (1.002 to 1.209); control: 1.0054 (1.000 to 1.016)
+
+| program | JIT s (spread) | JIT again s (spread) | linked s (spread) | **JIT / linked** | control JIT / JIT again | outputs |
+|---|---:|---:|---:|---:|---:|---|
+| polybench/SYR2K | 9.131 (1%) | 9.141 (12%) | 9.442 (8%) | **0.967** | 0.999 | same |
+| polybench/JACOBI1D | 0.938 (1%) | 0.938 (1%) | 0.830 (2%) | **1.131** | 1.000 | same |
+| polybench/JACOBI2D | 0.496 (34%) | 0.494 (6%) | 0.463 (0%) | **1.073** | 1.005 | same |
+| polybench/3DCONV | 0.614 (2%) | 0.615 (5%) | 0.608 (3%) | **1.010** | 0.997 | same |
+| polybench/2DCONV | 0.654 (2%) | 0.657 (4%) | 0.651 (1%) | **1.005** | 0.995 | same |
+| rodinia/lud | 2.925 (1%) | 2.912 (0%) | 2.910 (0%) | **1.005** | 1.004 | same |
+| rodinia/backprop | 0.517 (2%) | 0.511 (19%) | 0.510 (1%) | **1.014** | 1.011 | same |
+| rodinia/pathfinder | 0.509 (3%) | 0.512 (2%) | 0.512 (3%) | **0.995** | 0.995 | same |
+| hecbench/bilateral-cuda | 1.092 (1%) | 1.093 (2%) | 0.984 (6%) | **1.109** | 0.999 | same |
+| hecbench/bh-cuda | 0.618 (1%) | 0.616 (1%) | 0.587 (1%) | **1.053** | 1.003 | same |
+| hecbench/silu-cuda | 0.388 (1%) | 0.389 (1%) | 0.366 (3%) | **1.060** | 0.998 | same |
+| hecbench/aop-cuda | 1.802 (1%) | 1.790 (1%) | 1.791 (1%) | **1.006** | 1.007 | same |
+| hecbench/bitonic-sort-cuda | 0.211 (2%) | 0.211 (1%) | 0.200 (1%) | **1.054** | 1.002 | same |
+
+geometric mean JIT / linked: **1.0360** over 13 programs (0.967 to 1.131); control: 1.0011 (0.995 to 1.011)
+
+
+Reading it:
+
+* **black-scholes 1.209** (19.66, 19.74, 19.67, 19.69, 19.61 s against 16.21, 16.21, 16.34, 16.28, 16.26 s; control 1.000). This is the program the JIT itself never moved (0.984 and 0.994 against the tier in rounds sp33 and sp38), because 63 % of its region calls ended in a diverged warp. Region calls go from 115.6 M to 67.2 M and the ops the generated code takes over from 35.9 M to 150.0 M.
+* **Ten programs gain 5 % or more, each outside its control**: black-scholes 1.209, JACOBI1D 1.131, hotspot 1.116, bilateral 1.109, LU 1.075 (control 1.016: LU's sides spread 2 to 6 %, the two JIT sides are 24.53 and 24.14 s, the linked one 22.83 s with every one of its runs, 22.71 to 23.22 s, below every JIT run, 23.88 to 25.39 s), JACOBI2D 1.073, gaussian 1.061, silu 1.060, bitonic-sort 1.054, bh 1.053. Four of round sp48's five programs are among them. The programs under a second are short enough that process start-up is a visible part of the wall time; their ratios are of the whole process.
+* **Seven programs do not move** (SYRK 1.002, 2DCONV 1.005, lud 1.005, aop 1.006, 3DCONV 1.010, backprop 1.014, pathfinder 0.995, with controls of 0.995 to 1.011): SYRK makes one region call a loop (linking removes a third of 0.1 M calls), and lud, backprop and pathfinder leave generated code at `BAR.SYNC`, which linking does not touch.
+* **SYR2K loses: 0.967.** It is SYRK's twin (a third of 0.1 M region calls removed, 6,093 instructions a call) and should not move. The loss is real: a second A/B of nine runs a side gave 9.149 and 9.202 s against 9.428 s (0.970; SYRK in the same batch 1.008), and two more of five runs 0.976 and 0.978 (`ab-syr2k*.json`). Three guesses were tested and are not the cause: the group being a variable of the generated function because of in-code splits (the `link_nosplit` mutant, which never writes it: 9.475 s, no better), loop alignment (`VGPU_JIT_FLAGS=-falign-loops=32`: 9.285 s against 9.315 s), and the compiler's limits on inlining into a large function (five `--param`s raised: 9.401 s against 9.366 s; the two objects have the same out-of-line functions and 228 against 231 call sites). The generated function of the linked side holds the kernel's regions merged and a few more tests at each branch; without a profiler on this host (no `perf` without root) the 2 to 3 % were not found. It is the reason linking is not proposed as the default.
+
+**What an op taken over is worth.** The time saved against the ops the generated code took over (the difference of "continued inside generated code" between the two sides: each is one pass end, one chain and one region re-entry that did not happen):
+
+| program | JIT s (mean of the two sides) | linked s | saved s | region calls avoided M | ops the generated code took over M | ns saved per op taken over |
+|---|---:|---:|---:|---:|---:|---:|
+| hecbench/black-scholes-cuda | 19.664 | 16.261 | 3.403 | 48.43 | 114.05 | 30 |
+| polybench/LU | 24.336 | 22.825 | 1.510 | 44.81 | 44.96 | 34 |
+| rodinia/gaussian | 3.368 | 3.178 | 0.190 | 6.96 | 6.97 | 27 |
+| rodinia/hotspot | 0.871 | 0.782 | 0.089 | 1.44 | 3.16 | 28 |
+| polybench/SYRK | 4.909 | 4.909 | 0.000 | 0.03 | 0.03 | - |
+| polybench/SYR2K | 9.136 | 9.442 | -0.306 | 0.03 | 0.03 | - |
+| polybench/JACOBI1D | 0.938 | 0.830 | 0.109 | 1.23 | 3.79 | 29 |
+| polybench/JACOBI2D | 0.495 | 0.463 | 0.032 | 1.19 | 1.19 | 27 |
+| polybench/3DCONV | 0.615 | 0.608 | 0.007 | 0.39 | 0.39 | - |
+| polybench/2DCONV | 0.656 | 0.651 | 0.005 | 0.51 | 0.51 | - |
+| rodinia/lud | 2.918 | 2.910 | 0.008 | 0.06 | 0.04 | - |
+| rodinia/backprop | 0.514 | 0.510 | 0.004 | 0.13 | 0.00 | - |
+| rodinia/pathfinder | 0.511 | 0.512 | -0.001 | 0.02 | 0.06 | - |
+| hecbench/bilateral-cuda | 1.092 | 0.984 | 0.108 | 2.12 | 6.50 | 17 |
+| hecbench/bh-cuda | 0.617 | 0.587 | 0.030 | 2.09 | 1.78 | 17 |
+| hecbench/silu-cuda | 0.388 | 0.366 | 0.022 | 0.96 | 1.82 | 12 |
+| hecbench/aop-cuda | 1.796 | 1.791 | 0.005 | 0.09 | 0.19 | - |
+| hecbench/bitonic-sort-cuda | 0.211 | 0.200 | 0.011 | 0.07 | 0.50 | - |
+
+27 to 34 ns on the six programs where the saving is large (the first four and the JACOBIs), whatever the kind of op: an untaken EXIT in a whole warp (LU, gaussian, JACOBI) costs the loop as much as a branch in a diverged warp (black-scholes). On three HeCBench programs that run under a second it is 12 to 17 ns; those figures rest on savings of 20 to 110 ms. This is the "cost per exit" of stage 1, measured: on the order of a hundred cycles a time.
+
+**What is left.** The same counts with linking (`exits-linked.json`):
+
+| program | region calls M | warp instructions a call | uniform branch, taken | store gate | BSYNC | EXIT (lanes leave) | BAR / YIELD / CALL / RET / WARPSYNC | straight op outside regions | interpreter op | other |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| hecbench/black-scholes-cuda | 67.18 | 16.7 | 15.9 | 2.3 | 59.1 | 0.0 | 22.7 | 0.0 | 0.0 | 0.0 |
+| polybench/LU | 91.82 | 17.9 | 0.0 | 49.9 | 0.0 | 50.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+| rodinia/gaussian | 8.49 | 18.1 | 0.0 | 33.2 | 0.1 | 66.7 | 0.0 | 0.0 | 0.0 | 0.0 |
+| rodinia/hotspot | 1.92 | 33.8 | 0.0 | 10.0 | 30.0 | 15.0 | 30.0 | 0.0 | 15.0 | 0.0 |
+| polybench/SYRK | 0.07 | 2964.8 | 0.0 | 50.0 | 0.0 | 0.0 | 0.0 | 50.0 | 0.0 | 0.0 |
+| polybench/SYR2K | 0.07 | 6093.1 | 0.0 | 33.3 | 0.0 | 66.7 | 0.0 | 0.0 | 0.0 | 0.0 |
+| polybench/JACOBI1D | 2.59 | 17.2 | 0.0 | 98.5 | 0.0 | 1.5 | 0.0 | 0.0 | 0.0 | 0.0 |
+| polybench/JACOBI2D | 1.35 | 23.0 | 0.0 | 93.9 | 0.0 | 6.1 | 0.0 | 0.0 | 0.0 | 0.0 |
+| polybench/3DCONV | 0.65 | 42.8 | 0.0 | 79.5 | 0.0 | 20.5 | 0.0 | 0.0 | 0.0 | 0.0 |
+| polybench/2DCONV | 0.53 | 40.3 | 0.0 | 98.4 | 0.0 | 1.6 | 0.0 | 0.0 | 0.0 | 0.0 |
+| rodinia/lud | 0.72 | 27.4 | 0.0 | 0.3 | 4.5 | 0.3 | 94.8 | 0.1 | 0.0 | 0.0 |
+| rodinia/backprop | 0.52 | 23.2 | 0.0 | 0.0 | 0.0 | 0.0 | 100.0 | 0.0 | 0.0 | 0.0 |
+| rodinia/pathfinder | 0.74 | 11.6 | 0.0 | 0.0 | 2.5 | 0.0 | 95.1 | 2.5 | 0.0 | 0.0 |
+| hecbench/bilateral-cuda | 2.45 | 32.2 | 5.6 | 0.1 | 93.8 | 0.0 | 0.0 | 0.2 | 0.1 | 0.1 |
+| hecbench/bh-cuda | 2.05 | 20.7 | 0.1 | 0.0 | 71.9 | 0.0 | 0.6 | 0.0 | 26.9 | 0.5 |
+| hecbench/silu-cuda | 1.11 | 24.8 | 0.0 | 23.6 | 72.8 | 3.6 | 0.0 | 0.0 | 0.0 | 0.0 |
+| hecbench/aop-cuda | 0.19 | 37.3 | 0.0 | 0.5 | 52.5 | 0.5 | 0.0 | 46.5 | 0.0 | 0.0 |
+| hecbench/bitonic-sort-cuda | 0.42 | 40.3 | 0.0 | 0.0 | 5.6 | 94.4 | 0.0 | 0.0 | 0.0 | 0.0 |
+
+| program | region calls M: unlinked | linked | ratio | warp instructions a call: unlinked | linked | continued inside generated code M: unlinked | linked | of them linked in a diverged warp M |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| hecbench/black-scholes-cuda | 115.61 | 67.18 | 1.72 | 7.9 | 16.7 | 35.93 | 149.99 | 37.50 |
+| polybench/LU | 136.62 | 91.82 | 1.49 | 11.7 | 17.9 | 408.72 | 453.68 | 0.00 |
+| rodinia/gaussian | 15.45 | 8.49 | 1.82 | 9.5 | 18.1 | 44.75 | 51.72 | 0.00 |
+| rodinia/hotspot | 3.35 | 1.92 | 1.75 | 14.1 | 33.8 | 6.04 | 9.20 | 0.00 |
+| polybench/SYRK | 0.10 | 0.07 | 1.50 | 1976.6 | 2964.8 | 2.55 | 2.59 | 0.00 |
+| polybench/SYR2K | 0.10 | 0.07 | 1.50 | 4062.0 | 6093.1 | 4.36 | 4.39 | 0.00 |
+| polybench/JACOBI1D | 3.82 | 2.59 | 1.48 | 7.0 | 17.2 | 8.92 | 12.71 | 0.00 |
+| polybench/JACOBI2D | 2.54 | 1.35 | 1.88 | 11.8 | 23.0 | 7.63 | 8.82 | 0.00 |
+| polybench/3DCONV | 1.03 | 0.65 | 1.60 | 26.5 | 42.8 | 2.59 | 2.97 | 0.00 |
+| polybench/2DCONV | 1.04 | 0.53 | 1.97 | 20.0 | 40.3 | 3.65 | 4.17 | 0.00 |
+| rodinia/lud | 0.78 | 0.72 | 1.09 | 25.4 | 27.4 | 3.50 | 3.54 | 0.00 |
+| rodinia/backprop | 0.65 | 0.52 | 1.25 | 19.4 | 23.2 | 0.65 | 0.65 | 0.00 |
+| rodinia/pathfinder | 0.76 | 0.74 | 1.02 | 11.3 | 11.6 | 0.47 | 0.53 | 0.00 |
+| hecbench/bilateral-cuda | 4.57 | 2.45 | 1.87 | 14.2 | 32.2 | 3.99 | 10.49 | 0.14 |
+| hecbench/bh-cuda | 4.14 | 2.05 | 2.02 | 9.8 | 20.7 | 3.79 | 5.57 | 0.01 |
+| hecbench/silu-cuda | 2.06 | 1.11 | 1.87 | 11.7 | 24.8 | 2.09 | 3.90 | 0.00 |
+| hecbench/aop-cuda | 0.28 | 0.19 | 1.46 | 22.2 | 37.3 | 0.55 | 0.74 | 0.00 |
+| hecbench/bitonic-sort-cuda | 0.49 | 0.42 | 1.16 | 32.8 | 40.3 | 0.76 | 1.26 | 0.00 |
+
+The short kernels are at their floor: the store gate and the final EXIT, two region calls a warp (JACOBI1D and the convolutions show the gate almost alone: after it what is left of the kernel, the store and the EXIT, is too short to be a region and runs on the tier). In the diverged programs what is left is BSYNC (59 % of black-scholes' remaining calls, 94 % of bilateral's, 72 % of bh's), then the calls and returns of a group that has other lanes below its target (23 % of black-scholes': the scheduler's lowest-address rule says the other group runs first, so the loop has to take over), then the uniform branches that jump above another group (16 %). BSYNC is the next exit to take: it is where a diverged warp's groups change, and its usual outcome (the group arrives, waits, the group at the next address runs; or the last group arrives and all go on together) can be decided by a host call that returns the next group, with the group-change path that splits already use.
+
+### Same bits
+
+`scripts/verify.py`, reference: the tier of the same build. Variants: the JIT and the JIT with linking, each on a cold and then a warm cache; compared: the normalised output, `VGPU_COUNTERS_FILE` (every launch, pid removed), `VGPU_KERNEL_DIGEST` and the exit status, at 1 and 4 threads.
+
+* Twelve short programs (gaussian, hotspot, SYRK, JACOBI1D, JACOBI2D, 3DCONV, lud, backprop, bilateral, bh, silu, aop) at 1 and 4 threads: 96 comparisons (`same-bits-short.log`). **76 are equal in all four things**: nine programs in every variant at both thread counts, and bh at one thread. The other 20 are the three programs that are not deterministic on the tier itself (two tier runs of the same build differ in the same way, `same-bits-tier-twice.log`): backprop and silu differ in the kernel digest only (output, counters and exit status are equal in all 16 comparisons), and bh at 4 threads in counters and digest (output and exit status equal). They differ for the unlinked JIT exactly as for the linked one.
+* black-scholes, LU and SYR2K at 1 and 4 threads: **24 of 24 equal** (`same-bits-long.log`): output, counters file, kernel digest and exit status, cold and warm, the JIT and the JIT with linking.
+* The A/B itself compares the normalised output of every run of every side: equal on all 18 programs (the `outputs` column).
+
+### Cold cache
+
+One run a side on an empty cache, synchronous compile (`sp33.py --cold --stats`, `cold.json`): what the first run of a program pays.
+
+| program | JIT: first run s | compiles | compile s | linked: first run s | compiles | compile s | compile time, linked / JIT |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| hecbench/black-scholes-cuda | 25.65 | 1 | 4.1 | 28.21 | 1 | 11.1 | 2.74 |
+| polybench/LU | 27.78 | 2 | 2.1 | 26.25 | 2 | 2.1 | 1.01 |
+| rodinia/gaussian | 5.65 | 2 | 2.1 | 5.80 | 2 | 2.5 | 1.21 |
+| rodinia/hotspot | 3.18 | 1 | 2.3 | 5.18 | 1 | 4.4 | 1.92 |
+| polybench/SYRK | 7.95 | 1 | 2.9 | 7.49 | 1 | 2.5 | 0.85 |
+| hecbench/bilateral-cuda | 11.26 | 3 | 10.1 | 19.89 | 3 | 18.9 | 1.87 |
+| hecbench/bh-cuda | 3.84 | 2 | 3.2 | 6.74 | 3 | 6.1 | 1.93 |
+| hecbench/silu-cuda | 7.20 | 5 | 6.8 | 11.16 | 5 | 10.8 | 1.59 |
+| polybench/JACOBI2D | 2.48 | 2 | 2.0 | 1.88 | 2 | 1.4 | 0.71 |
+
+The short kernels compile as fast or faster (one function instead of two or three small ones). The programs with large, branchy sections compile 1.6 to 2.7 times as long: black-scholes 4.1 s to 11.1 s, bilateral 10.1 s to 18.9 s, hotspot 2.3 s to 4.4 s. With the synchronous compile of this measurement the first run of bilateral is 77 % slower and the first run of hotspot 63 % (their whole warm run is one second); black-scholes' first run is 10 % slower and catches up in its second. Outside tests the compile runs in the background, so the cost is that the linked code arrives later, and a program that ends before it arrives has paid for nothing but the compiler's CPU. Whether the time goes into the merged function's size or into the code linking adds at every branch (the split block, the tests) was not separated.
+
+### Fused runs on top (round sp48's patch, item 5 of the brief)
+
+Linking clears 5 % on more than three programs, so round sp48's fused runs (`data/sp48/fused-runs.patch`: runs of register-only ops computed block by block of eight lanes, `VGPU_JIT_FUSE=1`) were put on top: the patch applies to this branch with five one-line conflicts (the option beside `link` in `Config`, `Engine::source` and its three callers; a `stop` op is never fusable, nothing else interacts). Its own test (`jit_fused_runs_equal_the_op_by_op_code`: 202 runs of 925 ops, 336 region runs, 0 failures) passes on the combined build. Five sides of that build, same protocol:
+
+| program | JIT s | linked s | linked again s | linked + fused s | JIT + fused s | **linked / linked + fused** | control linked / linked again | JIT / linked + fused | JIT / JIT + fused | outputs |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| hecbench/black-scholes-cuda | 19.845 (1%) | 16.283 (1%) | 16.274 (1%) | 14.881 (2%) | 17.948 (2%) | **1.094** | 1.001 | 1.334 | 1.106 | same |
+| rodinia/gaussian | 3.397 (1%) | 3.194 (1%) | 3.207 (3%) | 3.186 (1%) | 3.363 (3%) | **1.003** | 0.996 | 1.066 | 1.010 | same |
+| rodinia/hotspot | 0.866 (1%) | 0.775 (3%) | 0.787 (48%) | 0.753 (1%) | 0.844 (2%) | **1.028** | 0.984 | 1.149 | 1.026 | same |
+| polybench/SYRK | 5.007 (49%) | 4.894 (2%) | 4.910 (2%) | 4.711 (1%) | 4.773 (75%) | **1.039** | 0.997 | 1.063 | 1.049 | same |
+| hecbench/bilateral-cuda | 1.093 (1%) | 0.984 (2%) | 0.982 (1%) | 0.896 (2%) | 1.013 (1%) | **1.098** | 1.002 | 1.221 | 1.080 | same |
+| hecbench/bh-cuda | 0.620 (1%) | 0.593 (3%) | 0.595 (3%) | 0.558 (1%) | 0.592 (6%) | **1.063** | 0.997 | 1.111 | 1.048 | same |
+| hecbench/silu-cuda | 0.393 (2%) | 0.367 (4%) | 0.367 (2%) | 0.335 (1%) | 0.360 (1%) | **1.096** | 1.001 | 1.175 | 1.093 | same |
+
+geometric mean linked / linked + fused: **1.0596** over 7 programs (1.003 to 1.098); control 0.9968; JIT / linked + fused 1.1565
+
+("JIT" is the unlinked, unfused JIT; "JIT + fused" is round sp48's configuration. Two sides were disturbed in one run each, SYRK's JIT and JIT + fused sides and hotspot's second linked side, a spread of 48 to 75 %: the medians hold, SYRK's "JIT / JIT + fused" is the least sure number of the table.)
+
+* **On top of linking the fused runs clear the bar they missed alone: four programs gain 5 % or more over the linked code**, black-scholes 1.094, bilateral 1.098, silu 1.096, bh 1.063 (control 0.997 to 1.002), and SYRK 1.039, hotspot 1.028; gaussian does not move. Round sp48 had one program at the bar (black-scholes 1.111, here 1.106 without linking) because its other four were short kernels with few fusable runs; bilateral, silu and bh are float code like black-scholes.
+* **The two gains multiply**: black-scholes 1.209 from linking times 1.106 from fusing is 1.337, measured 1.334; bilateral 1.111 times 1.080 is 1.200, measured 1.221. They remove different work (the loop between region calls; the row traffic inside straight-line code), and with fewer exits a larger share of the run is the generated code that fusing shortens.
+* So the patch is **in the tree, as the opt-in it was** (`VGPU_JIT_FUSE=1`, off by default, AVX2 and the cheap form only): `jit::fusable`, `jit::gen_fused_run`, the one-block helpers in `jit_rt.h`, and its test in `test_jit_resid`. Its mutants were run again on the combined build (`mutants-fused.log`: the pristine generator passes, each of the eleven makes the test fail), and linking with fusing against the tier on black-scholes, gaussian and hotspot (one thread, cold and warm) is 6 of 6 equal in output, counters, digest and exit status (`same-bits-fuse.log`).
+
+### Verdict
+
+**Kept, as an opt-in: `VGPU_JIT_LINK=1` (and `VGPU_JIT_FUSE=1` with it). Not proposed as the default yet.**
+
+* It does what stage 0 was for: generated code is left 1.5 to 2 times less often on 14 of the 18 programs, ten programs gain 5 to 21 %, the geometric mean over the 18 is 1.051 (control 1.002; single controls 0.995 to 1.016), outputs, counters and digests are the tier's wherever the program is deterministic, and the two tests fail under every one of the 18 mutants.
+* Three things stand between it and the default, in this order. (1) **SYR2K loses 3 %**, reproducibly, for a reason not found (above); the rule set beforehand was every program at 1.00 or better within noise. (2) **The `e2e_sass_jit` shards were not run**: they compile their programs with nvcc, which the two hosts this round was allowed to use do not have (server3 has a stub, server2 none). The `linking` stages added to the `modes` shard and the whole matrix with `VGPU_JIT_LINK=1` have to pass in CI first. (3) **The first run pays more**: the linked object compiles 0.7 to 2.7 times as long, and 1.6 to 2.7 times for the programs with large sections (black-scholes 4.1 s to 11.1 s, bilateral 10.1 s to 18.9 s; the compile is in the background unless `VGPU_JIT_SYNC=1`, so this delays the gain rather than the program, but a run shorter than the compile gains nothing).
+* The fused runs are in the tree as a second opt-in, `VGPU_JIT_FUSE=1` (above): with linking they clear the bar on four programs. The two together: black-scholes 1.334, bilateral 1.221, silu 1.175, hotspot 1.149, bh 1.111 over the JIT as it is.
+
+What the round leaves for the next one:
+
+* **BSYNC inside generated code** (the largest exit left in every diverged program), by a host call that returns the next group; then the calls and branches that land above another group are what remains of the scheduler's order.
+* **The cost of the merged function**: its compile time, and whatever SYR2K's loss is. Both point at one large function with many labels; an alternative with the same effect is one function per region and a small dispatcher in the object that passes control between them, which keeps functions small.
+* The store gate and the final EXIT are a warp's life, not the loop's overhead: two region calls a warp is the floor for a short kernel, and what is left of its "loop" share is the launch's per-warp work (round sp48's `other` column), not something a block compiler removes.
+
+### Caveats and what is not solid
+
+* Every comparison is between two settings of this branch's build. The unlinked JIT of this build against `origin/main`'s was not timed (one build tree): the changes outside the option are the larger `Ctx`, the statistics' branch and a few tests around a region call, and the tier's loop is the instantiation it was.
+* One machine, shared with other sessions; each timing is 5 interleaved runs in one batch (9 for the second SYR2K batch), not repeated on another day or host. Builds are without LTO (releases have it): the ratios are between two settings of one binary, but the absolute times are a non-LTO build's.
+* The exit classification is the host's reading of where the generated code stopped, not an instrumented exit: an entry that is both the start of a stretch and a branch is classified by the branch (the stretch's bound check comes first in the generated code). The `BAR / YIELD / CALL / RET / WARPSYNC` column was one reason when the tables were taken; the committed code reports CALL and RET apart from the barriers (`call-ret`, `bar-yield-warpsync`). Four programs were counted again with it: unlinked, the column is all CALL and RET in black-scholes (14.1) and bilateral (25.9), half each in hotspot (17.1 and 17.1), and 87.1 of lud's 91.2 points are barriers; linked, what is left of it is CALL and RET in black-scholes (22.7) and barriers in hotspot (30.0) and lud (94.8).
+* The run loop's cost per exit is derived from wall-time differences, not from a profile (no `perf` without root on this host): it is a mean over what linking removed, and it includes whatever else differs between the two generated functions.
+* Not run: the seven `e2e_sass_jit` shards and the nightly matrix (no nvcc on the allowed hosts; the `_jit_link` unit legs and 18 real programs are what was run), a sanitizer build, g++-12, a build without the mutation hooks, AVX-512 or the baseline SIMD level, `VGPU_JIT_RESIDENCE=1` / `VGPU_JIT_SPECIALIZE=1` with linking on real programs (the unit test compiles the full form, the SASS-level tests and the programs the cheap one; the `linking, the full form` stage of the `modes` shard is there for CI), the background compile (`VGPU_JIT_SYNC` unset) with linking. For the fused runs on top: seven programs only (not LU, not SYR2K), no cold run, one thread for the same-bits comparison.
+* The host's parts of CALL, RET and the untaken EXIT (`jit_callok`, `jit_ret`, `jit_exit0`) have no mutant of their own: the SASS-level test runs them (a kernel that calls and returns, the kernels' EXITs), and the generator's mutants for the same ops fail the unit test, but a wrong line in those three host functions is held only by the comparison with the interpreter.
+* Three programs are not deterministic from run to run on the tier itself (`same-bits-tier-twice.log`): backprop's and silu's kernel digests differ between two tier runs, and bh at 4 threads differs in counters and digest (why was not looked for). For these the comparison is the output, the exit status and (backprop, silu) the counters.
+* `same-bits-short.log` holds the last 80 of the 97 lines of its run (the script printed through `tail -80`): the 17 lines cut are gaussian's and hotspot's and one of SYRK's, and the run's own total, 20 differences, is the 20 lines of the three programs above.
+* Cleanup: the scratch tree of this round on server3 (`~/.cache/sp52`) and the one started on server2 (not used: under 8 GB available there) were removed by exact path.

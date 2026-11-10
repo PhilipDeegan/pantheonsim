@@ -6,7 +6,7 @@ With a second file (the linked side): the region calls and instructions a call o
 import json, sys
 d = json.load(open(sys.argv[1]))
 order = ["split-branch", "uniform-branch-taken", "uniform-branch-not-taken", "register-only-op", "turn-budget", "run-bound", "step-budget", "store-gate", "to-compiled-region",
-         "bssy-nop", "bsync", "exit", "exit-no-lane-leaves", "bar-yield-call-ret-warpsync", "branch-outside-regions", "straight-op-outside-regions", "handler-op", "interpreter-op"]
+         "bssy-nop", "bsync", "exit", "exit-no-lane-leaves", "call-ret", "bar-yield-warpsync", "bar-yield-call-ret-warpsync", "branch-outside-regions", "straight-op-outside-regions", "handler-op", "interpreter-op"]
 progs = [p for p in d if d[p].get("calls")]
 def pct(p, k, i=0):
     e = d[p]["exits"].get(k, [0, 0, 0]); tot = sum(v[0] for v in d[p]["exits"].values())

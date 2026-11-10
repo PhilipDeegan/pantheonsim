@@ -2360,7 +2360,7 @@ struct JitFrame {
   if (ei >= 0 && static_cast<uint32_t>(ei) < rg.k && !rs.ops[static_cast<uint32_t>(ei)].stop) {
     const jit::OpFacts& f = rs.ops[static_cast<uint32_t>(ei)];
     const tier::MOp& op = ops[rg.first + static_cast<uint32_t>(ei)];
-    if (f.call || f.hostctl == 3) return jit::kExOtherCtl;   // a CALL or RET in a region (linking)
+    if (f.call || f.hostctl == 3) return jit::kExCallRet;   // a CALL or RET in a region (linking)
     if (f.br) {
       const Mask ex = op.unguarded ? group : tier_guard(w, *op.ins, group);
       Mask take = ex;
@@ -2402,7 +2402,8 @@ struct JitFrame {
       }
       return go ? jit::kExExit : jit::kExExitNone;
     }
-    case tier::Form::Bar: case tier::Form::Yield: case tier::Form::Call: case tier::Form::Ret: case tier::Form::Warpsync: return jit::kExOtherCtl;
+    case tier::Form::Call: case tier::Form::Ret: return jit::kExCallRet;
+    case tier::Form::Bar: case tier::Form::Yield: case tier::Form::Warpsync: return jit::kExOtherCtl;
     case tier::Form::Bra: return jit::kExBraOther;
     default: break;
   }

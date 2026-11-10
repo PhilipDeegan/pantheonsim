@@ -322,6 +322,11 @@ if want modes && [[ -z ${VGPU_JIT_ONLY_RANDOM:-} && -x "$work/$prog.$arch" ]]; t
   form "the full form: residence and specialisation" VGPU_JIT_RESIDENCE=1 VGPU_JIT_SPECIALIZE=1 "VGPU_JIT_CACHE=$work/jit-f1"
   form "residence only" VGPU_JIT_RESIDENCE=1 "VGPU_JIT_CACHE=$work/jit-f2"
   form "specialisation only" VGPU_JIT_SPECIALIZE=1 "VGPU_JIT_CACHE=$work/jit-f3"
+  # Linking (round sp52, VGPU_JIT_LINK=1): the generated code goes on past branches, register-only ops, BSSY, EXITs no lane takes, CALL.REL and RET.REL
+  # where the run loop's chain would pick its group again, runs branches that split the group, and the selected regions of a section are one function.
+  # The same output as the tier with regions running, in the cheap form and in the full one.
+  form "linking" VGPU_JIT_LINK=1 "VGPU_JIT_CACHE=$work/jit-l1"
+  form "linking, the full form" VGPU_JIT_LINK=1 VGPU_JIT_RESIDENCE=1 VGPU_JIT_SPECIALIZE=1 "VGPU_JIT_CACHE=$work/jit-l2"
 fi
 
 [[ $fails == 0 ]] && echo "PASS" || echo "FAIL: the tier and the JIT differ"

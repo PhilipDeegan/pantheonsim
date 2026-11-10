@@ -265,6 +265,7 @@ Config Config::from_env() {
   if (const std::string r = env("VGPU_JIT_RESIDENCE"); !r.empty() && r != "0") c.residence = true;
   if (const std::string r = env("VGPU_JIT_SPECIALIZE"); !r.empty() && r != "0") c.specialize = true;
   if (env("VGPU_JIT_LINK") == "1") c.link = true;
+  if (const std::string r = env("VGPU_JIT_FUSE"); !r.empty() && r != "0") c.fuse = true;
   if (const std::string t = env("VGPU_JIT_TIMEOUT"); !t.empty()) c.timeout_s = static_cast<unsigned>(std::strtoul(t.c_str(), nullptr, 10));
   if (const std::string m = env("VGPU_JIT_MEM_MB"); !m.empty()) c.mem_mb = static_cast<unsigned>(std::strtoul(m.c_str(), nullptr, 10));
   return c;
@@ -355,7 +356,7 @@ std::vector<uint32_t> Engine::meta(const UnitSpec& spec) {
   return m;
 }
 
-std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool specialize, bool link) {
+std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool specialize, bool link, bool fuse) {
   std::string s;
   const auto put = [&](const char* fmt, auto... a) {
     char buf[1024];
@@ -576,6 +577,24 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool
         s += "  }\n";
         put("B%u:;\n", i);
         fell = false;
+      }
+      // A fused run (jit.hpp): this op and the ones after it, as far as they are fusable and no entry of the region lies between them, in one loop over
+      // the blocks of lanes. They are counted as the op-by-op form counts them (each is unguarded: the pending counts), and no row is local to the region.
+      if (fuse && avx2 && !rc.enabled && fusable(o)) {
+        uint32_t j = i + 1;
+        while (j < k && fusable(r.ops[j]) && !is_start.count(j)) ++j;
+        if (j - i >= 2) {
+          put("  {  // ops %u..%u, fused\n    const uint32_t ex = group;\n", i, j - 1);
+          for (uint32_t t = i; t < j; ++t) {
+            count(r.ops[t]);
+            pend_notes.push_back(t);
+            ++pend_gen;
+          }
+          s += "    if (ex == 0xffffffffu) {\n" + gen_fused_run(&r.ops[i], j - i, true) + "    } else {\n" + gen_fused_run(&r.ops[i], j - i, false) + "    }\n  }\n";
+          i = j - 1;
+          fell = true;
+          continue;
+        }
       }
       put("  {  // op %u: %016llx%016llx, class %u", i, static_cast<unsigned long long>(o.hi), static_cast<unsigned long long>(o.lo), unsigned{o.cls});
       if (!o.unguarded) put(", guard %s%s%u", o.guard_not ? "!" : "", o.guard_uniform ? "UP" : "P", unsigned{o.guard});
@@ -987,7 +1006,7 @@ std::string Engine::key(const UnitSpec& spec, std::string* why) {
   const std::string cid = compiler_id(why);
   if (cid.empty()) return {};
   const std::string isa = cfg_.isa.empty() ? detect_isa() : cfg_.isa;
-  return hash_text(source(spec, isa == "avx2", cfg_.residence, cfg_.specialize, cfg_.link) + key_suffix(cfg_, cid, isa));
+  return hash_text(source(spec, isa == "avx2", cfg_.residence, cfg_.specialize, cfg_.link, cfg_.fuse) + key_suffix(cfg_, cid, isa));
 }
 
 // The key of a whole section (what the file naming its selection of regions is named by): the facts of every region, not their text.
@@ -1031,9 +1050,14 @@ RegionSpec Engine::merge_regions(const UnitSpec& spec, const std::vector<uint32_
 
 bool Engine::merges(const UnitSpec& spec, const std::vector<uint32_t>& sel) const {
   if (!cfg_.link || sel.empty()) return false;
-  const RegionSpec& a = spec.regions[sel.front()];
-  const RegionSpec& b = spec.regions[sel.back()];
-  return b.first >= a.first && b.first + b.ops.size() - a.first <= kMaxMergedSpan;
+  // (The regions must lie one after the other in the section, as make_unit's do: a spec whose regions carry no place is not merged.)
+  uint64_t end = 0;
+  for (size_t i = 0; i < sel.size(); ++i) {
+    const RegionSpec& r = spec.regions[sel[i]];
+    if (r.ops.empty() || (i && r.first < end)) return false;
+    end = uint64_t{r.first} + r.ops.size();
+  }
+  return end - spec.regions[sel.front()].first <= kMaxMergedSpan;
 }
 
 UnitSpec Engine::selected_spec(const UnitSpec& full, const std::vector<uint32_t>& sel) const {
@@ -1255,7 +1279,7 @@ Result Engine::obtain(const UnitSpec& spec) {
     return out;
   }
   const std::string isa = cfg_.isa.empty() ? detect_isa() : cfg_.isa;
-  if (!write_file(tmp_cpp, source(spec, isa == "avx2", cfg_.residence, cfg_.specialize, cfg_.link))) {
+  if (!write_file(tmp_cpp, source(spec, isa == "avx2", cfg_.residence, cfg_.specialize, cfg_.link, cfg_.fuse))) {
     out.status = Status::CacheUnusable;
     out.message = "cannot write to " + dir + ": " + std::strerror(errno);
     return out;
@@ -1618,7 +1642,7 @@ void drain() { manager().drain(); }
 
 const char* exit_name(unsigned why) {
   static const char* const names[kExCount] = {"split-branch", "uniform-branch-taken", "uniform-branch-not-taken", "register-only-op", "turn-budget", "run-bound",
-                                              "step-budget", "store-gate", "to-compiled-region", "bssy-nop", "bsync", "exit", "exit-no-lane-leaves", "bar-yield-call-ret-warpsync",
+                                              "step-budget", "store-gate", "to-compiled-region", "bssy-nop", "bsync", "exit", "exit-no-lane-leaves", "call-ret", "bar-yield-warpsync",
                                               "branch-outside-regions", "straight-op-outside-regions", "handler-op", "interpreter-op"};
   return why < kExCount ? names[why] : "?";
 }
@@ -1630,6 +1654,14 @@ void Manager::report() {
   if (const char* f = std::getenv("VGPU_JIT_STATS_FILE"); f && *f)
     if (std::FILE* g = std::fopen(f, "a")) out = g;
   Stats& s = stats();
+  if (link_requested())
+    std::fprintf(out, "jit: link in-diverged-warps: %llu\njit: link calls-with-a-split: %llu\n", (unsigned long long)s.linked.load(), (unsigned long long)s.splits.load());
+  // Why the region calls ended (one line a reason that occurred): all, of them in a diverged warp, of them at the entry with nothing run. These lines
+  // come before the summary: what reads a statistics file takes its last "jit: " line for the summary (run_sass_jit.sh).
+  for (unsigned w = 0; w < kExCount; ++w) {
+    const uint64_t a = s.exits[w][0].load(), d = s.exits[w][1].load(), z = s.exits[w][2].load();
+    if (a + d) std::fprintf(out, "jit: exit %s: %llu (diverged warp %llu, nothing run %llu)\n", exit_name(w), (unsigned long long)(a + d), (unsigned long long)d, (unsigned long long)z);
+  }
   std::fprintf(out,
                "jit: %llu units (%llu regions), %llu ready, %llu cache hits, %llu compiles (%.1f ms), %llu failures, %llu damaged objects replaced; "
                "%llu region calls ran %llu warp instructions (%llu computed by generated code), %llu exceptions unwound through them; share rule: %llu declined, %llu accepted; "
@@ -1639,13 +1671,6 @@ void Manager::report() {
                (unsigned long long)s.failures.load(), (unsigned long long)s.corrupt.load(), (unsigned long long)s.regions_run.load(),
                (unsigned long long)s.instructions_run.load(), (unsigned long long)s.generated_run.load(), (unsigned long long)s.region_throws.load(), (unsigned long long)s.declined.load(),
                (unsigned long long)s.accepted.load(), (unsigned long long)s.continued.load());
-  if (link_requested())
-    std::fprintf(out, "jit: link in-diverged-warps: %llu\njit: link calls-with-a-split: %llu\n", (unsigned long long)s.linked.load(), (unsigned long long)s.splits.load());
-  // Why the region calls ended (one line a reason that occurred): all, of them in a diverged warp, of them at the entry with nothing run.
-  for (unsigned w = 0; w < kExCount; ++w) {
-    const uint64_t a = s.exits[w][0].load(), d = s.exits[w][1].load(), z = s.exits[w][2].load();
-    if (a + d) std::fprintf(out, "jit: exit %s: %llu (diverged warp %llu, nothing run %llu)\n", exit_name(w), (unsigned long long)(a + d), (unsigned long long)d, (unsigned long long)z);
-  }
   if (out != stderr) std::fclose(out);
 }
 
