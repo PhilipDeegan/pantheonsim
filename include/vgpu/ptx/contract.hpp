@@ -21,4 +21,11 @@ size_t contract_mul_add(EntryFn& fn);
 // OpFloatBin::nan_a_first and OpFma::nan_swap_ab. Run after contract_mul_add; independent of VGPU_PTX_CONTRACT.
 void mark_nan_order(EntryFn& fn);
 
+// Removes the wmma.load whose fragment no instruction of the function reads (it becomes a nop); returns how many. ptxas removes such a
+// load as dead code, so a program never touches the address the load names -- tiny-cuda-nn's fused backward pass loads the "forward
+// activations" fragment of its last layer from a null pointer, a load nothing consumes because that layer has no activation function,
+// and runs on a card because ptxas drops the load. Executed here it read address 0 and stopped the program with an invalid-pointer error.
+// Only the register uses count: a load whose registers are read anywhere stays, in any position.
+size_t drop_dead_wmma_loads(EntryFn& fn);
+
 }  // namespace vgpu::ptx

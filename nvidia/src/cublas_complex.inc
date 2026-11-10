@@ -213,9 +213,18 @@ cublasStatus_t cgemm(cublasHandle_t h, cublasOperation_t ta, cublasOperation_t t
   return run_c(h, alpha, beta, sizeof(T), [=](const void* al, const void* be) {
     const cd a_ = cscalar(h, static_cast<const T*>(al)), b_ = cscalar(h, static_cast<const T*>(be));
     const auto oa = to_op(ta), ob = to_op(tb);
-    const CMat a = load_mat(A, lda, oa == vgpu_la::Op::N ? k : m, oa == vgpu_la::Op::N ? m : k);
-    const CMat b = load_mat(B, ldb, ob == vgpu_la::Op::N ? n : k, ob == vgpu_la::Op::N ? k : n);
+    CMat a = load_mat(A, lda, oa == vgpu_la::Op::N ? k : m, oa == vgpu_la::Op::N ? m : k);
+    CMat b = load_mat(B, ldb, ob == vgpu_la::Op::N ? n : k, ob == vgpu_la::Op::N ? k : n);
     CMat c = load_mat(C, ldc, n, m);
+    if constexpr (std::is_same_v<T, cuComplex>) {
+      // Tensor-core inputs (see gemm_input_rounding.hpp): both parts of every element of A and B.
+      const auto kind = gemm_round_kind(reinterpret_cast<const Handle*>(h), m, n, k);
+      if (kind != vgpu::gemmround::Kind::None)
+        for (CMat* x : {&a, &b})
+          for (auto& e : x->v)
+            e = cd(vgpu::gemmround::round_to(static_cast<float>(e.real()), kind),
+                   vgpu::gemmround::round_to(static_cast<float>(e.imag()), kind));
+    }
     if constexpr (std::is_same_v<T, cuDoubleComplex>) {
       // Fixed-point emulation (see "fixed-point emulation" in cublas_api.cpp):
       // four real products of the real and imaginary planes, combined in

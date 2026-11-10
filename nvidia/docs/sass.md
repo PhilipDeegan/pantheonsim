@@ -117,8 +117,8 @@ its own barrier and distributed shared memory; and, on sm_120f, the packed integ
 `VIADD`/`VIMNMX` forms (a lane at a time: 8- and 16-bit lanes, `.SAT`, negated A,
 `.RELU`; derived from ptxas output for the PTX forms, compared with a host loop,
 not checked against a card). `executes()` lists the opcodes the
-executor runs; a decoded opcode outside it (`HMNMX2`, `F2IP`, `JMP`, `LDGMC` --
-the first three no decoder produces) takes the kernel to its PTX, and the "not
+executor runs; a decoded opcode outside it (`F2IP`, `JMP`, `LDGMC` --
+no decoder produces the first two) takes the kernel to its PTX, and the "not
 implemented yet" faults at the foot of the instruction groups are unreachable for
 the ones it lists.
 
@@ -274,6 +274,11 @@ of it and not others, and `WARPSYNC` lets out one mask's lanes at a time.
 - `e2e_dpx_intrinsics`: Hopper's DPX intrinsics (`__vimax3_s32_relu`,
   `__viaddmax_s16x2`, `__vibmin_u32` ... and the PTX `min`/`max` `.relu` forms)
   against NVIDIA's own host implementations, on SASS and PTX.
+- `e2e_minmax_forms`: `min`/`max` in every PTX form against a model of the ISA (and, for the forms sm_86 has, an RTX 3060's
+  answers): f32, f16, f16x2, bf16 and bf16x2 with `.ftz`, `.NaN` and `.xorsign.abs`, and sm_100's three-input f32
+  `.ftz`/`.NaN`/`.abs` forms, on SASS (interpreter and tier) and PTX. It covers `HMNMX2` (f16 and bf16 pairs, which the SASS
+  tier could not decode: a kernel using `__hmin2` or `min.f16` faulted), `FMNMX.XORSIGN` and the three-input PTX form
+  (pantheonsim #547 and its siblings).
 - `e2e_sass_archs`: 64 program entries (the `progs` list of `run_sass_archs.sh`,
   each built for one architecture or more) for each generation's SASS, sm_75 to
   sm_120, plus Hopper's (wgmma, TMA, tensor maps, stmatrix) for sm_90a and

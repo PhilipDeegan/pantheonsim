@@ -281,6 +281,7 @@ add_library(vgpu STATIC
   src/exec/worker_pool.cpp
   src/runtime/runtime.cpp
   src/runtime/memo.cpp
+  src/runtime/host_stats.cpp
   src/runtime/host_gpu.cpp
   src/runtime/shared_runtime.cpp
   src/runtime/visible_devices.cpp
@@ -1452,6 +1453,8 @@ vgpu_unit_test(test_ptx_block_reuse)
 # The host threads that run a grid's blocks, kept between launches: reuse,
 # nesting, several callers, fork; and the same kernels at 1, 2 and N threads.
 vgpu_unit_test(test_worker_pool)
+# VGPU_HOST_STATS: the host-kernel counters line for a run that is slower on one kernel than another (#551).
+vgpu_unit_test(test_host_stats)
 vgpu_unit_test(test_sched)
 # The SASS executor's atomics (vgpu/exec/sass_atomics.hpp), and its lane-state helpers and shuffle shapes (vgpu/exec/sass_lanes.hpp,
 # src/sass/tier.hpp), against the lane-by-lane code they replaced.
@@ -3034,7 +3037,7 @@ if(TARGET vgpucublas)
                           "cutensornet_paths:cutensornet" "cutensornet_state_paths:cutensornet" "cutensornet_state_gradient:cutensornet" "cutensornet_decomp_paths:cutensornet"
                           "solver_metis_paths:cusolver:cusparse"
                           "blas_u8gemm_paths:cublas" "blas_emulation_paths:cublas" "sparse_color_paths:cusparse"
-                          "lt_emulation_paths:cublasLt:cublas")
+                          "lt_emulation_paths:cublasLt:cublas" "fft_inplace_real:cufft" "blas_tf32_rounding:cublas:cublasLt")
     string(REPLACE ":" ";" _parts "${_check}")
     list(POP_FRONT _parts _name)
     add_test(NAME e2e_${_name}
@@ -3053,6 +3056,14 @@ if(TARGET vgpucublas)
       SKIP_REGULAR_EXPRESSION "^SKIP:"
       TIMEOUT 300)
   endforeach()
+
+  # The same TF32 program with NVIDIA_TF32_OVERRIDE=0: TF32 is off everywhere, explicit FAST_TF32 included.
+  add_test(NAME e2e_blas_tf32_override
+           COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_lib_check.sh blas_tf32_rounding cublas cublasLt)
+  set_tests_properties(e2e_blas_tf32_override PROPERTIES
+    ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR};NVIDIA_TF32_OVERRIDE=0"
+    SKIP_REGULAR_EXPRESSION "^SKIP:"
+    TIMEOUT 300)
 
   # cuSOLVER's Jacobi solvers (syevd, syevj, gesvd, gesvdj), each result checked by its defining property and, on the
   # simulator, bit for bit against what the plain loops gave before their sweeps were put on vector lanes.
@@ -3906,6 +3917,17 @@ if(TARGET vgpucudart)
     TIMEOUT 1800)
 endif()
 
+# min and max in every PTX form (f32, f16, f16x2, bf16, bf16x2 with .ftz, .NaN and .xorsign.abs; the sm_100 three-input f32 forms), against a
+# model of the ISA, on sm_80 and up, SASS (interpreter and tier) and PTX (pantheonsim #547 and its siblings).
+if(TARGET vgpucudart)
+  add_test(NAME e2e_minmax_forms COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_sass_archs.sh)
+  set_tests_properties(e2e_minmax_forms PROPERTIES
+    DEPENDS vgpucudart
+    ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR};VGPU_SASS_PROGRAMS=minmax_forms:80;VGPU_SASS_ARCHS=sm_80 sm_86 sm_89 sm_90 sm_100 sm_120"
+    SKIP_REGULAR_EXPRESSION "^SKIP:"
+    TIMEOUT 1800)
+endif()
+
 # The SASS executor's fast paths against its general path (VGPU_FASTPATH=0): answers and counters.
 add_test(NAME e2e_sass_fastpath
          COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_sass_fastpath.sh)
@@ -4401,6 +4423,17 @@ if(TARGET vgpucudart)
     TIMEOUT 600)
 endif()
 
+# Which matrix element each WMMA fragment element is, for every shape and type (the card's layout), and the accumulator-masked-by-an-A-
+# fragment pattern of tiny-cuda-nn's fused backward pass; on the SASS engine and on the PTX engine.
+if(TARGET vgpucudart)
+  add_test(NAME e2e_wmma_fragment_layout COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_wmma_fragment_layout.sh)
+  set_tests_properties(e2e_wmma_fragment_layout PROPERTIES
+    DEPENDS vgpucudart
+    ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
+    SKIP_REGULAR_EXPRESSION "^SKIP:"
+    TIMEOUT 600)
+endif()
+
 # Dynamic parallelism: device-side launches, nesting, order, named streams.
 if(TARGET vgpucudart)
   add_test(NAME e2e_dynamic_parallelism COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_dynamic_parallelism.sh)
@@ -4734,6 +4767,9 @@ add_test(NAME pantheon_workload_verdicts
 # And the PATH it starts vgpu shell with, which must not hold the Action's drop-in nvcc.
 add_test(NAME pantheon_workload_path
          COMMAND ${CMAKE_SOURCE_DIR}/tests/workloads/path_test.sh)
+# And the summary table, which names the machine whose job left no report.
+add_test(NAME pantheon_workload_matrix
+         COMMAND python3 ${CMAKE_SOURCE_DIR}/tests/workloads/workload_matrix_test.py)
 add_test(NAME pantheon_workloads
          COMMAND ${CMAKE_SOURCE_DIR}/tests/workloads/run_pantheon_workloads.sh)
 set_tests_properties(pantheon_workloads PROPERTIES
@@ -4793,7 +4829,7 @@ endif()
 foreach(_t e2e_cutlass_gemm e2e_cutlass_sm120 e2e_cutlass_sm100 e2e_cutlass_hopper e2e_cutlass_sm103
            e2e_cutlass_sm100_conv e2e_cutlass_fmha e2e_tma_gemm_cute e2e_wgmma_cute
            e2e_tma_reduce_cute e2e_tensormap_replace_cute e2e_sass_archs e2e_device_runtime
-           e2e_sync_masks e2e_dpx_intrinsics e2e_packed_f32x2)
+           e2e_sync_masks e2e_dpx_intrinsics e2e_minmax_forms e2e_packed_f32x2)
   if(TEST ${_t})
     set_property(TEST ${_t} APPEND PROPERTY RESOURCE_LOCK nvcc_memory)
   endif()

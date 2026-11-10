@@ -259,7 +259,7 @@ jobs:
           # that), so a machine that wrote nothing is reported as missing.
           profiles=$(find nvidia/profiles -name '*.yaml' | wc -l)
           notrun=$(grep -cE '^ *# not-run nvidia/[a-z0-9-]+:' .github/workflows/workloads.yml || true)
-          python3 tests/workloads/workload_matrix.py results "$((profiles - notrun))" > matrix.md
+          python3 tests/workloads/workload_matrix.py results "$((profiles - notrun))" .github/workflows/workloads.yml > matrix.md
           cat matrix.md >> "$GITHUB_STEP_SUMMARY"
 
       # While main is broken there is one open issue saying where, updated by

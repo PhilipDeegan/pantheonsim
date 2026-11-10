@@ -48,6 +48,7 @@ int main(int argc, char** argv) {
   const char* mode = argc > 1 ? argv[1] : "big";
   const bool small = !std::strcmp(mode, "small"), mufu = !std::strcmp(mode, "mufu");
   const bool div = !std::strcmp(mode, "div"), rcp = !std::strcmp(mode, "rcp"), divexp_mode = !std::strcmp(mode, "divexp");
+  const int rounds = !std::strcmp(mode, "acct") ? 2048 : 64;   // `acct`: `big` with 32 times the work per thread, a launch of a fraction of a second (run_host_gpu_stub.sh step 8)
   const bool heap = !std::strcmp(mode, "heap");   // `big`, after a kernel left a block of the device heap in use: no launch may go to the card
   const int n = small ? 64 : 1 << 18;
   void* d = nullptr;
@@ -61,7 +62,7 @@ int main(int argc, char** argv) {
     else if (div) divk<<<(n + 255) / 256, 256>>>(static_cast<float*>(d), n);
     else if (rcp) rcpk<<<(n + 255) / 256, 256>>>(static_cast<float*>(d), n);
     else if (divexp_mode) divexp<<<(n + 255) / 256, 256>>>(static_cast<float*>(d), n);
-    else scramble<<<(n + 255) / 256, 256>>>(static_cast<uint32_t*>(d), n, 64);
+    else scramble<<<(n + 255) / 256, 256>>>(static_cast<uint32_t*>(d), n, rounds);
     cudaDeviceSynchronize();
     if (launch == 0) std::fprintf(stderr, "first_launch_ms=%.0f\n", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     std::vector<unsigned char> back(n * 4);

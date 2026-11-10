@@ -45,6 +45,7 @@
 #include "vgpu/runtime/capture.hpp"
 #include "enum_value.hpp"
 #include "fixed_point_gemm.hpp"
+#include "gemm_input_rounding.hpp"
 #include "host_gemm.hpp"
 #include "host_trsm.hpp"
 
@@ -507,6 +508,34 @@ struct FixedPointRequest {
   explicit FixedPointRequest(bool on) : saved(t_fixed_point_requested) { t_fixed_point_requested = on; }
   ~FixedPointRequest() { t_fixed_point_requested = saved; }
 };
+// The compute type of the GemmEx call in progress, for the reduced-precision input rounding of
+// gemm_input_rounding.hpp (a direct Sgemm or Cgemm has none: the handle's math mode decides).
+struct GemmRoundRequest {
+  bool explicit_kind = false;   // FAST_TF32, FAST_16F or FAST_16BF
+  bool pedantic = false;        // 32F_PEDANTIC: never rounds, whatever the math mode
+  vgpu::gemmround::Kind kind = vgpu::gemmround::Kind::None;
+};
+thread_local GemmRoundRequest t_gemm_round;
+struct GemmRoundScope {
+  GemmRoundRequest saved;
+  explicit GemmRoundScope(cublasComputeType_t ct) : saved(t_gemm_round) {
+    using vgpu::gemmround::Kind;
+    GemmRoundRequest r;
+    if (ct == CUBLAS_COMPUTE_32F_FAST_TF32) { r.explicit_kind = true; r.kind = Kind::Tf32; }
+    else if (ct == CUBLAS_COMPUTE_32F_FAST_16F) { r.explicit_kind = true; r.kind = Kind::Fp16; }
+    else if (ct == CUBLAS_COMPUTE_32F_FAST_16BF) { r.explicit_kind = true; r.kind = Kind::Bf16; }
+    else if (ct == CUBLAS_COMPUTE_32F_PEDANTIC) r.pedantic = true;
+    t_gemm_round = r;
+  }
+  ~GemmRoundScope() { t_gemm_round = saved; }
+};
+// The input rounding an m x n x k single-precision product gets on `h` right now.
+vgpu::gemmround::Kind gemm_round_kind(const Handle* h, int64_t m, int64_t n, int64_t k) {
+  int math_mode;   // as an integer: a caller may have set a value the enum does not name
+  std::memcpy(&math_mode, &h->math_mode, sizeof math_mode);
+  return vgpu::gemmround::effective(t_gemm_round.kind, t_gemm_round.explicit_kind, t_gemm_round.pedantic, math_mode, m,
+                                    n, k);
+}
 // CUBLAS_EMULATION_STRATEGY is read once, when the library is first used: on
 // the card a variable set later in the process, before a new handle or a
 // call, changed nothing.
@@ -555,6 +584,12 @@ cublasStatus_t do_gemm(cublasHandle_t handle, cublasOperation_t transa, cublasOp
   auto hA = fetch<T>(A, transa == CUBLAS_OP_N ? extent(lda, k, m) : extent(lda, m, k));
   auto hB = fetch<T>(B, transb == CUBLAS_OP_N ? extent(ldb, n, k) : extent(ldb, k, n));
   auto hC = fetch<T>(C, extent(ldc, n, m));
+  if constexpr (std::is_same_v<T, float>) {
+    // Tensor-core inputs (TF32 and the FP16/BF16 fast types): A and B are rounded, C is not.
+    const auto kind = gemm_round_kind(reinterpret_cast<const Handle*>(handle), m, n, k);
+    vgpu::gemmround::round_in_place(hA.data(), hA.size(), kind);
+    vgpu::gemmround::round_in_place(hB.data(), hB.size(), kind);
+  }
   if constexpr (std::is_same_v<T, double>) {
     const Handle* hh = reinterpret_cast<const Handle*>(handle);
     if (fixed_point_active(hh)) {
@@ -1694,6 +1729,7 @@ VGPU_EXPORT cublasStatus_t cublasGemmEx(cublasHandle_t h, cublasOperation_t ta,
       }))
     return CUBLAS_STATUS_SUCCESS;
   const FixedPointRequest emulation((int)computeType == kCompute64fEmulated);
+  const GemmRoundScope input_rounding(computeType);
   if (Atype == CUDA_R_32F)
     return do_gemm<float, float>(h, ta, tb, m, n, k, static_cast<const float*>(alpha), A, lda, B,
                                  ldb, static_cast<const float*>(beta), C, ldc);

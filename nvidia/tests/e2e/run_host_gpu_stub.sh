@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
-# The host-GPU mode's start-up (include/vgpu/host_gpu.hpp start_worthwhile; src/runtime/host_gpu.cpp begin_start / await_start), tested with a stand-in driver
+# The host-GPU mode's start-up (include/vgpu/host_gpu.hpp should_offload_with_start; src/runtime/host_gpu.cpp await_start), tested with a stand-in driver
 # (host_gpu_stub_driver.c) so that it runs on every machine, card or not. What it pins:
 #   1. a program with no launch worth a card (a kernel outside the exact set, or a launch of a few warps) never loads the driver: no call reaches it;
-#   2. a launch of a kernel in the exact set on a grid worth a card starts the driver, and the simulator does not wait for it: the first launch takes far
-#      less than the driver's start (the stub sleeps STUB_INIT_MS in cuInit, as the real driver's context creation takes ~150 ms);
+#   2. the driver starts only when a launch has been decided to go to the card: the simulated launches before it do not wait for a driver start (the stub
+#      sleeps STUB_INIT_MS in cuInit, as the real driver's context creation takes ~150 ms). VGPU_HOST_GPU_START_COST=0 (no start charged in the decision) is
+#      what steps 2 to 5 use to reach the card path in a program that runs for a fraction of a second; step 7 pins the charge itself;
 #   3. the card path is reached later (the stub's module load is called), and the program's output is the one it prints with the mode off;
 #   4. the division idiom (include/vgpu/host_gpu.hpp division_idiom_only, on the SASS nvcc really emits for a / b): with VGPU_HOST_GPU_DIV=1 a kernel that is
 #      a division reaches the card path; without it, or with a bare rcp.approx or an EX2 beside the division, it never does (not even the driver's start);
 #   6. device memory outside the allocation table (a block of the kernel heap in use) keeps every launch off the card, not even the driver starts (the
 #      card holds only the table, so a pointer into that memory would read what it never got);
-#   5. a driver that cannot start says "mode off" once, the program's output is unchanged and no later launch calls the driver again.
+#   5. a driver that cannot start says "mode off" once, the program's output is unchanged and no later launch calls the driver again;
+#   7. the decision charges the driver start (sp43): with a start cost no launch can repay, a program whose every launch is in the exact set and big enough to
+#      be a candidate never calls the driver, and its output is the mode-off output;
+#   8. ... and buys it once the program has spent as much simulating as the start costs (the ski-rental account): with a start cost of half the first launch's
+#      time, no single launch can repay it (the estimate is at most the first launch's time, the rule needs it above the cost plus the card path, twice over) but the
+#      time already spent can, so the driver starts at the first launch that has an estimate.
 set -uo pipefail
 root="$(cd "$(dirname "$0")/../../.." && pwd)"
 . "$root/tests/shim_guard.sh"
@@ -58,8 +64,8 @@ for arg in small mufu; do
 done
 # 2 and 3. a launch worth a card: the driver starts, and the simulator does not wait for it.
 # (VGPU_HOST_GPU_NO_FIRST_LAUNCH=1: the first-launch rule would send the very first launch of this looping kernel to the card, which has to wait for the driver by
-# definition; the overlap this test pins is the simulated launches before the history rule sends one.)
-run on_big big VGPU_HOST_GPU=exact VGPU_HOST_GPU_NO_FIRST_LAUNCH=1 || { echo "FAIL: the big run with the mode on failed"; tail -5 "$work/on_big.err"; fails=1; }
+# definition; what this test pins is that the simulated launches before the history rule sends one do not wait for it.)
+run on_big big VGPU_HOST_GPU=exact VGPU_HOST_GPU_NO_FIRST_LAUNCH=1 VGPU_HOST_GPU_START_COST=0 || { echo "FAIL: the big run with the mode on failed"; tail -5 "$work/on_big.err"; fails=1; }
 diff -q "$work/off_big.out" "$work/on_big.out" > /dev/null || { echo "FAIL: the mode changes the output of the big program"; fails=1; }
 grep -q '^cuInit$' "$work/on_big.log" || { echo "FAIL: a launch worth a card did not start the driver: $(calls on_big)"; fails=1; }
 grep -q '^cuModuleLoadData$' "$work/on_big.log" || { echo "FAIL: no launch reached the card path (the stand-in's module load): $(calls on_big)"; fails=1; }
@@ -71,7 +77,7 @@ for arg in div rcp divexp; do
   env VGPU_GPU="$profile" VGPU_THREADS=4 LD_LIBRARY_PATH="$shim" "$work/prog" "$arg" > "$work/off_$arg.out" 2> "$work/off_$arg.err" || { echo "FAIL: the $arg run with the mode off failed"; exit 1; }
   run "div0_$arg" "$arg" VGPU_HOST_GPU=exact VGPU_HOST_GPU_NO_FIRST_LAUNCH=1 || { echo "FAIL: the $arg run failed"; fails=1; }
   [[ ! -s "$work/div0_$arg.log" ]] || { echo "FAIL: $arg reached the driver without VGPU_HOST_GPU_DIV: $(calls "div0_$arg")"; fails=1; }
-  run "div1_$arg" "$arg" VGPU_HOST_GPU=exact VGPU_HOST_GPU_NO_FIRST_LAUNCH=1 VGPU_HOST_GPU_DIV=1 || { echo "FAIL: the $arg run with the idiom on failed"; fails=1; }
+  run "div1_$arg" "$arg" VGPU_HOST_GPU=exact VGPU_HOST_GPU_NO_FIRST_LAUNCH=1 VGPU_HOST_GPU_START_COST=0 VGPU_HOST_GPU_DIV=1 || { echo "FAIL: the $arg run with the idiom on failed"; fails=1; }
   diff -q "$work/off_$arg.out" "$work/div1_$arg.out" > /dev/null || { echo "FAIL: the idiom changes the output of $arg"; fails=1; }
   if [[ $arg == div ]]; then
     grep -q '^cuModuleLoadData$' "$work/div1_div.log" || { echo "FAIL: a plain division did not reach the card path with VGPU_HOST_GPU_DIV=1: $(calls div1_div)"; fails=1; }
@@ -80,7 +86,7 @@ for arg in div rcp divexp; do
   fi
 done
 # 5. a driver that cannot start.
-run on_bad big VGPU_HOST_GPU=exact VGPU_HOST_GPU_NO_FIRST_LAUNCH=1 STUB_FAIL_INIT=1 || { echo "FAIL: the run with a failing driver failed"; tail -5 "$work/on_bad.err"; fails=1; }
+run on_bad big VGPU_HOST_GPU=exact VGPU_HOST_GPU_NO_FIRST_LAUNCH=1 VGPU_HOST_GPU_START_COST=0 STUB_FAIL_INIT=1 || { echo "FAIL: the run with a failing driver failed"; tail -5 "$work/on_bad.err"; fails=1; }
 diff -q "$work/off_big.out" "$work/on_bad.out" > /dev/null || { echo "FAIL: a driver that cannot start changes the output"; fails=1; }
 n="$(grep -c 'cuInit failed; mode off' "$work/on_bad.err")"
 (( n == 1 )) || { echo "FAIL: expected exactly one 'cuInit failed; mode off' line, got $n"; fails=1; }
@@ -90,5 +96,24 @@ env VGPU_GPU="$profile" VGPU_THREADS=4 LD_LIBRARY_PATH="$shim" "$work/prog" heap
 run on_heap heap VGPU_HOST_GPU=exact VGPU_HOST_GPU_NO_FIRST_LAUNCH=1 || { echo "FAIL: the heap run with the mode on failed"; tail -5 "$work/on_heap.err"; fails=1; }
 diff -q "$work/off_heap.out" "$work/on_heap.out" > /dev/null || { echo "FAIL: the mode changes the output of the heap program"; fails=1; }
 [[ ! -s "$work/on_heap.log" ]] || { echo "FAIL: a launch went to the card while the kernel heap held a block: $(calls on_heap)"; fails=1; }
+# 7. the decision charges the driver start: a cost of 1000 s is never repaid, so neither the history rule nor the first-launch rule may start the driver.
+for arg in big; do
+  run "cost_$arg" "$arg" VGPU_HOST_GPU=exact VGPU_HOST_GPU_START_COST=1000 || { echo "FAIL: the $arg run with a start cost of 1000 s failed"; tail -5 "$work/cost_$arg.err"; fails=1; }
+  [[ ! -s "$work/cost_$arg.log" ]] || { echo "FAIL: $arg reached the driver although the start could never be repaid: $(calls "cost_$arg")"; fails=1; }
+  diff -q "$work/off_$arg.out" "$work/cost_$arg.out" > /dev/null || { echo "FAIL: the start cost changes the output of $arg"; fails=1; }
+done
+# 8. the account: `acct` is `big` with 32 times the work per thread. A cost of half its first launch's time (read from a run whose cost is never repaid).
+env VGPU_GPU="$profile" VGPU_THREADS=4 LD_LIBRARY_PATH="$shim" "$work/prog" acct > "$work/off_acct.out" 2> "$work/off_acct.err" || { echo "FAIL: the acct run with the mode off failed"; exit 1; }
+run cost_acct acct VGPU_HOST_GPU=exact VGPU_HOST_GPU_START_COST=1000 || { echo "FAIL: the acct run with a start cost of 1000 s failed"; fails=1; }
+[[ ! -s "$work/cost_acct.log" ]] || { echo "FAIL: acct reached the driver although the start could never be repaid: $(calls cost_acct)"; fails=1; }
+first_cost="$(sed -n 's/^first_launch_ms=\([0-9]*\).*/\1/p' "$work/cost_acct.err" | head -1)"
+if [[ -n "$first_cost" ]] && (( first_cost >= 8 )); then
+  half="$(awk -v ms="$first_cost" 'BEGIN { printf "%.6f", ms / 2000 }')"
+  run acct_run acct VGPU_HOST_GPU=exact VGPU_HOST_GPU_NO_FIRST_LAUNCH=1 VGPU_HOST_GPU_START_COST="$half" || { echo "FAIL: the account run failed"; tail -5 "$work/acct_run.err"; fails=1; }
+  grep -q '^cuInit$' "$work/acct_run.log" || { echo "FAIL: a program that had spent more than the start cost ($half s) in the simulator did not start the driver: $(calls acct_run)"; fails=1; }
+  diff -q "$work/off_acct.out" "$work/acct_run.out" > /dev/null || { echo "FAIL: the account changes the output of acct"; fails=1; }
+else
+  echo "FAIL: the first launch of acct took ${first_cost:-?} ms: too short to halve (the program does 32 times the work of big)"; fails=1
+fi
 (( fails == 0 )) && { echo "PASS: first launch $first ms against a driver start of $init_ms ms; driver calls in the big run: $(calls on_big)"; exit 0; }
 exit 1

@@ -6,7 +6,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <mutex>
+#include <random>
+#include <shared_mutex>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -154,6 +159,160 @@ VTEST(exporting_an_allocation_drops_its_entry) {
   VCHECK(res.count(a) == 0);
   mm.free(a);
   ::unlink(path.c_str());
+}
+
+// ---- the gate's access path (gate_access): settled accesses take the shared lock and change nothing; the rest take the exclusive lock (sp43) ----
+// PolyBench 2DCONV with VGPU_HOST_GPU_VERIFY=1 and 128 MiB live ran for more than 8 CPU-minutes: every simulator access took one exclusive mutex and counted
+// the chunks of the allocation twice (Round sp42 finding 6).
+namespace {
+constexpr uint64_t kChunks128MiB = (128ull << 20) / kChunkSize;
+
+struct GateWorld {
+  std::atomic<uint32_t> slot{0};
+  std::shared_mutex mu;
+  TrackedMap res;
+  std::atomic<uint64_t> pulled{0}, updates{0};
+  explicit GateWorld(uint64_t chunks = kChunks128MiB, Where state = Where::Card) {
+    Tracked t;
+    t.base = 0x1000000;
+    t.size = chunks * kChunkSize;
+    t.r = Residency(chunks);
+    for (uint64_t c = 0; c < chunks; ++c) t.r.set(c, state);
+    t.slot = &slot;
+    slot.store(static_cast<uint32_t>(t.r.card_valid()));
+    res[t.base] = std::move(t);
+  }
+  void access(uint64_t chunk, bool write, uint64_t len = 8) {
+    gate_access(mu, res, 0x1000000 + chunk * kChunkSize, len, write,
+                [&](Tracked&, const std::vector<uint64_t>& idx) { pulled += idx.size(); },
+                [&](Tracked& a) { ++updates; a.slot->store(static_cast<uint32_t>(a.r.card_valid())); });
+  }
+  const Residency& r() { return res.begin()->second.r; }
+};
+
+// What the gate did before: one exclusive mutex, and every chunk counted twice after every access.
+struct LegacyGate {
+  std::atomic<uint32_t> slot{1};
+  std::mutex mu;
+  Residency r{kChunks128MiB};
+  LegacyGate() { r.card_launched(); }
+  void access(uint64_t chunk, bool write) {
+    std::lock_guard<std::mutex> g(mu);
+    if (write) r.sim_write(chunk, chunk, true);
+    else r.sim_read(chunk, chunk);
+    uint64_t card = 0, both = 0;
+    for (uint64_t c = 0; c < r.chunks(); ++c) {
+      card += r.at(c) == Where::Card;
+      both += r.at(c) == Where::Both;
+    }
+    slot.store(static_cast<uint32_t>(card + both));
+  }
+};
+
+template <class F>
+double run_threads(unsigned threads, F&& body) {
+  const auto t0 = std::chrono::steady_clock::now();
+  std::vector<std::thread> th;
+  for (unsigned t = 0; t < threads; ++t) th.emplace_back([&body, t] { body(t); });
+  for (auto& x : th) x.join();
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
+}  // namespace
+
+VTEST(a_settled_access_changes_nothing_and_asks_for_nothing) {
+  GateWorld w(8, Where::Both);
+  for (uint64_t c = 0; c < 8; ++c) w.access(c, false);   // reads of Both chunks
+  VCHECK_EQ(w.updates.load(), uint64_t{0});
+  VCHECK_EQ(w.pulled.load(), uint64_t{0});
+  GateWorld h(8, Where::Host);
+  h.slot.store(1);   // (as if another chunk were valid on the card, so the gate is consulted)
+  for (uint64_t c = 0; c < 8; ++c) { h.access(c, false); h.access(c, true); }   // reads and writes of the simulator's own chunks
+  VCHECK_EQ(h.updates.load(), uint64_t{0});
+  VCHECK_EQ(h.pulled.load(), uint64_t{0});
+}
+
+VTEST(a_read_of_a_card_chunk_pulls_it_once_and_makes_it_shared) {
+  GateWorld w(8, Where::Card);
+  w.access(3, false);
+  VCHECK_EQ(w.pulled.load(), uint64_t{1});
+  VCHECK_EQ(w.updates.load(), uint64_t{1});
+  VCHECK(w.r().at(3) == Where::Both);
+  VCHECK_EQ(w.slot.load(), uint32_t{8});   // still valid on the card
+  w.access(3, false);                      // settled now
+  VCHECK_EQ(w.pulled.load(), uint64_t{1});
+  VCHECK_EQ(w.updates.load(), uint64_t{1});
+}
+
+VTEST(a_write_makes_the_chunk_the_simulators_and_drops_its_card_copy) {
+  GateWorld w(8, Where::Both);
+  w.access(5, true);
+  VCHECK(w.r().at(5) == Where::Host);
+  VCHECK_EQ(w.slot.load(), uint32_t{7});
+  VCHECK_EQ(w.pulled.load(), uint64_t{0});   // a Both chunk has nothing to pull
+  GateWorld c(8, Where::Card);
+  c.access(2, true, 8);                      // a partial write to a chunk only the card has: its bytes come first
+  VCHECK_EQ(c.pulled.load(), uint64_t{1});
+  VCHECK(c.r().at(2) == Where::Host);
+  c.access(4, true, kChunkSize);             // a whole-chunk write: nothing to read first
+  VCHECK_EQ(c.pulled.load(), uint64_t{1});
+  VCHECK(c.r().at(4) == Where::Host);
+  VCHECK_EQ(c.slot.load(), uint32_t{6});
+}
+
+VTEST(an_access_outside_every_entry_or_to_an_entry_without_a_card_copy_is_ignored) {
+  GateWorld w(8, Where::Card);
+  gate_access(w.mu, w.res, 0x10, 8, false, [&](Tracked&, const std::vector<uint64_t>&) { w.pulled++; }, [&](Tracked&) { w.updates++; });   // below every entry
+  gate_access(w.mu, w.res, 0x1000000 + 8 * kChunkSize, 8, false, [&](Tracked&, const std::vector<uint64_t>&) { w.pulled++; }, [&](Tracked&) { w.updates++; });   // just past
+  w.slot.store(0);
+  w.access(1, false);
+  VCHECK_EQ(w.pulled.load(), uint64_t{0});
+  VCHECK_EQ(w.updates.load(), uint64_t{0});
+}
+
+VTEST(threads_reading_card_chunks_pull_each_chunk_exactly_once) {   // a verify run's first pass over a card-valid allocation, four simulator threads
+  GateWorld w(512, Where::Card);
+  run_threads(4, [&](unsigned t) {
+    std::mt19937 rng(t + 1);
+    for (uint64_t i = 0; i < 20000; ++i) w.access(rng() % 512, false);
+    for (uint64_t c = 0; c < 512; ++c) w.access(c, false);   // (every chunk was asked for by every thread)
+  });
+  VCHECK_EQ(w.pulled.load(), uint64_t{512});
+  VCHECK_EQ(w.r().count(Where::Card), uint64_t{0});
+  VCHECK_EQ(w.r().count(Where::Both), uint64_t{512});
+  VCHECK_EQ(w.slot.load(), uint32_t{512});
+}
+
+VTEST(threads_mixing_reads_and_writes_leave_counts_and_the_slot_consistent) {
+  GateWorld w(256, Where::Card);
+  run_threads(4, [&](unsigned t) {
+    std::mt19937 rng(100 + t);
+    for (uint64_t i = 0; i < 40000; ++i) w.access(rng() % 256, rng() % 4 == 0, rng() % 2 ? 8 : kChunkSize);
+  });
+  const Residency& r = w.r();
+  uint64_t n[3] = {0, 0, 0};
+  for (uint64_t c = 0; c < r.chunks(); ++c) ++n[static_cast<unsigned>(r.at(c))];
+  VCHECK_EQ(r.count(Where::Host), n[0]);
+  VCHECK_EQ(r.count(Where::Card), n[1]);
+  VCHECK_EQ(r.count(Where::Both), n[2]);
+  // The slot is the count of card-valid chunks after the last change of any chunk (a change always ends in `update`).
+  VCHECK_EQ(w.slot.load(), static_cast<uint32_t>(n[1] + n[2]));
+}
+
+VTEST(the_gate_with_128_mib_live_is_much_cheaper_than_the_exclusive_scan_it_replaced) {
+  // Four threads read an allocation of 128 MiB (2,048 chunks), all of it valid on the card, the way a verify run's simulator launch does.
+  constexpr uint64_t kAccesses = 40000;
+  GateWorld w;
+  const double now = run_threads(4, [&](unsigned t) {
+    std::mt19937 rng(t + 1);
+    for (uint64_t i = 0; i < kAccesses; ++i) w.access(rng() % kChunks128MiB, false);
+  });
+  LegacyGate old;
+  const double before = run_threads(4, [&](unsigned t) {
+    std::mt19937 rng(t + 1);
+    for (uint64_t i = 0; i < kAccesses; ++i) old.access(rng() % kChunks128MiB, false);
+  });
+  std::printf("gate, 4 threads x %llu reads of 128 MiB: %.3f s now, %.3f s before (%.0fx)\n", static_cast<unsigned long long>(kAccesses), now, before, before / now);
+  VCHECK(now * 5 < before);
 }
 
 VTEST_MAIN
