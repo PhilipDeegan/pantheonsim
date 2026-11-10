@@ -1801,11 +1801,14 @@ static bool link_exit(const tier::MOp& op, bool on) { return on && link_exit_on(
 
 // ... and a CALL.REL to a fixed place of the section and a RET.REL (the loop's tier_ctl): a branch the lanes its guard lets run take, and a branch to the
 // address a register pair holds (OpFacts::call, hostctl 3). With these a kernel and the functions it calls are regions the generated code moves between.
-// ... and a BSYNC (round sp53): the host runs it and names the group the chain would run next (OpFacts::hostctl 4). VGPU_JIT_LINK_BSYNC=0 leaves it the loop's.
+// ... and, with VGPU_JIT_LINK_BSYNC=1 as well, a BSYNC (round sp53): the host runs it and names the group the chain would run next (OpFacts::hostctl 4). It is
+// an opt-in of its own, off by default: it gains 5 % and more on the programs whose region calls end at BSYNCs (silu, bh, black-scholes), and the larger
+// functions it makes cost up to 1 % on programs that have BSYNCs but leave generated code elsewhere (lud, backprop, pathfinder), which is below the bar the
+// round set for it.
 static bool link_bsync_on() {
   static const bool on = [] {
     const char* v = std::getenv("VGPU_JIT_LINK_BSYNC");
-    return !(v && v[0] == '0' && !v[1]);
+    return v && v[0] == '1' && !v[1];
   }();
   return on;
 }

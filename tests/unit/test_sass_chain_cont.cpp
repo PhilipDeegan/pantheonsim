@@ -618,7 +618,7 @@ VTEST(the_groups_of_a_diverged_warp_loop_apart_and_meet_where_the_chain_picks_th
       if (rule && rule[0] == '0') VCHECK_EQ(declined, 0ull);
       else VCHECK(declined >= 10);
     }
-    if (!(std::getenv("VGPU_JIT_LINK_BSYNC") && std::getenv("VGPU_JIT_LINK_BSYNC")[0] == '0')) {
+    if (const char* bs = std::getenv("VGPU_JIT_LINK_BSYNC"); bs && bs[0] == '1') {   // (BSYNC as a region's op is an opt-in of its own: the legs of ctest ask for it)
       std::printf("  BSYNCs run inside generated code: %llu (%llu went on with another group, %llu ended the pass)\n", static_cast<unsigned long long>(sass::jit::stats().bsyncs.load()),
                   static_cast<unsigned long long>(sass::jit::stats().bsync_groups.load()), static_cast<unsigned long long>(sass::jit::stats().bsync_over.load()));
       VCHECK(sass::jit::stats().bsyncs.load() > 1000);
