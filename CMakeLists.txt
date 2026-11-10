@@ -1534,6 +1534,9 @@ add_test(NAME test_exact_threads_tier0 COMMAND test_exact_threads)
 set_tests_properties(test_exact_threads_tier0 PROPERTIES ENVIRONMENT "VGPU_TIER=0")
 add_test(NAME test_exact_threads_fastpath0 COMMAND test_exact_threads)
 set_tests_properties(test_exact_threads_fastpath0 PROPERTIES ENVIRONMENT "VGPU_FASTPATH=0")
+# ... and with every page noted by word from its first touch (VGPU_EXACT_PAGES=0: the note of round sp47, which the note by page must agree with).
+add_test(NAME test_exact_threads_pages0 COMMAND test_exact_threads)
+set_tests_properties(test_exact_threads_pages0 PROPERTIES ENVIRONMENT "VGPU_EXACT_PAGES=0")
 vgpu_unit_test(test_sass_alu_runs)
 # The same kernels with the interpreter's fast path alone (no tier) and with the baseline SIMD kernels.
 add_test(NAME test_sass_alu_runs_tier0 COMMAND test_sass_alu_runs)

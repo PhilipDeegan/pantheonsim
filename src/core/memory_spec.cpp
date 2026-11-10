@@ -2,18 +2,36 @@
 // (vgpu/memory.hpp, "exact parallel launches"; docs/exact-threads.md has the argument for why a trial that commits
 // left the bits of the serial run).
 //
-// One 32-bit word stands for four bytes of the device's address range [va_base_, high_water_va_):
+// The shadow has two levels. A page state stands for 4 KiB of the device's address range [va_base_, high_water_va_):
+//     0                 no block has touched the page
+//     b + 1             block b has read in it; no other block has touched it; nothing is noted by word
+//     kMany             more than one block has read in it, and none has written in it; nothing is noted by word
+//     kWords            the page is noted by word (below), and every word says what was done to its bytes
+//     kWordsCoarse      the same, after one block read in the page by page state and then wrote in it: its reads were
+//                       not noted by word, so every word started as "read by that block" (more than it read)
+// A page moves 0 -> one reader -> many readers by compare-and-swap, or 0 -> kWords, or (its only reader, about to
+// write) its own reader mark -> kWordsCoarse; kMany, kWords and kWordsCoarse are final. A write is only made in a page
+// noted by word. So a page some block read by page state is written by no other block: that block would have to bring
+// the page to a word state, which only the page's sole reader can do, and it fills the words with its own reader mark
+// first.
+//
+// In a page noted by word, one 32-bit word stands for four bytes:
 //     0                 no block has touched the bytes
 //     b + 1             block b has read them, and no other block has touched them
 //     kMany             more than one block has read them, and none has written them
 //     kWrite | (b + 1)  block b has written them (and may have read them); no other block has touched them
 // A word only moves up that list (0 -> one reader -> many readers; 0 or its own reader mark -> its writer), by
-// compare-and-swap, and a block makes its access only after the word allows it. So for any two blocks and any byte:
+// compare-and-swap, and a block makes its access only after the page and the word allow it. So for any two blocks and
+// any byte:
 //   * both read it: nothing to tell apart;
-//   * one writes it and the other reads or writes it: whichever came second to the word found a state it may not
-//     enter, and stopped the trial BEFORE touching the byte.
+//   * one writes it and the other reads or writes it: whichever came second to the page or to the word found a state
+//     it may not enter, and stopped the trial BEFORE touching the byte.
 // A stopped trial is undone from the bytes each block kept when it first wrote a word (it owned the word then, so
 // what it kept is what the launch started with), and the launch is run again in order.
+//
+// A stop at a page state, or at a word of a kWordsCoarse page that says "read", may be the note's fault and not the
+// kernel's (the page says more was read than was). Such a stop is marked coarse and names the allocation; the caller
+// may run the trial again with that allocation noted by word from the start (SpecPlan), which is the exact note.
 #include "vgpu/memory.hpp"
 
 #include <algorithm>
@@ -31,46 +49,68 @@ class MemoryManager::Spec {
  public:
   using Word = std::atomic<uint32_t>;
   static constexpr uint32_t kMany = 0xFFFFFFFFu, kWrite = 0x80000000u;
+  static constexpr uint32_t kWords = 0xFFFFFFFEu, kWordsCoarse = 0xFFFFFFFDu;   // page states only (no block's mark: run_exact tries fewer than 0x7FFFFFF0 blocks)
   static constexpr uint64_t kGranule = 4;          // bytes a word stands for
   static constexpr uint64_t kPageWords = 1024;     // words of a shadow page: 4 KiB of device memory, 4 KiB of shadow
+  static constexpr uint64_t kPageBytes = kGranule * kPageWords;
   static constexpr size_t kPoolPages = 65536;      // shadow pages kept between trials (256 MiB of host memory at most)
   static constexpr uint64_t kKeepLimit = uint64_t{1} << 30;   // bytes one worker may keep for undoing before the trial stops
+  static constexpr size_t kSeen = 64;              // pages a worker remembers it may read without a look at the shadow
+  static constexpr size_t kCoarseKept = 64;        // addresses of coarse stops kept for the caller
+
+  // A page the worker's block may read with no further note: the page's state was the block's own reader mark (`tag` is the block's)
+  // or kMany (`tag` is kMany: any block's, for the rest of the trial) when it was looked at.
+  struct Seen {
+    uint64_t slot = ~uint64_t{0};
+    uint32_t tag = 0;
+  };
 
   struct Worker {
     uint32_t tag = 0;                    // block + 1 of the block it runs now
     std::vector<Word*> fresh;            // zeroed pages ready to install
     std::vector<uint64_t> installed;     // the top-table slots whose pages this worker installed
+    std::vector<uint64_t> noted;         // the slots whose page state this worker moved from 0
     std::vector<std::pair<uint64_t, uint64_t>> kept_at;   // (address, length) of each kept piece, in the order kept
     std::vector<uint8_t> kept;                            // their bytes, one after another
-    // The last page asked for (a block's accesses are mostly near one another).
+    // The last page noted by word that was asked for (a block's accesses are mostly near one another).
     uint64_t last_slot = ~uint64_t{0};
     Word* last_page = nullptr;
     // The allocation the last kept piece was in.
     uint64_t keep_base = 1, keep_end = 0;
     const void* keep_alloc = nullptr;
+    SpecStats st;
+    Seen seen[kSeen];
   };
 
   ~Spec() {
     for (Word* p : pool) std::free(p);
     if (top) ::munmap(top, top_slots * sizeof(std::atomic<Word*>));
+    if (pstate) ::munmap(pstate, top_slots * sizeof(Word));
   }
 
-  // The top table: a slot per shadow page of the range, zero pages of the kernel's until a slot is written.
+  // The top tables: a slot per shadow page of the range (its state, and its page of words once it is noted by word), zero pages of
+  // the kernel's until a slot is written.
   void size_for(uint64_t base_va, uint64_t bytes) {
     base = base_va;
     span = bytes;
     const uint64_t slots = (bytes / kGranule + kPageWords - 1) / kPageWords + 1;
     if (slots <= top_slots) return;
     if (top) ::munmap(top, top_slots * sizeof(std::atomic<Word*>));
-    top_slots = std::max<uint64_t>(slots * 2, 4096);
-    void* m = ::mmap(nullptr, top_slots * sizeof(std::atomic<Word*>), PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (m == MAP_FAILED) {
-      top = nullptr;
-      top_slots = 0;
+    if (pstate) ::munmap(pstate, top_slots * sizeof(Word));
+    top = nullptr;
+    pstate = nullptr;
+    const uint64_t want = std::max<uint64_t>(slots * 2, 4096);
+    top_slots = 0;
+    void* m = ::mmap(nullptr, want * sizeof(std::atomic<Word*>), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (m == MAP_FAILED) throw std::bad_alloc();
+    void* m2 = ::mmap(nullptr, want * sizeof(Word), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (m2 == MAP_FAILED) {
+      ::munmap(m, want * sizeof(std::atomic<Word*>));
       throw std::bad_alloc();
     }
     top = static_cast<std::atomic<Word*>*>(m);   // (zero bytes: null pointers)
+    pstate = static_cast<Word*>(m2);             // (zero bytes: untouched pages)
+    top_slots = want;
   }
 
   Word* fresh_page(Worker& w) {
@@ -91,35 +131,155 @@ class MemoryManager::Spec {
     return static_cast<Word*>(m);
   }
 
-  // The word of granule `g` (below span / kGranule).
-  [[gnu::always_inline]] Word& word(Worker& w, uint64_t g) {
-    const uint64_t slot = g / kPageWords;
-    if (slot != w.last_slot) [[unlikely]] {
-      Word* page = top[slot].load(std::memory_order_acquire);
-      if (!page) {
-        Word* mine = fresh_page(w);
-        if (top[slot].compare_exchange_strong(page, mine, std::memory_order_acq_rel)) {
-          page = mine;
-          w.installed.push_back(slot);
-        } else {
-          w.fresh.push_back(mine);   // another worker's page is there
+  // The words of a page whose state is kWords or kWordsCoarse (installed zeroed by whoever comes first), remembered as the worker's last.
+  Word* word_page(Worker& w, uint64_t slot) {
+    Word* page = top[slot].load(std::memory_order_acquire);
+    if (!page) {
+      Word* mine = fresh_page(w);
+      if (top[slot].compare_exchange_strong(page, mine, std::memory_order_acq_rel)) {
+        page = mine;
+        w.installed.push_back(slot);
+      } else {
+        w.fresh.push_back(mine);   // another worker's page is there
+      }
+    }
+    w.last_slot = slot;
+    w.last_page = page;
+    return page;
+  }
+
+  // Whether the page is noted by word from its first touch (the plan of the trial: SpecPlan).
+  bool by_word(uint64_t slot) const {
+    if (!plan_pages) return true;
+    const uint64_t lo = base + slot * kPageBytes, hi = lo + kPageBytes;
+    for (const auto& [from, to] : plan_words)
+      if (lo < to && from < hi) return true;
+    return false;
+  }
+
+  [[noreturn, gnu::cold, gnu::noinline]] void refuse(const char* reason) {
+    const char* none = nullptr;
+    why.compare_exchange_strong(none, reason, std::memory_order_relaxed);
+    stopped.store(true, std::memory_order_release);
+    throw SpecStop{};
+  }
+  // A stop the coarseness of a page's note may have made (`addr` is in the page).
+  [[noreturn, gnu::cold, gnu::noinline]] void refuse_coarse(uint64_t addr, const char* reason) {
+    {
+      std::lock_guard<std::mutex> g(pool_mu);
+      if (coarse_at.size() < kCoarseKept) coarse_at.push_back(addr);
+    }
+    coarse.store(true, std::memory_order_release);
+    refuse(reason);
+  }
+
+  // A block reads bytes [lo, hi] (offsets in the range, both in page `slot`) and the worker has no memory of the page: the note,
+  // by the page's state when that is enough and by word when the page is noted by word.
+  [[gnu::noinline]] void read_page(Worker& w, uint64_t slot, uint64_t lo, uint64_t hi) {
+    const uint32_t tag = w.tag;
+    Word* page;
+    if (slot == w.last_slot) {
+      page = w.last_page;
+    } else {
+      Word& ps = pstate[slot];
+      uint32_t v = ps.load(std::memory_order_acquire);
+      for (;;) {
+        if (v == kMany || v == tag) {
+          w.seen[slot % kSeen] = {slot, v};
+          return;
+        }
+        if (v == kWords || v == kWordsCoarse) break;
+        if (v == 0) {
+          const uint32_t to = by_word(slot) ? kWords : tag;
+          if (!ps.compare_exchange_weak(v, to, std::memory_order_acq_rel)) continue;
+          w.noted.push_back(slot);
+          ++(to == tag ? w.st.pages_read : w.st.pages_by_word);
+          v = to;
+          continue;
+        }
+        // Another block's reader mark: several readers now.
+        if (ps.compare_exchange_weak(v, kMany, std::memory_order_acq_rel)) {
+          ++w.st.pages_shared;
+          v = kMany;
         }
       }
-      w.last_slot = slot;
-      w.last_page = page;
+      page = word_page(w, slot);
     }
-    return w.last_page[g % kPageWords];
+    const uint64_t g0 = lo / kGranule % kPageWords, g1 = hi / kGranule % kPageWords;
+    w.st.words_read += g1 - g0 + 1;
+    for (uint64_t g = g0; g <= g1; ++g) {
+      Word& word = page[g];
+      uint32_t v = word.load(std::memory_order_acquire);
+      if (v == kMany || v == tag || v == (tag | kWrite)) [[likely]] continue;
+      for (;;) {
+        if (v == 0) {
+          if (word.compare_exchange_weak(v, tag, std::memory_order_acq_rel)) {
+            ++w.st.words_read_first;
+            break;
+          }
+        } else if (v == kMany || v == tag || v == (tag | kWrite)) {
+          break;
+        } else if (v & kWrite) {
+          refuse("a block read what another block wrote");   // (a writer's mark is always exact: no coarse stop here)
+        } else if (word.compare_exchange_weak(v, kMany, std::memory_order_acq_rel)) {
+          ++w.st.words_read_shared;
+          break;
+        }
+      }
+    }
+  }
+
+  // A block is about to write in page `slot` (`addr` is the store's, for a coarse stop): the page comes to be noted by word, or the
+  // trial stops. Leaves the page as the worker's last.
+  [[gnu::noinline]] void write_page(Worker& w, uint64_t slot, uint64_t addr) {
+    const uint32_t tag = w.tag;
+    Word& ps = pstate[slot];
+    uint32_t v = ps.load(std::memory_order_acquire);
+    for (;;) {
+      if (v == kWords || v == kWordsCoarse) break;
+      if (v == 0) {
+        if (!ps.compare_exchange_weak(v, kWords, std::memory_order_acq_rel)) continue;
+        w.noted.push_back(slot);
+        ++w.st.pages_by_word;
+        break;
+      }
+      if (v == tag) {
+        // The page's only reader so far. What it read was not noted by word, so every word starts as read by it; the page of
+        // words is put in place before the state says there is one (no one looks for it earlier).
+        Word* mine = fresh_page(w);
+        for (uint64_t i = 0; i < kPageWords; ++i) mine[i].store(tag, std::memory_order_relaxed);
+        Word* none = nullptr;
+        if (!top[slot].compare_exchange_strong(none, mine, std::memory_order_acq_rel)) {
+          for (uint64_t i = 0; i < kPageWords; ++i) mine[i].store(0, std::memory_order_relaxed);
+          w.fresh.push_back(mine);
+          refuse_coarse(addr, "a page read by page was found noted by word");   // (cannot happen: said, not assumed)
+        }
+        w.installed.push_back(slot);
+        if (ps.compare_exchange_strong(v, kWordsCoarse, std::memory_order_acq_rel)) {
+          ++w.st.pages_coarse;
+          break;
+        }
+        // (another block read in the page meanwhile: v is kMany, and the page of words is never looked at)
+      }
+      refuse_coarse(addr, "a block wrote in a page other blocks read");
+    }
+    word_page(w, slot);
   }
 
   std::atomic<Word*>* top = nullptr;
+  Word* pstate = nullptr;
   uint64_t top_slots = 0;
   uint64_t base = 0, span = 0;
   bool host_maps = false;
+  bool plan_pages = true;
+  std::vector<std::pair<uint64_t, uint64_t>> plan_words;
   std::atomic<bool> stopped{false};
+  std::atomic<bool> coarse{false};
   std::atomic<const char*> why{nullptr};
   std::vector<Worker> workers;
   std::mutex pool_mu;
   std::vector<Word*> pool;   // zeroed pages
+  std::vector<uint64_t> coarse_at;   // under pool_mu
 };
 
 namespace {
@@ -135,13 +295,18 @@ bool MemoryManager::spec_possible() const {
   return high_water_va_ > va_base_;
 }
 
-void MemoryManager::spec_begin(unsigned workers) {
+void MemoryManager::spec_begin(unsigned workers, const SpecPlan* plan) {
   if (!spec_kept_) spec_kept_ = std::make_shared<Spec>();
   Spec& s = *spec_kept_;
   s.size_for(va_base_, high_water_va_ - va_base_);
   s.host_maps = memo_host_maps();
+  s.plan_pages = plan ? plan->pages : true;
+  s.plan_words.clear();
+  if (plan) s.plan_words = plan->by_word;
   s.stopped.store(false, std::memory_order_relaxed);
+  s.coarse.store(false, std::memory_order_relaxed);
   s.why.store(nullptr, std::memory_order_relaxed);
+  s.coarse_at.clear();
   s.workers.clear();
   s.workers.resize(workers);
   spec_ = &s;
@@ -162,11 +327,23 @@ void MemoryManager::spec_stop(const char* why) {
   spec_->stopped.store(true, std::memory_order_release);
 }
 
-void MemoryManager::spec_refuse(const char* why) const {
-  const char* none = nullptr;
-  spec_->why.compare_exchange_strong(none, why, std::memory_order_relaxed);
-  spec_->stopped.store(true, std::memory_order_release);
-  throw SpecStop{};
+void MemoryManager::spec_refuse(const char* why) const { spec_->refuse(why); }
+
+void MemoryManager::SpecStats::add(const SpecStats& o) {
+  hooks += o.hooks;
+  pages_read += o.pages_read;
+  pages_shared += o.pages_shared;
+  pages_by_word += o.pages_by_word;
+  pages_coarse += o.pages_coarse;
+  page_looks += o.page_looks;
+  words_read += o.words_read;
+  words_read_first += o.words_read_first;
+  words_read_shared += o.words_read_shared;
+  words_written += o.words_written;
+  words_written_first += o.words_written_first;
+  keeps += o.keeps;
+  runs_as_one += o.runs_as_one;
+  warps_in_a_page += o.warps_in_a_page;
 }
 
 MemoryManager::SpecOutcome MemoryManager::spec_end() {
@@ -177,7 +354,9 @@ MemoryManager::SpecOutcome MemoryManager::spec_end() {
   if (const char* why = s.why.load(std::memory_order_relaxed)) out.why = why;
   for (Spec::Worker& w : s.workers) {
     out.kept_bytes += w.kept.size();
-    out.shadow_pages += w.installed.size();
+    out.shadow_pages += w.noted.size();
+    out.stats.add(w.st);
+    out.stats.word_pages += w.installed.size();
     if (!out.committed) {
       // Each piece is what the launch started with at bytes only this worker's blocks wrote, so the order of putting back is free.
       uint64_t at = 0;
@@ -187,9 +366,22 @@ MemoryManager::SpecOutcome MemoryManager::spec_end() {
       }
     }
   }
-  // The shadow goes back to nothing: every installed page is zeroed and pooled, its slot cleared.
+  if (!out.committed && s.coarse.load(std::memory_order_acquire)) {
+    // The allocations the coarse stops were in: what a second trial notes by word from the start.
+    out.coarse = true;
+    SharedGuard table_guard(table_lock_.get());
+    for (const uint64_t addr : s.coarse_at) {
+      auto up = live_.upper_bound(addr);
+      if (up == live_.begin()) continue;
+      const auto it = std::prev(up);
+      const std::pair<uint64_t, uint64_t> range{it->first, it->first + it->second.size};
+      if (addr < range.second && std::find(out.by_word.begin(), out.by_word.end(), range) == out.by_word.end()) out.by_word.push_back(range);
+    }
+  }
+  // The shadow goes back to nothing: every page state is cleared, every installed page is zeroed and pooled, its slot cleared.
   std::lock_guard<std::mutex> g(s.pool_mu);
   for (Spec::Worker& w : s.workers) {
+    for (const uint64_t slot : w.noted) s.pstate[slot].store(0, std::memory_order_relaxed);
     for (const uint64_t slot : w.installed) {
       Spec::Word* page = s.top[slot].exchange(nullptr, std::memory_order_acq_rel);
       if (s.pool.size() < Spec::kPoolPages) {
@@ -205,11 +397,13 @@ MemoryManager::SpecOutcome MemoryManager::spec_end() {
     }
   }
   s.workers.clear();
+  s.coarse_at.clear();
   return out;
 }
 
 void MemoryManager::spec_keep(uint64_t addr, uint64_t len) const {
   Spec::Worker& w = *t_spec_worker;
+  ++w.st.keeps;
   if (w.kept.size() + len > Spec::kKeepLimit) spec_refuse("the undo log passed its limit");
   // Wholly inside the allocation the last piece was in (the table cannot change during a launch: an allocation or a free stops the trial).
   if (addr >= w.keep_base && addr + len <= w.keep_end) {
@@ -249,28 +443,19 @@ void MemoryManager::spec_keep(uint64_t addr, uint64_t len) const {
   // nothing at all, which the access itself reports.
   if (off >= s.span) return;
   Spec::Worker& w = *static_cast<Spec::Worker*>(worker);
-  const uint32_t tag = w.tag;
-  const uint64_t g1 = (std::min(off + len, s.span) - 1) / Spec::kGranule;
-  for (uint64_t g = off / Spec::kGranule; g <= g1; ++g) {
-    Spec::Word& word = s.word(w, g);
-    uint32_t v = word.load(std::memory_order_acquire);
-    if (v == Spec::kMany || v == tag || v == (tag | Spec::kWrite)) [[likely]] continue;
-    for (;;) {
-      if (v == 0) {
-        if (word.compare_exchange_weak(v, tag, std::memory_order_acq_rel)) break;
-      } else if (v == Spec::kMany || v == tag || v == (tag | Spec::kWrite)) {
-        break;
-      } else if (v & Spec::kWrite) {
-        spec_refuse("a block read what another block wrote");
-      } else if (word.compare_exchange_weak(v, Spec::kMany, std::memory_order_acq_rel)) {
-        break;
-      }
-    }
+  const uint64_t last = std::min(off + len, s.span) - 1;
+  const uint64_t slot1 = last / Spec::kPageBytes;
+  for (uint64_t slot = off / Spec::kPageBytes; slot <= slot1; ++slot) {
+    // A page this block read by page state before, or that several blocks have: nothing more to note (no block can write in it).
+    const Spec::Seen& seen = w.seen[slot % Spec::kSeen];
+    if (seen.slot == slot && (seen.tag == w.tag || seen.tag == Spec::kMany)) [[likely]] continue;
+    ++w.st.page_looks;
+    s.read_page(w, slot, std::max(off, slot * Spec::kPageBytes), std::min(last, slot * Spec::kPageBytes + Spec::kPageBytes - 1));
   }
 }
 
-// A block is about to write [addr, addr + len): it comes to own every word of it, and the bytes of the words it did
-// not own yet are kept first.
+// A block is about to write [addr, addr + len): its pages come to be noted by word, it comes to own every word of it, and the
+// bytes of the words it did not own yet are kept first.
 [[gnu::always_inline]] inline void MemoryManager::spec_write_in(Spec& s, void* worker, uint64_t addr, uint64_t len) const {
   const uint64_t off = addr - s.base;
   // A store the shadow has no word for (host memory another thread or process may share; an address that is no
@@ -286,8 +471,12 @@ void MemoryManager::spec_keep(uint64_t addr, uint64_t len) const {
     spec_keep(s.base + run * Spec::kGranule, (upto - run) * Spec::kGranule);
     run = ~uint64_t{0};
   };
+  w.st.words_written += g1 - off / Spec::kGranule + 1;
   for (uint64_t g = off / Spec::kGranule; g <= g1; ++g) {
-    Spec::Word& word = s.word(w, g);
+    const uint64_t slot = g / Spec::kPageWords;
+    // (A stop in write_page leaves the words taken in this call unkept: they are still unwritten, so undoing leaves them as they are.)
+    if (slot != w.last_slot) [[unlikely]] s.write_page(w, slot, s.base + g * Spec::kGranule);
+    Spec::Word& word = w.last_page[g % Spec::kPageWords];
     uint32_t v = word.load(std::memory_order_acquire);
     for (;;) {
       if (v == mine) {
@@ -296,12 +485,17 @@ void MemoryManager::spec_keep(uint64_t addr, uint64_t len) const {
       }
       if (v == 0 || v == w.tag) {
         if (!word.compare_exchange_weak(v, mine, std::memory_order_acq_rel)) continue;
+        ++w.st.words_written_first;
         if (run == ~uint64_t{0}) run = g;
         break;
       }
       // Another block's word, or one several blocks read. The words taken in this call are still unwritten: kept or not, undoing
       // leaves them as they are.
-      spec_refuse(v != Spec::kMany && (v & Spec::kWrite) ? "two blocks wrote the same bytes" : "a block wrote what another block read");
+      if (v != Spec::kMany && (v & Spec::kWrite)) spec_refuse("two blocks wrote the same bytes");
+      // A reader's mark, which in a page that was first read by page state may say more than was read.
+      if (s.pstate[slot].load(std::memory_order_acquire) == Spec::kWordsCoarse)
+        s.refuse_coarse(s.base + g * Spec::kGranule, "a block wrote what another block read");
+      spec_refuse("a block wrote what another block read");
     }
   }
   keep(g1 + 1);
@@ -312,6 +506,7 @@ void MemoryManager::spec_keep(uint64_t addr, uint64_t len) const {
   if (spec_->stopped.load(std::memory_order_relaxed)) throw SpecStop{};
   Spec::Worker* w = t_spec_worker;
   if (!w) spec_refuse("a thread outside the launch used device memory");
+  ++w->st.hooks;
   return w;
 }
 
@@ -325,25 +520,68 @@ void MemoryManager::spec_write(uint64_t addr, uint64_t len) const {
   if (len) spec_write_in(*spec_, w, addr, len);
 }
 
+// A warp's accesses, `size` bytes at each address. The same bytes are noted whichever way the lanes are walked; two shapes are noted
+// in one step: lanes one after another in memory (addrs[i] = addrs[0] + i * size) are one range, and, for reads, lanes that all lie in
+// one page the worker's block may read without a note need one look at the worker's memory of that page.
 void MemoryManager::spec_read_each(const uint64_t* addrs, size_t count, uint32_t size) const {
-  void* w = spec_worker();
+  void* worker = spec_worker();
   Spec& s = *spec_;
-  if (size)
-    for (size_t i = 0; i < count; ++i) spec_read_in(s, w, addrs[i], size);
+  if (!size || !count) return;
+  if (count > 1) {
+    Spec::Worker& w = *static_cast<Spec::Worker*>(worker);
+    const uint64_t a0 = addrs[0];
+    uint64_t apart = 0, gaps = 0, ends = 0;
+    for (size_t i = 1; i < count; ++i) {
+      apart |= addrs[i] ^ a0;                 // bits in which a lane's address differs from the first lane's
+      gaps |= addrs[i] - (a0 + i * size);     // nonzero when the lanes are not one after another
+      ends |= (addrs[i] + (size - 1)) ^ a0;   // ... and its last byte's
+    }
+    if (gaps == 0 && a0 + uint64_t{count} * size > a0) {
+      ++w.st.runs_as_one;
+      spec_read_in(s, worker, a0, uint64_t{count} * size);
+      return;
+    }
+    // (va_base_ is a multiple of the page size, so equal address bits above the page's are the same page of the range.)
+    const uint64_t off = a0 - s.base;
+    if (((apart | ends | ((a0 + (size - 1)) ^ a0)) >> 12) == 0 && s.base % Spec::kPageBytes == 0 && off < s.span) {
+      const uint64_t slot = off / Spec::kPageBytes;
+      const Spec::Seen& seen = w.seen[slot % Spec::kSeen];
+      if (seen.slot == slot && (seen.tag == w.tag || seen.tag == Spec::kMany)) {
+        ++w.st.warps_in_a_page;
+        return;
+      }
+    }
+  }
+  for (size_t i = 0; i < count; ++i) spec_read_in(s, worker, addrs[i], size);
 }
 
 void MemoryManager::spec_write_each(const uint64_t* addrs, size_t count, uint32_t size) const {
-  void* w = spec_worker();
+  void* worker = spec_worker();
   Spec& s = *spec_;
-  if (size)
-    for (size_t i = 0; i < count; ++i) spec_write_in(s, w, addrs[i], size);
+  if (!size || !count) return;
+  if (count > 1) {
+    const uint64_t a0 = addrs[0];
+    uint64_t gaps = 0;
+    for (size_t i = 1; i < count; ++i) gaps |= addrs[i] - (a0 + i * size);
+    if (gaps == 0 && a0 + uint64_t{count} * size > a0) {
+      ++static_cast<Spec::Worker*>(worker)->st.runs_as_one;
+      spec_write_in(s, worker, a0, uint64_t{count} * size);
+      return;
+    }
+  }
+  for (size_t i = 0; i < count; ++i) spec_write_in(s, worker, addrs[i], size);
 }
 
 void MemoryManager::spec_write_strided(uint64_t a0, int64_t stride, size_t count, uint32_t size) const {
-  void* w = spec_worker();
+  void* worker = spec_worker();
   Spec& s = *spec_;
-  if (size)
-    for (size_t i = 0; i < count; ++i) spec_write_in(s, w, a0 + static_cast<uint64_t>(stride) * i, size);
+  if (!size || !count) return;
+  if (count > 1 && stride == static_cast<int64_t>(size) && a0 + uint64_t{count} * size > a0) {
+    ++static_cast<Spec::Worker*>(worker)->st.runs_as_one;
+    spec_write_in(s, worker, a0, uint64_t{count} * size);
+    return;
+  }
+  for (size_t i = 0; i < count; ++i) spec_write_in(s, worker, a0 + static_cast<uint64_t>(stride) * i, size);
 }
 
 }  // namespace vgpu

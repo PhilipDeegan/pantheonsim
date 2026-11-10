@@ -151,6 +151,13 @@ std::vector<Insn> chain() {
   c.insert(c.end(), {ldg_off(3, 10, 0), iadd3i(3, 3, 1, kRZ), stg(10, 3, 4 * kThreads), exit_()});
   return c;
 }
+// In place: buf[i] = buf[i] + 1. Every block reads and writes its own 64 words, and sixteen blocks share each 4 KiB page: a note by
+// page cannot tell them apart, a note by word can.
+std::vector<Insn> in_place() {
+  std::vector<Insn> c = prologue();
+  c.insert(c.end(), {ldg_off(3, 10, 0), iadd3i(3, 3, 1, kRZ), stg(10, 3, 0), exit_()});
+  return c;
+}
 // buf[i] = block, then a store to buf + block * 2^28: far outside every allocation for block 1 and later (block 0 writes buf[0] again).
 std::vector<Insn> faults_from_block_1() {
   std::vector<Insn> c = prologue();
@@ -169,6 +176,7 @@ struct Result {
   exec::LaunchStats stats;
   std::string error;   // what the launch threw ("" when it returned)
   sass::ExactCounts counts;   // of this launch alone
+  uint64_t buf = 0;           // where the launch's buffer was
 };
 
 struct Env {
@@ -197,6 +205,7 @@ struct Env {
     std::vector<uint8_t> arg(8);
     std::memcpy(arg.data(), &buf, 8);
     Result r;
+    r.buf = buf;
     const sass::ExactCounts before = sass::exact_counts();
     try {
       r.stats = sass::launch(m, "k", cfg, {arg}, mem, prof);
@@ -208,7 +217,7 @@ struct Env {
       if (const size_t at = r.error.find(far); at != std::string::npos) r.error.replace(at, std::strlen(far), "buf+2^28");
     }
     const sass::ExactCounts after = sass::exact_counts();
-    r.counts = {after.trials - before.trials, after.committed - before.committed, after.stopped - before.stopped};
+    r.counts = {after.trials - before.trials, after.committed - before.committed, after.stopped - before.stopped, after.again - before.again};
     r.words.resize(kWords);
     mem.read(buf, r.words.data(), uint64_t{kWords} * 4);
     mem.free(buf);
@@ -346,12 +355,27 @@ VTEST(nothing_is_tried_without_the_variable_or_without_blocks_in_order) {
 // ---- the shadow itself: every method that touches device bytes is noted ----
 
 namespace {
+// VGPU_EXACT_PAGES=0 (the fourth way this test is run): every page noted by word from its first touch.
+bool pages_on() {
+  const char* v = std::getenv("VGPU_EXACT_PAGES");
+  return !(v && v[0] == '0' && !v[1]);
+}
 struct Trial {
   MemoryManager& mem;
-  explicit Trial(MemoryManager& m) : mem(m) {
-    mem.spec_begin(2);
+  explicit Trial(MemoryManager& m, const MemoryManager::SpecPlan* plan = nullptr) : mem(m) {
+    static const MemoryManager::SpecPlan words_only = [] {
+      MemoryManager::SpecPlan p;
+      p.pages = false;
+      return p;
+    }();
+    mem.spec_begin(2, plan ? plan : pages_on() ? nullptr : &words_only);
     mem.spec_enter(0);
     mem.spec_block(0);
+  }
+  // This thread goes on as worker `worker` (0 or 1: each has its own memory of the pages it has seen) running block `block`.
+  void as(unsigned worker, uint64_t block) {
+    mem.spec_enter(worker);
+    mem.spec_block(block);
   }
   ~Trial() {
     if (mem.spec_active()) end();
@@ -549,6 +573,466 @@ VTEST(a_device_with_memory_the_shadow_cannot_see_is_not_tried) {
   VCHECK(!vmm.spec_possible());   // a reservation: the same bytes may be mapped at two addresses
   vmm.address_free(va, MemoryManager::kVmmGranularity);
   VCHECK(vmm.spec_possible());
+}
+
+// ---- the note by page (round sp55): pages that are only read are noted as a whole, and nothing a note by word stops gets through ----
+
+namespace {
+constexpr uint64_t kPage = 4096;
+// A device of its own with one allocation of `pages` pages and six bytes, every byte set; `p` is the first page boundary in it.
+struct Paged {
+  MemoryManager mem{1 << 24};
+  uint64_t a = 0, p = 0, size = 0;
+  std::vector<uint8_t> init;
+  explicit Paged(uint64_t pages) {
+    size = (pages + 1) * kPage + 6;
+    a = mem.alloc(size);
+    p = (a + kPage - 1) / kPage * kPage;
+    init.resize(size);
+    for (size_t i = 0; i < init.size(); ++i) init[i] = static_cast<uint8_t>(i * 29 + 3);
+    mem.write(a, init.data(), init.size());
+  }
+  std::vector<uint8_t> all() {
+    std::vector<uint8_t> now(size);
+    mem.read(a, now.data(), size);
+    return now;
+  }
+  void put_back() { mem.write(a, init.data(), size); }
+  bool rd(uint64_t at, uint64_t len) {
+    uint8_t b[16];
+    return stops([&] { mem.read(at, b, len); });
+  }
+  bool wr(uint64_t at, uint64_t len) {
+    const uint8_t b[16] = {0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF, 0xB0};
+    return stops([&] { mem.write(at, b, len); });
+  }
+};
+// Whether the words of [x, x + xl) and of [y, y + yl) meet (a word is four bytes of the address range).
+bool words_meet(uint64_t x, uint64_t xl, uint64_t y, uint64_t yl) { return x / 4 <= (y + yl - 1) / 4 && y / 4 <= (x + xl - 1) / 4; }
+// Every class of place in a page: each byte of the first, a middle and the last word, and accesses that end in the next page.
+struct Place {
+  uint64_t off, len;
+};
+std::vector<Place> places() {
+  std::vector<Place> v;
+  for (const uint64_t word : {uint64_t{0}, uint64_t{4}, uint64_t{2044}, uint64_t{2048}, uint64_t{4088}, uint64_t{4092}})
+    for (uint64_t byte = 0; byte < 4; ++byte)
+      for (const uint64_t len : {uint64_t{1}, uint64_t{2}, uint64_t{3}, uint64_t{4}, uint64_t{5}, uint64_t{8}}) v.push_back({word + byte, len});
+  return v;
+}
+}  // namespace
+
+VTEST(a_page_that_blocks_only_read_is_noted_as_a_whole_and_a_page_a_block_writes_in_by_word) {
+  Paged d(3);
+  Trial t(d.mem);
+  VCHECK(!d.rd(d.p + 100, 4));
+  VCHECK(!d.rd(d.p + 3000, 8));     // the same page: the worker remembers it
+  t.as(1, 1);
+  VCHECK(!d.rd(d.p + 100, 4));      // a second reader: the page is several blocks' now
+  VCHECK(!d.rd(d.p + 7, 2));
+  VCHECK(!d.wr(d.p + kPage + 8, 4));   // another page, written first: by word
+  t.as(0, 0);
+  VCHECK(!d.rd(d.p + kPage + 12, 4));  // ... where a word next to another block's is free
+  VCHECK(!d.wr(d.p + kPage + 16, 4));
+  const MemoryManager::SpecOutcome out = t.end();
+  VCHECK(out.committed);
+  if (pages_on()) {
+    VCHECK_EQ(out.stats.pages_read, uint64_t{1});
+    VCHECK_EQ(out.stats.pages_shared, uint64_t{1});
+    VCHECK_EQ(out.stats.pages_by_word, uint64_t{1});
+    VCHECK_EQ(out.stats.word_pages, uint64_t{1});
+    VCHECK_EQ(out.stats.words_read, uint64_t{1});          // the one read in the written page
+    VCHECK_EQ(out.stats.words_read_first, uint64_t{1});
+  } else {
+    VCHECK_EQ(out.stats.pages_read, uint64_t{0});
+    VCHECK_EQ(out.stats.pages_by_word, uint64_t{2});
+    VCHECK_EQ(out.stats.words_read, uint64_t{2 + 2 + 1 + 1 + 1});
+  }
+  VCHECK_EQ(out.stats.words_written_first, uint64_t{2});
+  VCHECK_EQ(out.kept_bytes, uint64_t{8});
+  VCHECK_EQ(out.shadow_pages, uint64_t{2});
+  // The shadow is empty again: a block may write where two blocks read in the last trial.
+  Trial again(d.mem);
+  VCHECK(!d.wr(d.p + 100, 4));
+  VCHECK(again.end().committed);
+}
+
+// The adversary of the note by page: block 0 claims a page whole (as its reader, or as its reader and then a writer in it), and a
+// second block, on the same worker or on another, touches the page at every class of place. Nothing may get through that a note
+// by word stops; whatever is stopped is undone to the byte; and what only the coarseness stopped is said to be coarse, names the
+// allocation, and goes through when the trial is run again with the allocation noted by word.
+VTEST(a_second_block_in_a_page_another_block_claimed_whole_is_stopped_before_its_access_at_every_place) {
+  Paged d(3);
+  const uint64_t x = d.p + 100, y = d.p + 200;   // what block 0 reads, and what it writes
+  const std::pair<uint64_t, uint64_t> whole{d.a, d.a + d.size};
+  for (const unsigned other : {0u, 1u}) {
+    for (const Place& pl : places()) {
+      const uint64_t at = d.p + pl.off;
+      const std::string where = "offset " + std::to_string(pl.off) + ", " + std::to_string(pl.len) + " bytes, worker " + std::to_string(other);
+      // (1) Block 0 read in the page; block 1 writes in it.
+      {
+        Trial t(d.mem);
+        VCHECK(!d.rd(x, 4));
+        t.as(other, 1);
+        const bool stopped = d.wr(at, pl.len);
+        const MemoryManager::SpecOutcome out = t.end();
+        if (pages_on()) {
+          if (!stopped || out.committed) throw vtest::Failure("a write in a page another block read by page went on: " + where);
+          VCHECK(out.coarse);
+          VCHECK(out.by_word == (std::vector<std::pair<uint64_t, uint64_t>>{whole}));
+          VCHECK(d.all() == d.init);
+          // Again, by word: only a write of the very word block 0 read is stopped.
+          MemoryManager::SpecPlan plan;
+          plan.by_word = out.by_word;
+          Trial t2(d.mem, &plan);
+          VCHECK(!d.rd(x, 4));
+          t2.as(other, 1);
+          VCHECK_EQ(d.wr(at, pl.len), words_meet(at, pl.len, x, 4));
+          const MemoryManager::SpecOutcome out2 = t2.end();
+          VCHECK(!out2.coarse);
+          VCHECK_EQ(out2.committed, !words_meet(at, pl.len, x, 4));
+        } else {
+          VCHECK_EQ(stopped, words_meet(at, pl.len, x, 4));
+          VCHECK(!out.coarse);
+        }
+        d.put_back();
+      }
+      // (2) Block 0 read in the page, block 1 read in it at the place; then block 0 writes at the place, and block 1 somewhere else.
+      for (const bool first_writes : {true, false}) {
+        Trial t(d.mem);
+        VCHECK(!d.rd(x, 4));
+        t.as(other, 1);
+        VCHECK(!d.rd(at, pl.len));
+        if (first_writes) t.as(0, 0);
+        const uint64_t target = first_writes ? at : x;
+        const uint64_t tlen = first_writes ? pl.len : 4;
+        const bool stopped = d.wr(target, tlen);
+        const MemoryManager::SpecOutcome out = t.end();
+        // By word: block 0 writing where block 1 read is a conflict; block 1 writing what block 0 read is too.
+        if (!stopped || out.committed) throw vtest::Failure("a write of what another block read went on: " + where);
+        VCHECK(d.all() == d.init);
+        if (!pages_on()) VCHECK(!out.coarse);
+      }
+      // (3) Block 0 read in the page and then wrote in it (the page's words all say "read by block 0"); block 1 reads at the place.
+      {
+        Trial t(d.mem);
+        VCHECK(!d.rd(x, 4));
+        VCHECK(!d.wr(y, 4));
+        VCHECK(!d.rd(d.p + 300, 4));   // (its own page still)
+        t.as(other, 1);
+        const bool hit = words_meet(at, pl.len, y, 4);
+        if (d.rd(at, pl.len) != hit) throw vtest::Failure(std::string(hit ? "a read of what another block wrote went on: " : "a read beside another block's store was stopped: ") + where);
+        const MemoryManager::SpecOutcome out = t.end();
+        VCHECK_EQ(out.committed, !hit);
+        VCHECK(!out.coarse);   // a writer's mark is exact
+        if (hit) VCHECK(d.all() == d.init);
+        d.put_back();
+      }
+      // (4) The same, and block 1 writes at the place: stopped everywhere with pages (coarse, unless it is block 0's written word),
+      // only at the words block 0 touched without.
+      {
+        Trial t(d.mem);
+        VCHECK(!d.rd(x, 4));
+        VCHECK(!d.wr(y, 4));
+        t.as(other, 1);
+        const bool stopped = d.wr(at, pl.len);
+        const bool real = words_meet(at, pl.len, y, 4) || words_meet(at, pl.len, x, 4);
+        const MemoryManager::SpecOutcome out = t.end();
+        if (pages_on()) {
+          if (!stopped || out.committed) throw vtest::Failure("a write in a page another block read and wrote in went on: " + where);
+          if (at / 4 == y / 4) VCHECK(!out.coarse);   // the first word it meets is block 0's written one
+          else if (!real) VCHECK(out.coarse);
+        } else {
+          VCHECK_EQ(stopped, real);
+          VCHECK(!out.coarse);
+        }
+        if (stopped) VCHECK(d.all() == d.init);
+        d.put_back();
+      }
+      // (5) Block 0 wrote in the untouched page first (by word from the start): block 1 is stopped at block 0's word only, never coarsely.
+      for (const bool reads : {true, false}) {
+        Trial t(d.mem);
+        VCHECK(!d.wr(y, 4));
+        t.as(other, 1);
+        const bool stopped = reads ? d.rd(at, pl.len) : d.wr(at, pl.len);
+        VCHECK_EQ(stopped, words_meet(at, pl.len, y, 4));
+        const MemoryManager::SpecOutcome out = t.end();
+        VCHECK_EQ(out.committed, !stopped);
+        VCHECK(!out.coarse);
+        if (stopped) VCHECK(d.all() == d.init);
+        d.put_back();
+      }
+    }
+  }
+}
+
+VTEST(what_a_worker_remembers_of_a_page_is_the_block_s_and_not_the_next_block_s) {
+  // One worker runs block 0 and then block 1; both read the same page. If block 1 went by what the worker remembered for block 0,
+  // its read would not be noted, and block 0's later write in the page would be let through.
+  Paged d(70);
+  {
+    Trial t(d.mem);
+    VCHECK(!d.rd(d.p + 8, 4));
+    t.as(0, 1);
+    VCHECK(!d.rd(d.p + 8, 4));
+    t.as(0, 0);
+    VCHECK(d.wr(d.p + 8, 4));
+    VCHECK(!t.end().committed);
+  }
+  {
+    // Two pages that share a place in the worker's memory (64 pages apart): the memory of one must not answer for the other.
+    Trial t(d.mem);
+    t.as(1, 1);
+    VCHECK(!d.wr(d.p + 64 * kPage + 8, 4));
+    t.as(0, 0);
+    VCHECK(!d.rd(d.p + 8, 4));
+    VCHECK(!d.rd(d.p + 8, 4));
+    VCHECK(d.rd(d.p + 64 * kPage + 8, 4));   // block 1 wrote it
+    VCHECK(!t.end().committed);
+  }
+  VCHECK(d.all() == d.init);
+}
+
+VTEST(a_warp_s_lanes_are_noted_as_one_range_or_one_page_and_stopped_where_lane_by_lane_would_be) {
+  Paged d(4);
+  uint64_t addrs[32], v[64] = {};
+  // Lanes one after another: one range. A word in the middle is another block's: the load and the store are stopped, nothing is written.
+  for (int i = 0; i < 32; ++i) addrs[i] = d.p + 64 + 4 * i;
+  for (const int taken : {0, 13, 31}) {
+    for (const bool store : {false, true}) {
+      Trial t(d.mem);
+      VCHECK(!d.wr(addrs[taken], 4));
+      t.as(1, 1);
+      VCHECK(stops([&] { store ? (void)d.mem.store_batch(addrs, 32, 4, v) : (void)d.mem.load_batch(addrs, 32, 4, v); }));
+      const MemoryManager::SpecOutcome out = t.end();
+      VCHECK(!out.committed && !out.coarse);
+      VCHECK_EQ(out.stats.runs_as_one, uint64_t{1});
+      VCHECK(d.all() == d.init);
+    }
+  }
+  {
+    // A store of 32 lanes one after another keeps its 128 bytes as one piece, and a later stop puts every one of them back.
+    Trial t(d.mem);
+    for (int i = 0; i < 32; ++i) v[i] = 0xD0D0D0D0u + i;
+    VCHECK(d.mem.store_batch(addrs, 32, 4, v));
+    VCHECK(d.mem.store_strided(d.p + 1024, 8, 16, 8, v));
+    VCHECK(d.mem.store_strided(d.p + 2048, 16, 4, 8, v));   // (not one after another: lane by lane)
+    t.as(1, 1);
+    VCHECK(d.rd(addrs[31], 1));
+    const MemoryManager::SpecOutcome out = t.end();
+    VCHECK(!out.committed);
+    VCHECK_EQ(out.stats.keeps, uint64_t{1 + 1 + 4});
+    VCHECK_EQ(out.stats.runs_as_one, uint64_t{2});
+    VCHECK_EQ(out.kept_bytes, uint64_t{128 + 128 + 32});
+    VCHECK(d.all() == d.init);
+  }
+  // Lanes scattered over one page the block may read: one look. A lane in another page, or whose last byte is, is still noted:
+  // that page holds another block's store.
+  for (const int stray : {-1, 0, 7, 31}) {
+    for (const uint64_t stray_at : {d.p + 2 * kPage + 16, d.p + kPage - 4}) {
+      Trial t(d.mem);
+      const uint32_t size = stray_at % kPage == kPage - 4 ? 8 : 4;   // (the second: eight bytes that end in the next page)
+      if (stray >= 0) VCHECK(!d.wr(stray_at + size - 4, 4));
+      t.as(1, 1);
+      for (int i = 0; i < 32; ++i) addrs[i] = d.p + kPage - 8 - 16 * ((i * 7) % 32);
+      if (stray >= 0) addrs[stray] = stray_at;
+      if (stray != 0) VCHECK(!d.rd(d.p + 8, 4));   // the block has seen the page
+      const bool stopped = stops([&] { d.mem.load_batch(addrs, 32, size, v); });
+      VCHECK_EQ(stopped, stray >= 0);
+      const MemoryManager::SpecOutcome out = t.end();
+      VCHECK_EQ(out.committed, stray < 0);
+      if (pages_on() && stray < 0) VCHECK_EQ(out.stats.warps_in_a_page, uint64_t{1});
+      VCHECK(d.all() == d.init);
+    }
+  }
+  {
+    // ... and a lane that starts in the page before (in another block's store) and ends in the page the block may read.
+    Trial t(d.mem);
+    VCHECK(!d.wr(d.p + kPage - 4, 4));
+    t.as(1, 1);
+    VCHECK(!d.rd(d.p + kPage + 8, 4));
+    for (int i = 0; i < 32; ++i) addrs[i] = d.p + kPage + 16 * ((i * 7) % 32);
+    addrs[5] = d.p + kPage - 4;
+    VCHECK(stops([&] { d.mem.load_batch(addrs, 32, 8, v); }));
+    VCHECK(!t.end().committed);
+    VCHECK(d.all() == d.init);
+  }
+}
+
+// Random interleavings of four blocks on two workers over five pages, against a model that keeps the four word states of
+// docs/exact-threads.md for every word. Noted by word throughout, the shadow must stop exactly the access the model stops.
+// Noted by page, it must stop every access the model stops and may stop earlier, but then says the stop was coarse, and with the
+// allocation noted by word the same run is the model's again. A stopped trial leaves the bytes of before; a kept one the stores.
+VTEST(random_blocks_against_a_model_of_the_word_states) {
+  Paged d(4);
+  const uint64_t words = (d.size + 3) / 4 + 2;
+  const uint64_t w0 = d.a / 4;
+  uint64_t seed = 0x9E3779B97F4A7C15ull;
+  const auto rnd = [&](uint64_t n) {
+    seed ^= seed << 13, seed ^= seed >> 7, seed ^= seed << 17;
+    return seed % n;
+  };
+  struct Op {
+    unsigned block, kind;   // 0 read, 1 write, 2 a warp's load, 3 a warp's store, 4 a warp's scattered load, 6 a warp's scattered store
+    uint64_t at, len;
+  };
+  unsigned kept = 0, stopped_real = 0, stopped_coarse = 0;
+  for (int round = 0; round < 600; ++round) {
+    std::vector<Op> ops(8 + rnd(40));
+    const bool apart = rnd(4) != 0;   // mostly blocks that write in their own quarter, so that many runs get far
+    for (Op& o : ops) {
+      o.block = static_cast<unsigned>(rnd(4));
+      o.kind = static_cast<unsigned>(rnd(22));
+      o.kind = o.kind < 8 ? 0 : o.kind < 12 ? 1 : o.kind < 20 ? 2 + (o.kind - 12) / 2 : o.kind == 20 ? 6 : 2;   // (5 is a read of a long range)
+      const uint64_t quarter = d.size / 4;
+      const bool writes = o.kind == 1 || o.kind == 3 || o.kind == 6;
+      const uint64_t lo = writes && apart ? o.block * quarter : 0, span = writes && apart ? quarter - 200 : d.size - 200;
+      o.at = d.a + lo + rnd(span);
+      o.len = o.kind == 5 ? 1 + rnd(6000) : 1 + rnd(9);
+      if (o.kind == 5) o.at = d.a + rnd(d.size - 6000), o.kind = 0;
+      if (o.kind >= 2) o.at &= ~uint64_t{3}, o.len = 2 + rnd(o.kind == 6 ? 14 : 31);   // lanes of four bytes (kind 6: every third word)
+    }
+    // The run under `plan`; says how it ended and, when it stopped, at which op (-1: none).
+    const auto play = [&](const MemoryManager::SpecPlan* plan, MemoryManager::SpecOutcome* out, std::vector<uint8_t>* expect) {
+      std::vector<uint32_t> state(words, 0);   // the model: 0, block + 1, ~0 (several readers), 0x80000000 | block + 1
+      *expect = d.init;
+      Trial t(d.mem, plan);
+      int at_op = -1;
+      for (size_t i = 0; i < ops.size() && at_op < 0; ++i) {
+        const Op& o = ops[i];
+        t.as(o.block % 2, o.block);
+        const uint32_t tag = o.block + 1;
+        uint64_t addrs[32], v[32];
+        const uint64_t lanes = o.len;
+        bool model_stop = false;
+        const auto touch = [&](uint64_t a, uint64_t n, bool write) {
+          for (uint64_t g = a / 4; g <= (a + n - 1) / 4 && !model_stop; ++g) {
+            uint32_t& s = state[g - w0];
+            if (write) {
+              if (s == 0 || s == tag || s == (tag | 0x80000000u)) s = tag | 0x80000000u;
+              else model_stop = true;
+            } else {
+              if (s == 0) s = tag;
+              else if (s == tag || s == ~0u || s == (tag | 0x80000000u)) {}
+              else if (s & 0x80000000u) model_stop = true;
+              else s = ~0u;
+            }
+          }
+        };
+        bool got = false;
+        if (o.kind == 0) {
+          touch(o.at, o.len, false);
+          std::vector<uint8_t> b(o.len);
+          got = stops([&] { d.mem.read(o.at, b.data(), o.len); });
+        } else if (o.kind == 1) {
+          touch(o.at, o.len, true);
+          std::vector<uint8_t> b(o.len, static_cast<uint8_t>(0xC0 + i));
+          got = stops([&] { d.mem.write(o.at, b.data(), o.len); });
+          if (!got) std::fill(expect->begin() + (o.at - d.a), expect->begin() + (o.at - d.a) + o.len, static_cast<uint8_t>(0xC0 + i));
+        } else {
+          for (uint64_t l = 0; l < lanes; ++l) {
+            addrs[l] = o.kind == 4 ? (o.at & ~(kPage - 1)) + 4 * ((l * 37 + i) % 1024) : o.kind == 6 ? o.at + 12 * l : o.at + 4 * l;
+            if (addrs[l] + 4 > d.a + d.size || addrs[l] < d.a) addrs[l] = o.at;
+            v[l] = 0x01010101u * static_cast<uint32_t>(i + 1);
+          }
+          for (uint64_t l = 0; l < lanes && !model_stop; ++l) touch(addrs[l], 4, o.kind == 3 || o.kind == 6);
+          if (o.kind == 3 || o.kind == 6) {
+            got = stops([&] {
+              if (!d.mem.store_batch(addrs, lanes, 4, v))
+                for (uint64_t l = 0; l < lanes; ++l) d.mem.store_scalar(addrs[l], 4, v[l]);
+            });
+            if (!got)
+              for (uint64_t l = 0; l < lanes; ++l) std::memcpy(expect->data() + (addrs[l] - d.a), &v[l], 4);
+          } else {
+            got = stops([&] { d.mem.load_batch(addrs, lanes, 4, v); });
+          }
+        }
+        if (model_stop && !got) throw vtest::Failure("round " + std::to_string(round) + ", op " + std::to_string(i) + ": the model stops this access and the shadow let it through");
+        if (got) {
+          at_op = static_cast<int>(i);
+          if (!model_stop) at_op += 1000000;   // stopped where the model goes on
+        }
+      }
+      *out = t.end();
+      return at_op;
+    };
+    MemoryManager::SpecPlan words_only;
+    words_only.pages = false;
+    MemoryManager::SpecOutcome exact_out, page_out, again_out;
+    std::vector<uint8_t> exact_expect, page_expect, again_expect;
+    const int exact_at = play(&words_only, &exact_out, &exact_expect);
+    if (exact_at >= 1000000) throw vtest::Failure("round " + std::to_string(round) + ": noted by word, the shadow stopped an access the model lets through");
+    VCHECK_EQ(exact_out.committed, exact_at < 0);
+    VCHECK(!exact_out.coarse);
+    VCHECK(d.all() == (exact_at < 0 ? exact_expect : d.init));
+    d.put_back();
+    const int page_at = play(nullptr, &page_out, &page_expect);
+    VCHECK_EQ(page_out.committed, page_at < 0);
+    VCHECK(d.all() == (page_at < 0 ? page_expect : d.init));
+    d.put_back();
+    if (page_at >= 1000000) {
+      // Earlier than the model: only ever as a coarse stop, and never without the page grain.
+      VCHECK(pages_on());
+      VCHECK(page_out.coarse);
+      VCHECK(page_out.by_word == (std::vector<std::pair<uint64_t, uint64_t>>{{d.a, d.a + d.size}}));
+      MemoryManager::SpecPlan plan;
+      plan.by_word = page_out.by_word;
+      const int again_at = play(&plan, &again_out, &again_expect);
+      VCHECK_EQ(again_at, exact_at);
+      VCHECK(!again_out.coarse);
+      VCHECK(d.all() == (again_at < 0 ? again_expect : d.init));
+      d.put_back();
+      ++stopped_coarse;
+    } else {
+      VCHECK_EQ(page_at, exact_at);
+      ++(page_at < 0 ? kept : stopped_real);
+    }
+  }
+  // (every kind of ending was met: the test is not vacuous)
+  VCHECK(kept >= 20);
+  VCHECK(stopped_real >= 20);
+  if (pages_on()) VCHECK(stopped_coarse >= 20);
+  else VCHECK_EQ(stopped_coarse, 0u);
+}
+
+VTEST(a_kernel_whose_blocks_share_pages_they_read_and_write_is_tried_again_by_word_and_kept) {
+  Restore restore;
+  Env e;
+  in_order();
+  const Result ref = e.run(*e.load(in_place()), 300);
+  for (uint32_t i = 0; i < 300 * kThreads; ++i) VCHECK_EQ(ref.words[i], 3 * i + 8);
+  for (const char* n : {"2", "4", "8"}) {
+    exact(n);
+    const auto m = e.load(in_place());
+    uint64_t learned = 0;
+    for (int launch = 0; launch < 3; ++launch) {
+      const Result got = e.run(*m, 300);
+      VCHECK(got.words == ref.words);
+      same_counters(got.stats, ref.stats, std::string("in place, VGPU_EXACT_THREADS=") + n);
+      VCHECK_EQ(got.counts.trials, uint64_t{1});
+      VCHECK_EQ(got.counts.committed, uint64_t{1});
+      // The first launch meets the coarse stop and learns the buffer; a later one notes it by word from the start (when its buffer
+      // is where the learned one was: every run has a buffer of its own).
+      VCHECK_EQ(got.counts.again, static_cast<uint64_t>(pages_on() && got.buf != learned));
+      learned = got.buf;
+    }
+  }
+}
+
+VTEST(a_chain_stopped_by_a_coarse_note_is_tried_by_word_and_then_run_in_order) {
+  // chain(): block b reads the row block b - 1 wrote, in pages both touch. By page the first stop may be coarse; the second trial is
+  // by word, meets the real conflict, and the launch runs in order.
+  Restore restore;
+  Env e;
+  exact("4");
+  const auto m = e.load(chain());
+  const Result got = e.run(*m, 200);
+  VCHECK_EQ(got.counts.trials, uint64_t{1});
+  VCHECK_EQ(got.counts.stopped, uint64_t{1});
+  if (!pages_on()) VCHECK_EQ(got.counts.again, uint64_t{0});
+  else VCHECK(got.counts.again <= 3);
+  for (uint32_t b = 1; b <= 200; ++b)
+    for (uint32_t t = 0; t < kThreads; ++t) VCHECK_EQ(got.words[b * kThreads + t], 3 * t + 7 + b);
 }
 
 VTEST_MAIN
