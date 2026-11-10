@@ -165,6 +165,8 @@ int main(int argc, char** argv) {
     typedef int (*compile_t)(void*, int, const char* const*);
     create_t create = h ? (create_t)dlsym(h, "nvrtcCreateProgram") : NULL;
     compile_t compile = h ? (compile_t)dlsym(h, "nvrtcCompileProgram") : NULL;
+    typedef int (*destroy_t)(void**);
+    destroy_t destroy = h ? (destroy_t)dlsym(h, "nvrtcDestroyProgram") : NULL;
     if (!create || !compile) {
       expect(0, "libnvrtc loads");
     } else {
@@ -179,6 +181,7 @@ int main(int argc, char** argv) {
         rc = compile(prog, 2, opts);
         snprintf(what, sizeof what, "NVRTC takes %s (result %d is not NVRTC_ERROR_INVALID_OPTION)", kOpts[i], rc);
         expect(rc != 5, what);
+        if (destroy && prog) destroy(&prog);
       }
     }
   }
