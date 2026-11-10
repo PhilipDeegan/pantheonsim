@@ -15,6 +15,8 @@ struct LaunchEnv {
   const char* threads = nullptr;      // VGPU_THREADS
   const char* exact_threads = nullptr;   // VGPU_EXACT_THREADS
   const char* exact_log = nullptr;    // VGPU_EXACT_LOG
+  const char* exact_pages = nullptr;  // VGPU_EXACT_PAGES
+  const char* exact_stats = nullptr;  // VGPU_EXACT_STATS
   const char* lockstep = nullptr;     // VGPU_LOCKSTEP
   const char* trace = nullptr;        // VGPU_TRACE
   const char* strict = nullptr;       // VGPU_STRICT

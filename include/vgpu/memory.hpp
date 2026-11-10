@@ -651,17 +651,49 @@ class MemoryManager {
   // What stops a trial is thrown as this, from the access that found it, and by every later access of the trial.
   struct SpecStop {};
   class Spec;   // the shadow and the undo log (src/core/memory_spec.cpp)
+  //
+  // The note is kept at two grains (src/core/memory_spec.cpp). A 4 KiB page that blocks only read is noted as a whole: one
+  // state for the page (untouched, read by one block, read by several) and nothing per word. A page a block writes in is
+  // noted by word from then on. A block that writes in a page it alone has read by page state takes every word of the page as
+  // read by it, which is more than it read; a stop that such a page, or a page state, may have made by itself is "coarse": the
+  // trial is undone like any other, and the caller may try again with the allocation noted by word from the start.
+  struct SpecPlan {
+    bool pages = true;   // false: every page is noted by word from its first touch
+    std::vector<std::pair<uint64_t, uint64_t>> by_word;   // [first, end) address ranges noted by word from the first touch
+  };
+  // What the notes of a trial cost, for VGPU_EXACT_STATS and the tests (sums over the workers).
+  struct SpecStats {
+    uint64_t hooks = 0;                 // calls of the hooks
+    uint64_t pages_read = 0;            // pages a block took as their first reader, by page state
+    uint64_t pages_shared = 0;          // ... that a second block then read (several readers)
+    uint64_t pages_by_word = 0;         // pages noted by word from their first touch
+    uint64_t pages_coarse = 0;          // pages their only reader went on to write in (every word marked read by it)
+    uint64_t page_looks = 0;            // reads that had to look at the shadow (no memory of the page, the run or the words)
+    uint64_t words_read = 0;            // words looked at for a read in pages noted by word
+    uint64_t words_read_first = 0;      // ... taken by compare-and-swap as their first reader
+    uint64_t words_read_shared = 0;     // ... moved to several readers by compare-and-swap
+    uint64_t words_written = 0;         // words looked at for a write
+    uint64_t words_written_first = 0;   // ... taken by compare-and-swap (their bytes are kept)
+    uint64_t keeps = 0;                 // pieces kept for undoing
+    uint64_t runs_known = 0;            // accesses inside a run of words the worker remembered its block had noted
+    uint64_t word_pages = 0;            // pages of words put in place
+    void add(const SpecStats& o);
+  };
   struct SpecOutcome {
     bool committed = false;
     const char* why = "";          // what stopped the trial ("" when it committed)
     uint64_t kept_bytes = 0;       // bytes kept for undoing
     uint64_t shadow_pages = 0;     // 4 KiB pages of device memory the blocks touched
+    bool coarse = false;           // stopped, and a note coarser than the words may have made the stop
+    std::vector<std::pair<uint64_t, uint64_t>> by_word;   // the allocations of the coarse stops: what to add to the next trial's SpecPlan
+    SpecStats stats;
   };
   // Whether the device's memory can be shadowed at all: nothing mapped twice or outside the chunk tables (virtual-memory
   // reservations and handles, shared-file memory), no fault armed, no card behind it, no result cache or trace listening.
   bool spec_possible() const;
   // The launching thread, before the blocks: starts a trial for `workers` host threads. Nothing else may use the device until spec_end.
-  void spec_begin(unsigned workers);
+  // `plan` (null: every page may be noted as a whole) says what is noted by word from the start.
+  void spec_begin(unsigned workers, const SpecPlan* plan = nullptr);
   // A host thread of the trial says which worker it is (0 .. workers-1), then which block it is about to run; spec_leave when it has no more.
   void spec_enter(unsigned worker);
   void spec_block(uint64_t block);

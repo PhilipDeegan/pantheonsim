@@ -101,6 +101,9 @@ struct Module {
   // tried again, and waits `second` launches after the next stop (twice as many each time, 4096 at most; a trial that commits puts
   // it back to 1). Under polling_mu. Which launches are tried moves time only: a launch leaves the same bits tried or not.
   mutable std::map<std::string, std::pair<uint32_t, uint32_t>> exact_hold;
+  // What a kernel's trials note by word from the start (MemoryManager::SpecPlan): the allocations in which a note by page stopped
+  // an earlier trial of the kernel. Under polling_mu. Which grain a trial notes at moves time only.
+  mutable std::map<std::string, MemoryManager::SpecPlan> exact_plan;
 
   // What a launch of a kernel finds out about it from the module, the same every time: which constant banks are backed by device
   // memory, where and how big (a bank is named by 5 bits of an instruction), the kernel's own bank 0 template and where its code
@@ -167,6 +170,7 @@ uint64_t unsupported_cache_hits();
 // reports; the counts change no result).
 struct ExactCounts {
   uint64_t trials = 0, committed = 0, stopped = 0;
+  uint64_t again = 0;   // trials stopped by a coarse note and run a second time with the allocation noted by word (not in `trials`)
 };
 ExactCounts exact_counts();
 

@@ -1,0 +1,24 @@
+polybench/ATAX               VGPU_THREADS=1                               wall   1.449 cpu   1.449 rc 0
+polybench/ATAX               VGPU_THREADS=1,VGPU_EXACT_THREADS=2,VGPU_EXACT_PAGES=0 wall   1.646 cpu   3.184 rc 0
+   trials {'committed': 2}  hooks=25167872  pages=32784  pages_read=0  pages_shared=0  pages_by_word=32784  pages_coarse=0  page_looks=146800640  words_read=276824064  words_read_first=33562624  words_read_shared=8192  words_written=268500992  words_written_first=8192  keeps=256  kept_bytes=32768  runs_as_one=0  warps_in_a_page=0  word_pages=32784
+polybench/GESUMMV            VGPU_THREADS=1                               wall   0.393 cpu   0.393 rc 0
+polybench/GESUMMV            VGPU_THREADS=1,VGPU_EXACT_THREADS=2,VGPU_EXACT_PAGES=0 wall   0.532 cpu   0.896 rc 0
+   trials {'committed': 1}  hooks=4194688  pages=32780  pages_read=0  pages_shared=0  pages_by_word=32780  pages_coarse=0  page_looks=35651840  words_read=68165632  words_read_first=33566720  words_read_shared=4096  words_written=33558528  words_written_first=8192  keeps=256  kept_bytes=32768  runs_as_one=0  warps_in_a_page=0  word_pages=32780
+polybench/GEMVER             VGPU_THREADS=1                               wall   0.645 cpu   0.644 rc 0
+polybench/GEMVER             VGPU_THREADS=1,VGPU_EXACT_THREADS=2,VGPU_EXACT_PAGES=0 wall   0.770 cpu   1.291 rc 0
+   trials {'committed': 3}  hooks=6292096  pages=49188  pages_read=0  pages_shared=0  pages_by_word=49188  pages_coarse=0  page_looks=20972032  words_read=85999616  words_read_first=50368512  words_read_shared=24576  words_written=50335744  words_written_first=16785408  keeps=524544  kept_bytes=67141632  runs_as_one=0  warps_in_a_page=0  word_pages=49188
+polybench/JACOBI2D           VGPU_THREADS=1                               wall   0.553 cpu   0.552 rc 0
+polybench/JACOBI2D           VGPU_THREADS=1,VGPU_EXACT_THREADS=2,VGPU_EXACT_PAGES=0 wall   0.666 cpu   1.234 rc 0
+   trials {'committed': 40}  hooks=5109760  pages=78100  pages_read=0  pages_shared=0  pages_by_word=78100  pages_coarse=0  page_looks=3929100  words_read=119520480  words_read_first=39920000  words_read_shared=5880080  words_written=39840160  words_written_first=39840160  keeps=1277440  kept_bytes=159360640  runs_as_one=0  warps_in_a_page=0  word_pages=78100
+hecbench/s3d-cuda            VGPU_THREADS=1                               wall   0.386 cpu   0.386 rc 0
+hecbench/s3d-cuda            VGPU_THREADS=1,VGPU_EXACT_THREADS=2,VGPU_EXACT_PAGES=0 wall   0.497 cpu   0.783 rc 0
+   trials {'committed': 54}  hooks=3375072  pages=67293  pages_read=0  pages_shared=0  pages_by_word=67293  pages_coarse=0  page_looks=2639792  words_read=61603568  words_read_first=55393565  words_read_shared=1309  words_written=28907008  words_written_first=26265088  keeps=668080  kept_bytes=105060352  runs_as_one=0  warps_in_a_page=0  word_pages=67293
+rodinia/sc_gpu               VGPU_THREADS=1                               wall   0.676 cpu   0.675 rc 0
+rodinia/sc_gpu               VGPU_THREADS=1,VGPU_EXACT_THREADS=2,VGPU_EXACT_PAGES=0 wall   0.935 cpu   1.431 rc 0
+   trials {'committed': 1432}  hooks=7497004  pages=186543  pages_read=0  pages_shared=0  pages_by_word=186543  pages_coarse=0  page_looks=34724144  words_read=131102208  words_read_first=122379365  words_read_shared=31813  words_written=6266288  words_written_first=6199278  keeps=6198805  kept_bytes=24797112  runs_as_one=0  warps_in_a_page=0  word_pages=186543
+polybench/JACOBI1D           VGPU_THREADS=1                               wall   0.991 cpu   0.990 rc 0
+polybench/JACOBI1D           VGPU_THREADS=1,VGPU_EXACT_THREADS=2,VGPU_EXACT_PAGES=0 wall   0.979 cpu   0.989 rc 0
+   trials {'committed': 108}  hooks=57856  pages=923  pages_read=0  pages_shared=0  pages_by_word=923  pages_coarse=0  page_looks=44386  words_read=940348  words_read_first=442388  words_read_shared=1888  words_written=442152  words_written_first=442152  keeps=13824  kept_bytes=1768608  runs_as_one=0  warps_in_a_page=0  word_pages=923
+polybench/LU                 VGPU_THREADS=1                               wall  28.654 cpu  28.652 rc 0
+polybench/LU                 VGPU_THREADS=1,VGPU_EXACT_THREADS=2,VGPU_EXACT_PAGES=0 wall  26.119 cpu  48.621 rc 0
+   trials {'committed': 1939}  hooks=183194960  pages=2104366  pages_read=0  pages_shared=0  pages_by_word=2104366  pages_coarse=0  page_looks=152842429  words_read=2960036162  words_read_first=1451527949  words_read_shared=2114584  words_written=1449413365  words_written_first=1449413365  keeps=45799024  kept_bytes=5797653460  runs_as_one=0  warps_in_a_page=0  word_pages=2104366
