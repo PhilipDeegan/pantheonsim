@@ -143,6 +143,7 @@ void set_mem_trace(MemTraceHook hook) { g_mem_trace.store(hook, std::memory_orde
   do { if (MemTraceHook h_ = g_mem_trace.load(std::memory_order_relaxed)) h_(op, a, b); } while (0)
 
 uint64_t MemoryManager::alloc(uint64_t size, uint64_t request) {
+  if (spec_) [[unlikely]] spec_refuse("an allocation during the launch");
   // A new entry in the table makes no answer a thread remembered wrong, so readers' memories stay.
   ExclusiveGuard table_guard(table_lock_.get(), /*quiet=*/true);
   if (size == 0) throw Error::make(Err::InvalidValue, "cudaMalloc-style allocation of 0 bytes is invalid");
@@ -199,6 +200,7 @@ void MemoryManager::remember_freed(uint64_t ptr, uint64_t size) {
 }
 
 void MemoryManager::free(uint64_t ptr) {
+  if (spec_) [[unlikely]] spec_refuse("a free during the launch");
   if (memo_sink_) memo_sink_->on_free(ptr);
   // The gate is told of every free, not only while some allocation holds a card copy: it tracks allocations that have none (a launch the size rule
   // refused still registers them), and an entry that outlives its allocation points into a freed record and reads freed memory.
@@ -253,6 +255,7 @@ void MemoryManager::free(uint64_t ptr) {
 }
 
 uint64_t MemoryManager::heap_alloc(uint64_t size, uint64_t limit) {
+  if (spec_) [[unlikely]] spec_refuse("a device allocation during the launch");
   std::lock_guard<std::mutex> guard(heap_->mu);
   // Out of heap is a null pointer, not a failure, as on the device: each
   // thread's malloc stands alone, and the program is expected to check it.
@@ -270,6 +273,7 @@ uint64_t MemoryManager::heap_alloc(uint64_t size, uint64_t limit) {
 }
 
 bool MemoryManager::heap_free(uint64_t ptr) {
+  if (spec_) [[unlikely]] spec_refuse("a device free during the launch");
   std::lock_guard<std::mutex> guard(heap_->mu);
   const auto it = heap_->blocks.find(ptr);
   if (it == heap_->blocks.end()) return false;
@@ -285,6 +289,7 @@ uint64_t MemoryManager::heap_used() const {
 }
 
 uint64_t MemoryManager::intern_string(const std::string& text) {
+  if (spec_) [[unlikely]] spec_refuse("a string made during the launch");
   std::lock_guard<std::mutex> guard(heap_->mu);
   const auto it = heap_->strings.find(text);
   if (it != heap_->strings.end()) return it->second;
@@ -654,6 +659,7 @@ bool MemoryManager::batch_ok(const uint64_t* addrs, size_t count, uint32_t size,
 }
 
 bool MemoryManager::batch_window(const uint64_t* addrs, size_t count, uint32_t size, BatchWindow* window) const {
+  if (spec_) [[unlikely]] return false;   // (a trial takes the plain path, which is noted)
   if (count == 0 || (size != 1 && size != 2 && size != 4 && size != 8)) return false;
   if (!batch_faults_clear(false) || !batch_faults_clear(true)) return false;
   const Allocation* a = nullptr;
@@ -711,6 +717,7 @@ template <uint32_t kSize, class Slow>
 }  // namespace
 
 bool MemoryManager::load_batch(const uint64_t* addrs, size_t count, uint32_t size, uint64_t* out, uint8_t* hint) const {
+  if (spec_) [[unlikely]] spec_read_each(addrs, count, size);
   if (count == 0 || (size != 1 && size != 2 && size != 4 && size != 8)) return false;
   if (!batch_faults_clear(/*store=*/false)) return false;
   const Allocation* a = nullptr;
@@ -744,6 +751,7 @@ bool MemoryManager::load_batch(const uint64_t* addrs, size_t count, uint32_t siz
 // address that is not 8-byte aligned, a piece outside the allocation the first lies in (the whole 16 bytes must be inside it), a 16-byte access that
 // crosses the end of a chunk (its halves are in two chunks, either of which may be untouched, uniform or real), a host mapping in reach, a fault armed.
 bool MemoryManager::load_batch16(const uint64_t* addrs, size_t count, uint64_t* lo, uint64_t* hi, uint8_t* hint) const {
+  if (spec_) [[unlikely]] spec_read_each(addrs, count, 16);
   if (count == 0 || count > 64) return false;
   if (!batch_faults_clear(/*store=*/false)) return false;
   uint64_t base = 0;
@@ -777,6 +785,7 @@ bool MemoryManager::load_batch16(const uint64_t* addrs, size_t count, uint64_t* 
 // copied to every lane. The word is a legal outcome of the lanes' loads one by one (a store from another thread between them could show different
 // words to different lanes; the lanes of one warp are one instruction).
 bool MemoryManager::load_broadcast(uint64_t addr, size_t count, uint32_t size, uint64_t* out, uint8_t* hint) const {
+  if (spec_) [[unlikely]] spec_read(addr, size);
   if (count == 0 || count > 32 || (size != 1 && size != 2 && size != 4 && size != 8) || (addr & (size - 1))) return false;
   if (!batch_faults_clear(/*store=*/false)) return false;
   uint64_t base = 0;
@@ -797,6 +806,7 @@ bool MemoryManager::load_broadcast(uint64_t addr, size_t count, uint32_t size, u
 }
 
 bool MemoryManager::store_strided(uint64_t a0, int64_t stride, size_t count, uint32_t size, const uint64_t* vals, size_t* failed_at, uint8_t* hint) {
+  if (spec_) [[unlikely]] spec_write_strided(a0, stride, count, size);
   constexpr int64_t kHalf = static_cast<int64_t>(kChunkSize / 2);
   if (count < 2 || count > 32 || (size != 1 && size != 2 && size != 4 && size != 8) || stride > kHalf || stride < -kHalf) return false;
   if ((a0 | static_cast<uint64_t>(stride)) & (size - 1)) return false;
@@ -862,6 +872,7 @@ void MemoryManager::store_batch_in(Allocation& a, uint64_t base, const uint64_t*
 
 bool MemoryManager::store_batch(const uint64_t* addrs, size_t count, uint32_t size, const uint64_t* vals,
                                 size_t* failed_at, uint8_t* hint) {
+  if (spec_) [[unlikely]] spec_write_each(addrs, count, size);
   const Allocation* ca = nullptr;
   uint64_t base = 0;
   if (!batch_ok(addrs, count, size, /*store=*/true, &ca, &base, hint)) return false;
@@ -901,6 +912,7 @@ bool MemoryManager::host_load_batch(const uint64_t* addrs, size_t count, uint32_
 }
 
 bool MemoryManager::host_store_batch(const uint64_t* addrs, size_t count, uint32_t size, const uint64_t* vals) {
+  if (spec_) [[unlikely]] spec_write_each(addrs, count, size);
   HostHit h;
   if (!host_batch_hit(addrs, count, size, /*store=*/true, &h)) return false;
   const auto each = [&](auto width) {
@@ -917,11 +929,13 @@ bool MemoryManager::host_store_batch(const uint64_t* addrs, size_t count, uint32
 }
 
 void MemoryManager::batch_load(const BatchWindow& window, const uint64_t* addrs, size_t count, uint32_t size, uint64_t* out) const {
+  if (spec_) [[unlikely]] spec_read_each(addrs, count, size);
   load_batch_in(*static_cast<const Allocation*>(window.alloc), window.base, addrs, count, size, out);
 }
 
 void MemoryManager::batch_store(const BatchWindow& window, const uint64_t* addrs, size_t count, uint32_t size, const uint64_t* vals,
                                 size_t* failed_at) {
+  if (spec_) [[unlikely]] spec_write_each(addrs, count, size);
   store_batch_in(const_cast<Allocation&>(*static_cast<const Allocation*>(window.alloc)), window.base, addrs, count, size, vals, failed_at);
 }
 
@@ -957,6 +971,7 @@ uint8_t* MemoryManager::materialize(Allocation& a, uint64_t chunk_idx) {
 }
 
 void MemoryManager::fill(uint64_t dst, const uint8_t* pattern, uint32_t pattern_len, uint64_t len) {
+  if (spec_) [[unlikely]] spec_write(dst, len);
   if (len == 0) return;
   if (memo_sink_) memo_sink_->on_fill(dst, pattern, pattern_len, len);
   VGPU_MEM_TRACE('Z', dst, len);
@@ -1029,6 +1044,7 @@ uint64_t MemoryManager::resident_bytes() const {
 }
 
 void MemoryManager::write(uint64_t dst, const void* src, uint64_t len) {
+  if (spec_) [[unlikely]] spec_write(dst, len);
   if (len == 0) return;
   if (memo_sink_) memo_sink_->on_write(dst, src, len);
   VGPU_MEM_TRACE('W', dst, len);
@@ -1658,6 +1674,7 @@ void MemoryManager::drop_shared(std::map<uint64_t, SharedRegion>::iterator it) {
 }
 
 uint8_t* MemoryManager::host_address(uint64_t addr, uint64_t len) const {
+  if (spec_) [[unlikely]] spec_write(addr, len);
   if (!host_maps_->may_contain(addr)) return nullptr;
   HostHit h;
   if (!lookup_host(addr, len, &h)) return nullptr;
@@ -1674,6 +1691,7 @@ bool MemoryManager::is_host_mapped(uint64_t addr) const {
 }
 
 void MemoryManager::read(uint64_t src, void* dst, uint64_t len) const {
+  if (spec_) [[unlikely]] spec_read(src, len);
   if (len == 0) return;
   VGPU_MEM_TRACE('R', src, len);
   // Managed memory is the caller's own buffer; there is no chunk table to walk.
@@ -1771,6 +1789,7 @@ const MemoryManager::Allocation* MemoryManager::run_allocation(uint64_t addr, ui
 }
 
 bool MemoryManager::load_run(uint64_t addr, void* dst, uint64_t len, uint32_t unit, uint8_t* hint) const {
+  if (spec_) [[unlikely]] spec_read(addr, len);
   if (len == 0) return true;
   uint64_t base = 0;
   const Allocation* a = run_allocation(addr, len, unit, &base, hint);
@@ -1790,6 +1809,7 @@ bool MemoryManager::load_run(uint64_t addr, void* dst, uint64_t len, uint32_t un
 }
 
 bool MemoryManager::store_run(uint64_t addr, const void* src, uint64_t len, uint32_t unit, uint8_t* hint) {
+  if (spec_) [[unlikely]] spec_write(addr, len);
   if (len == 0) return true;
   uint64_t base = 0;
   auto* a = const_cast<Allocation*>(run_allocation(addr, len, unit, &base, hint));
@@ -1831,6 +1851,7 @@ bool MemoryManager::load_host_run(uint64_t addr, void* dst, uint64_t len, uint32
 }
 
 bool MemoryManager::store_host_run(uint64_t addr, const void* src, uint64_t len, uint32_t unit) {
+  if (spec_) [[unlikely]] spec_write(addr, len);
   HostHit h;
   if (len == 0 || !host_run_hit(addr, len, unit, /*store=*/true, &h)) return false;
   run_in(h.host + (addr - h.base), static_cast<const uint8_t*>(src), len, unit);
@@ -1840,6 +1861,7 @@ bool MemoryManager::store_host_run(uint64_t addr, const void* src, uint64_t len,
 // (cold and out of line: a large copy is rare beside the kernels' accesses, and its code stays out of the hot text, whose layout moves the
 // interpreters' rows by a few percent at equal instructions)
 [[gnu::cold, gnu::noinline]] bool MemoryManager::copy_to(MemoryManager& dst_mm, uint64_t dst, uint64_t src, uint64_t len) const {
+  if (spec_ || dst_mm.spec_) [[unlikely]] (spec_ ? this : &dst_mm)->spec_refuse("a device-to-device copy during the launch");
   if (len == 0) return true;
   const uint64_t len_in = len;
   // read() takes a fault armed on copies and write() none; run_allocation declines the others (loads, stores, stuck cells).
@@ -1959,6 +1981,7 @@ bool MemoryManager::find_allocation(uint64_t addr, uint64_t* base, uint64_t* siz
 }
 
 uint64_t MemoryManager::load_scalar(uint64_t addr, uint32_t size) const {
+  if (spec_) [[unlikely]] spec_read(addr, size);
   if (size != 1 && size != 2 && size != 4 && size != 8)
     throw Error::make(Err::Internal, "load_scalar: bad size ", size);
   if ((addr & (size - 1)) != 0)   // size is 1, 2, 4 or 8, checked above
@@ -2004,6 +2027,7 @@ uint64_t MemoryManager::load_scalar(uint64_t addr, uint32_t size) const {
 }
 
 void MemoryManager::store_scalar(uint64_t addr, uint32_t size, uint64_t value) {
+  if (spec_) [[unlikely]] spec_write(addr, size);
   if (size != 1 && size != 2 && size != 4 && size != 8)
     throw Error::make(Err::Internal, "store_scalar: bad size ", size);
   if ((addr & (size - 1)) != 0)   // size is 1, 2, 4 or 8, checked above
@@ -2037,6 +2061,7 @@ void MemoryManager::store_scalar(uint64_t addr, uint32_t size, uint64_t value) {
 }
 
 void MemoryManager::load_quad(uint64_t addr, uint64_t out[2]) const {
+  if (spec_) [[unlikely]] spec_read(addr, 16);
   // A fault armed for loads, or stuck cells, change what a load returns, and
   // load_scalar applies them; the runtime attaches its faults to every device,
   // so it is whether one is armed that counts, not whether any is attached.
@@ -2062,6 +2087,7 @@ void MemoryManager::load_quad(uint64_t addr, uint64_t out[2]) const {
 }
 
 void MemoryManager::store_quad(uint64_t addr, const uint64_t in[2]) {
+  if (spec_) [[unlikely]] spec_write(addr, 16);
   const bool faulted = access_fault_ && access_fault_->store_pending &&
                        __atomic_load_n(access_fault_->store_pending, __ATOMIC_RELAXED);
   if (addr % 16 || faulted || (host_maps_ && host_maps_->may_contain(addr))) {
@@ -2080,6 +2106,7 @@ void MemoryManager::store_quad(uint64_t addr, const uint64_t in[2]) {
 }
 
 bool MemoryManager::load_quad_run(uint64_t addr, size_t count, uint64_t* out) const {
+  if (spec_) [[unlikely]] spec_read(addr, uint64_t{count} * 16);
   if (!count || addr % 16 || (host_maps_ && host_maps_->may_contain(addr + 16 * (count - 1)))) return false;
   uint64_t base = 0;
   const Allocation* a = run_allocation(addr, 16 * count, 8, &base);   // (also declines while a fault is armed)
@@ -2099,6 +2126,7 @@ bool MemoryManager::load_quad_run(uint64_t addr, size_t count, uint64_t* out) co
 }
 
 bool MemoryManager::store_quad_run(uint64_t addr, size_t count, const uint64_t* in) {
+  if (spec_) [[unlikely]] spec_write(addr, uint64_t{count} * 16);
   if (!count || addr % 16 || (host_maps_ && host_maps_->may_contain(addr + 16 * (count - 1)))) return false;
   uint64_t base = 0;
   Allocation* a = const_cast<Allocation*>(run_allocation(addr, 16 * count, 8, &base));
@@ -2198,6 +2226,7 @@ bool MemoryManager::rmw_locate(uint64_t addr, uint32_t size, RmwSlot* s) const {
 }
 
 bool MemoryManager::rmw_scalar_fn(uint64_t addr, uint32_t size, RmwFn compute, void* ctx, uint64_t* old_out) {
+  if (spec_) [[unlikely]] spec_write(addr, size);
   RmwSlot s;
   if (!rmw_locate(addr, size, &s)) return false;
   const uint64_t old = rmw_load(s, size);
@@ -2207,6 +2236,7 @@ bool MemoryManager::rmw_scalar_fn(uint64_t addr, uint32_t size, RmwFn compute, v
 }
 
 bool MemoryManager::rmw_if_changed_fn(uint64_t addr, uint32_t size, RmwFn compute, void* ctx, uint64_t* old_out) {
+  if (spec_) [[unlikely]] spec_write(addr, size);
   if ((size != 1 && size != 2 && size != 4 && size != 8) || (addr & (size - 1)) || access_faults_armed()) return false;
   // The word in a chunk that is real and the last allocation found holds it (as load_scalar and store_scalar take it first);
   // anything else -- an untouched or uniform chunk, another allocation -- is the general path's.
@@ -2221,6 +2251,7 @@ bool MemoryManager::rmw_if_changed_fn(uint64_t addr, uint32_t size, RmwFn comput
 
 bool MemoryManager::atomic_rmw_fn(uint64_t addr, uint32_t size, RmwFn compute, void* ctx, uint64_t* old_out,
                                   bool always_store) {
+  if (spec_) [[unlikely]] spec_write(addr, size);
   if (size != 4 && size != 8) return false;
   RmwSlot s;
   if (!rmw_locate(addr, size, &s)) return false;
@@ -2229,6 +2260,7 @@ bool MemoryManager::atomic_rmw_fn(uint64_t addr, uint32_t size, RmwFn compute, v
 }
 
 bool MemoryManager::atomic_word_ptrs(const uint64_t* addrs, size_t count, uint32_t size, uint8_t** out) const {
+  if (spec_) [[unlikely]] return false;   // (a trial takes the plain path, which is noted)
   if (count == 0 || (size != 4 && size != 8)) return false;
   if (access_faults_armed()) return false;
   const Allocation* a = nullptr;
@@ -2244,6 +2276,7 @@ bool MemoryManager::atomic_word_ptrs(const uint64_t* addrs, size_t count, uint32
 
 bool MemoryManager::rmw_batch_fn(const uint64_t* addrs, size_t count, uint32_t size, RmwLaneFn compute, void* ctx,
                                  uint64_t* olds, size_t* done, bool lock_free, bool always_store) {
+  if (spec_) [[unlikely]] spec_write_each(addrs, count, size);
   *done = 0;
   if (count == 0) return true;
   if (lock_free && size != 4 && size != 8) return false;
@@ -2348,6 +2381,7 @@ bool MemoryManager::load_fields(uint64_t addr, const uint8_t* sizes, unsigned n,
     for (unsigned i = 0; i < n; ++i) out[i] = 0;
     return true;
   }
+  if (spec_) [[unlikely]] spec_read(addr, total);
   if (access_faults_armed()) return false;
   uint64_t base = 0;
   const Allocation* a = find_ordinary(addr, total, &base);
@@ -2369,6 +2403,7 @@ bool MemoryManager::load_fields(uint64_t addr, const uint8_t* sizes, unsigned n,
 }
 
 bool MemoryManager::load_texels(const uint64_t* addrs, unsigned n, uint32_t size, unsigned channels, uint64_t* out) const {
+  if (spec_) [[unlikely]] spec_read_each(addrs, n, size * channels);
   const uint64_t total = uint64_t{size} * channels;
   uint64_t lo = addrs[0], hi = addrs[0];
   uint64_t misaligned = 0;

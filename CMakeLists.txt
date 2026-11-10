@@ -257,6 +257,7 @@ add_library(vgpu STATIC
   src/core/profile.cpp
   src/core/registry.cpp
   src/core/memory.cpp
+  src/core/memory_spec.cpp
   src/core/memo_hash.cpp
   src/core/memory_backing.cpp
   src/core/telemetry.cpp
@@ -1521,6 +1522,15 @@ vgpu_unit_test(test_atom_rmw)
 vgpu_unit_test(test_sass_code_at)
 # The SASS executor's block, kept between blocks and launches and set up again each time (Runner::init_block).
 vgpu_unit_test(test_sass_block_reuse)
+# VGPU_EXACT_THREADS: a launch in order (VGPU_THREADS=1) on several host threads, kept only when a shadow of device memory proves it the
+# same (docs/exact-threads.md): same bits and counters as the run in order for independent, conflicting, faulting and SM-reading kernels; every
+# MemoryManager method noted by the shadow; a stopped trial undone to the byte.
+vgpu_unit_test(test_exact_threads)
+# The same with the interpreter's fast path alone (VGPU_TIER=0) and with every fast path off: the accesses then go by other methods of the memory manager.
+add_test(NAME test_exact_threads_tier0 COMMAND test_exact_threads)
+set_tests_properties(test_exact_threads_tier0 PROPERTIES ENVIRONMENT "VGPU_TIER=0")
+add_test(NAME test_exact_threads_fastpath0 COMMAND test_exact_threads)
+set_tests_properties(test_exact_threads_fastpath0 PROPERTIES ENVIRONMENT "VGPU_FASTPATH=0")
 vgpu_unit_test(test_sass_alu_runs)
 # The same kernels with the interpreter's fast path alone (no tier) and with the baseline SIMD kernels.
 add_test(NAME test_sass_alu_runs_tier0 COMMAND test_sass_alu_runs)

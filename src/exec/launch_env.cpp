@@ -55,6 +55,10 @@ LaunchEnv read_launch_env() {
         }
         break;
       case 'R': take(e.race, is(s, "RACE")); break;
+      case 'E':
+        take(e.exact_threads, is(s, "EXACT_THREADS"));
+        take(e.exact_log, is(s, "EXACT_LOG"));
+        break;
       case 'M': take(e.max_steps, is(s, "MAX_STEPS")); break;
       case 'L': take(e.lockstep, is(s, "LOCKSTEP")); break;
       default: break;
@@ -67,6 +71,8 @@ LaunchEnv read_launch_env() {
   e.tier_stats = std::getenv("VGPU_TIER_STATS");
   e.tier_chain = std::getenv("VGPU_TIER_CHAIN");
   e.threads = std::getenv("VGPU_THREADS");
+  e.exact_threads = std::getenv("VGPU_EXACT_THREADS");
+  e.exact_log = std::getenv("VGPU_EXACT_LOG");
   e.lockstep = std::getenv("VGPU_LOCKSTEP");
   e.trace = std::getenv("VGPU_TRACE");
   e.strict = std::getenv("VGPU_STRICT");
