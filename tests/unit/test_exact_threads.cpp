@@ -1041,6 +1041,24 @@ VTEST(a_kernel_whose_blocks_share_pages_they_read_and_write_is_tried_again_by_wo
   }
 }
 
+VTEST(a_grid_of_a_few_blocks_is_noted_by_word_from_the_start) {
+  // The same kernel on 6 blocks: no trial is thrown away to find out that the buffer is updated in place (with so few blocks, and a
+  // store at a block's end, that trial would be most of the launch). On 8 blocks the page grain is tried.
+  Restore restore;
+  Env e;
+  in_order();
+  const Result ref6 = e.run(*e.load(in_place()), 6), ref8 = e.run(*e.load(in_place()), 8);
+  exact("4");
+  const Result few = e.run(*e.load(in_place()), 6);
+  VCHECK(few.words == ref6.words);
+  VCHECK_EQ(few.counts.committed, uint64_t{1});
+  VCHECK_EQ(few.counts.again, uint64_t{0});
+  const Result more = e.run(*e.load(in_place()), 8);
+  VCHECK(more.words == ref8.words);
+  VCHECK_EQ(more.counts.committed, uint64_t{1});
+  VCHECK_EQ(more.counts.again, static_cast<uint64_t>(pages_on()));
+}
+
 VTEST(a_chain_stopped_by_a_coarse_note_is_tried_by_word_and_then_run_in_order) {
   // chain(): block b reads the row block b - 1 wrote, in pages both touch. By page the first stop may be coarse; the second trial is
   // by word, meets the real conflict, and the launch runs in order.
@@ -1058,33 +1076,34 @@ VTEST(a_chain_stopped_by_a_coarse_note_is_tried_by_word_and_then_run_in_order) {
 }
 
 VTEST(a_worker_remembers_the_runs_of_words_its_block_noted_for_that_block_only) {
+  // (Runs of sixteen words or more are remembered, and asked for accesses of sixteen words or more: a warp's lanes one after another.)
   Paged d(3);
-  uint8_t b[64] = {};
+  uint8_t b[256] = {};
   const auto wr = [&](uint64_t at, uint64_t len) { return stops([&] { d.mem.write(at, b, len); }); };
   {
     // A store in a loop: the second and later notes of the same words are answered by the worker's memory.
     Trial t(d.mem);
-    VCHECK(!wr(d.p + 64, 32));
-    VCHECK(!wr(d.p + 64, 32));
-    VCHECK(!wr(d.p + 72, 8));
-    VCHECK(!d.rd(d.p + 68, 12));           // its own stores: readable
-    VCHECK(!wr(d.p + 96, 32));             // touches the run: one run of sixteen words now
-    VCHECK(!wr(d.p + 80, 40));
+    VCHECK(!wr(d.p + 64, 64));
+    VCHECK(!wr(d.p + 64, 64));
+    VCHECK(!wr(d.p + 72, 8));              // (a short access does not ask the memory: its two words are looked at)
+    VCHECK(!d.rd(d.p + 64, 64));           // its own stores: readable
+    VCHECK(!wr(d.p + 128, 64));            // touches the run: one run of thirty-two words now
+    VCHECK(!wr(d.p + 96, 64));
     const MemoryManager::SpecOutcome out = t.end();
     VCHECK(out.committed);
-    VCHECK_EQ(out.stats.runs_known, uint64_t{4});
-    VCHECK_EQ(out.stats.words_written, uint64_t{8 + 8});
-    VCHECK_EQ(out.kept_bytes, uint64_t{64});
+    VCHECK_EQ(out.stats.runs_known, uint64_t{3});
+    VCHECK_EQ(out.stats.words_written, uint64_t{16 + 2 + 16});
+    VCHECK_EQ(out.kept_bytes, uint64_t{128});
     d.put_back();
   }
   for (const unsigned other : {0u, 1u}) {
     // What block 0 is remembered to hold is not block 1's, on the same worker or another: its write and its read are stopped.
     for (const bool reads : {false, true}) {
       Trial t(d.mem);
-      VCHECK(!wr(d.p + 64, 32));
-      VCHECK(!wr(d.p + 64, 32));
+      VCHECK(!wr(d.p + 64, 64));
+      VCHECK(!wr(d.p + 64, 64));
       t.as(other, 1);
-      VCHECK(reads ? d.rd(d.p + 76, 4) : wr(d.p + 76, 4));
+      VCHECK(reads ? d.rd(d.p + 64, 64) : wr(d.p + 64, 64));
       VCHECK(!t.end().committed);
       VCHECK(d.all() == d.init);
     }
@@ -1093,33 +1112,34 @@ VTEST(a_worker_remembers_the_runs_of_words_its_block_noted_for_that_block_only) 
     for (const bool reads : {false, true}) {
       Trial t(d.mem);
       VCHECK(!wr(d.p + 512, 4));           // the page is by word from here
-      VCHECK(!d.rd(d.p + 64, 32));
-      VCHECK(!d.rd(d.p + 64, 32));
+      VCHECK(!d.rd(d.p + 64, 64));
+      VCHECK(!d.rd(d.p + 64, 64));
       VCHECK(!d.rd(d.p + 70, 9));
       t.as(other, 1);
       if (reads) {
-        VCHECK(!d.rd(d.p + 64, 32));
-        VCHECK(!d.rd(d.p + 64, 32));
+        VCHECK(!d.rd(d.p + 64, 64));
+        VCHECK(!d.rd(d.p + 64, 64));
         t.as(0, 0);
         VCHECK(wr(d.p + 80, 4));
       } else {
-        VCHECK(wr(d.p + 80, 4));
+        VCHECK(wr(d.p + 64, 64));
       }
       const MemoryManager::SpecOutcome out = t.end();
       VCHECK(!out.committed);
-      VCHECK(out.stats.runs_known >= 2);
+      VCHECK_EQ(out.stats.runs_known, reads ? uint64_t{2} : uint64_t{1});
       VCHECK(d.all() == d.init);
     }
   }
-  {
-    // Two runs with another block's word between them are not one run: a store across the gap is stopped.
+  for (const bool across : {true, false}) {
+    // Two runs with another block's word between them are not one run: a store across the gap is stopped. And a run answers
+    // only for an access that lies in it whole: a store that starts in one and ends past the other block's word is stopped.
     Trial t(d.mem);
     t.as(1, 1);
-    VCHECK(!wr(d.p + 80, 4));
+    VCHECK(!wr(d.p + 128, 4));
     t.as(0, 0);
-    VCHECK(!wr(d.p + 64, 16));
-    VCHECK(!wr(d.p + 84, 16));
-    VCHECK(wr(d.p + 64, 36));
+    VCHECK(!wr(d.p + 64, 64));
+    VCHECK(!wr(d.p + 132, 64));
+    VCHECK(across ? wr(d.p + 64, 132) : wr(d.p + 100, 64));
     VCHECK(!t.end().committed);
     VCHECK(d.all() == d.init);
   }

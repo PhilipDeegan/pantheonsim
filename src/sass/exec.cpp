@@ -1852,7 +1852,7 @@ namespace {
 std::atomic<uint64_t> g_exact_trials{0}, g_exact_committed{0}, g_exact_stopped{0}, g_exact_again{0};
 
 // VGPU_EXACT_LOG=<file>: a line per launch that asked for a trial (kernel, blocks, threads, what happened, why, bytes kept for
-// undoing, 4 KiB pages touched).
+// undoing, 4 KiB pages touched), and a line with "again" before it for each trial of the launch that a coarse note stopped.
 [[gnu::cold, gnu::noinline]] void exact_log(const char* path, const std::string& kernel, uint64_t units, unsigned threads, const char* what,
                                             const char* why, uint64_t kept, uint64_t pages) {
   static std::mutex mu;
@@ -1915,6 +1915,7 @@ std::atomic<uint64_t> g_exact_trials{0}, g_exact_committed{0}, g_exact_stopped{0
   const char* stats_file = env_.exact_stats && *env_.exact_stats ? env_.exact_stats : nullptr;
   // VGPU_EXACT_PAGES=0: every page is noted by word from its first touch (the note of round sp47), for measurements.
   const bool pages_off = env_.exact_pages && env_.exact_pages[0] == '0' && !env_.exact_pages[1];
+  static constexpr uint64_t kExactPageBlocks = 8;
   MemoryManager::SpecOutcome out;
   // A trial stopped by a coarse note (a page noted as a whole where words would have told the blocks apart) is run again with
   // that allocation noted by word; after two such, or with nothing to add, every page is. A trial noted by word throughout has
@@ -1925,7 +1926,9 @@ std::atomic<uint64_t> g_exact_trials{0}, g_exact_committed{0}, g_exact_stopped{0
       std::lock_guard<std::mutex> g(m_.polling_mu);
       plan = m_.exact_plan[k_.name];
     }
-    if (pages_off) plan.pages = false;
+    // A grid of a few blocks is noted by word from the start: a coarse stop throws away the work up to a block's first store in
+    // a page it read, and when the blocks are few and that store comes at a block's end, that is most of the launch.
+    if (pages_off || units < kExactPageBlocks) plan.pages = false;
     sums.assign(threads, exec::LaunchStats{});
     mem_.spec_begin(threads, &plan);
     exact_trial_ = true;

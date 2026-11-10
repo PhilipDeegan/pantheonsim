@@ -74,7 +74,8 @@ class MemoryManager::Spec {
   static constexpr uint64_t kKeepLimit = uint64_t{1} << 30;   // bytes one worker may keep for undoing before the trial stops
   static constexpr size_t kSeen = 256;             // pages a worker remembers it may read without a look at the shadow
   static constexpr size_t kRanges = 4;             // runs of words a worker remembers its block has noted
-  static constexpr uint64_t kRunWorth = 4;         // ... of at least so many words (a lane's one word would push a warp's run out)
+  static constexpr uint64_t kRunWorth = 16;        // ... of at least so many words: a warp's lanes one after another, not one lane's
+                                                   // few words (32 lanes' runs would push one another out, and asking costs each of them)
   static constexpr size_t kWordPages = 64;         // pages of words a worker remembers where to find
   static constexpr size_t kCoarseKept = 64;        // addresses of coarse stops kept for the caller
 
@@ -554,7 +555,7 @@ void MemoryManager::spec_keep(uint64_t addr, uint64_t len) const {
     const uint64_t lo = std::max(off, slot * Spec::kPageBytes), hi = std::min(last, slot * Spec::kPageBytes + Spec::kPageBytes - 1);
     const uint64_t g0 = lo / Spec::kGranule, g1 = hi / Spec::kGranule;
     // Words the block is remembered to have noted (a load in a loop).
-    if (Spec::known(w.wrote, w.tag, g0, g1) || Spec::known(w.read, w.tag, g0, g1)) {
+    if (g1 - g0 + 1 >= Spec::kRunWorth && (Spec::known(w.wrote, w.tag, g0, g1) || Spec::known(w.read, w.tag, g0, g1))) {
       ++w.st.runs_known;
       continue;
     }
@@ -600,7 +601,7 @@ void MemoryManager::spec_keep(uint64_t addr, uint64_t len) const {
   const uint32_t mine = w.tag | Spec::kWrite;
   const uint64_t g0 = off / Spec::kGranule, g1 = (off + len - 1) / Spec::kGranule;
   // Words the block holds as their writer already (a store in a loop): nothing to note.
-  if (Spec::known(w.wrote, w.tag, g0, g1)) {
+  if (g1 - g0 + 1 >= Spec::kRunWorth && Spec::known(w.wrote, w.tag, g0, g1)) {
     ++w.st.runs_known;
     return;
   }
