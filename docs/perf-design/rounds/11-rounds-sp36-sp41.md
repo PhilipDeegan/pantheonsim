@@ -1442,3 +1442,229 @@ Caveats and what is left:
 * Not run on the branch: the rest of the test suite (only the five tests named above), the sanitizer builds, a g++-12 compile, hosted CI (nothing was pushed), and a host without AVX-512 (the skip path of `test_lanes512` was not seen to run; its condition is `simd::supported(Level::Avx512)`).
 * The JIT (off by default) compiles `kernels.inc` at the level the host's compiler reports and was not touched: generated code keeps the 256-bit `dop_m` either way.
 * The other binary64 forms (`dcmp`, the `f2f` conversions, `i2d`) stay at 256 bits and were not looked at.
+## Round sp55 (the cost of the proof of exact parallel launches: pages that are only read noted as a whole, what a worker remembers, two words at once; branch `sp55-exact-shadow`, base `speed-round-sp46-sp51` 49d02daa)
+
+Question: Round sp47 built `VGPU_EXACT_THREADS` and found the trial's note (one atomic word per four bytes, a compare-and-swap before every first touch, the old bytes kept on a first write) to cost 1.38x per thread, so that 21 of 53 programs were slower at 2 exact threads than at one. Where does that factor go, and how much of it can be removed without weakening the proof (a kept trial is the run in order, a conflict is found before the access, a stopped trial is undone to the byte, atomics are writes)?
+
+Host: server3 only (Ryzen 7 PRO 8840U, Zen 4, 8 cores / 16 threads, g++ 13.3), shared with another session of this round; every build, test and timed run under `flock /tmp/pantheonsim-builder.lock` in holds of a few minutes, `nice -n 19`, builds at `-j3`. Release builds without LTO, `-g1`, `VGPU_GPU=nvidia/rtx3060`. Round sp47 measured on server2 (Zen 5, eight full cores), which this round could not use, so its table is not the base here: the base build (49d02daa, sp47's shadow unchanged) was measured again in the same interleaved runs. On this host the trial costs more than sp47 saw, and two base exact threads lose on more programs. Scripts and data: [data/sp55](../data/sp55).
+
+### 1. Where the trial's time went (the base's note)
+
+Eight programs: six load-heavy ones on which 2 exact threads lose (ATAX, GESUMMV, GEMVER, JACOBI2D, s3d-cuda, sc_gpu), LU (the longest program of the set, in place) and JACOBI1D (20,000 small launches). Two cores (cpus 0 and 2), medians of 3 (`tune.sh`, `tune.log`; LU one run). Wall / CPU seconds of the whole program:
+
+| | ATAX | GESUMMV | GEMVER | JACOBI2D | s3d-cuda | sc_gpu | JACOBI1D | LU |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `VGPU_THREADS=1` | 1.43 / 1.43 | 0.39 / 0.39 | 0.64 / 0.64 | 0.57 / 0.57 | 0.38 / 0.38 | 0.67 / 0.67 | 0.96 / 0.96 | 29.03 / 29.03 |
+| `VGPU_THREADS=2` (no proof) | 0.83 / 1.58 | 0.29 / 0.43 | 0.45 / 0.70 | 0.35 / 0.63 | 0.31 / 0.44 | 0.56 / 0.86 | 0.98 / 0.99 | 16.89 / 32.69 |
+| base, 2 exact threads | 1.32 / 2.56 | 0.48 / 0.78 | 0.80 / 1.34 | 0.67 / 1.26 | 0.49 / 0.78 | 0.93 / 1.30 | 0.98 / 0.99 | 26.33 / 48.76 |
+| CPU, exact / plain (the price of the proof) | 1.61 | 1.81 | 1.92 | 1.99 | 1.78 | 1.50 | 1.00 | 1.49 |
+
+So on this host the proof costs 1.5x to 2.0x the CPU time of two plain threads on these programs (sp47's 1.38x was the geometric mean of 33 programs on server2), which is why 2 exact threads only break even. JACOBI1D pays nothing because almost nothing is tried: at 2 threads the width rule keeps all but about 150 of its 20,000 launches on one thread.
+
+What the notes are (`VGPU_EXACT_STATS`, this round's counters, with `VGPU_EXACT_PAGES=0`, which is the base's note; one run at 2 threads; millions):
+
+| | ATAX | GESUMMV | GEMVER | JACOBI2D | s3d-cuda | sc_gpu | LU |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| trials (all kept) | 2 | 1 | 3 | 40 | 54 | 1432 | 1939 |
+| calls of the hooks | 25.2 | 4.2 | 6.3 | 5.1 | 3.4 | 7.5 | 183.2 |
+| words looked at for a read | 276.8 | 68.2 | 86.0 | 119.5 | 61.6 | 131.1 | 2960.0 |
+| ... taken by compare-and-swap, first reader | 33.6 | 33.6 | 50.4 | 39.9 | 55.4 | 122.4 | 1451.5 |
+| ... moved to several readers by compare-and-swap | 0.008 | 0.004 | 0.02 | 5.9 | 0.001 | 0.03 | 2.1 |
+| ... a repeat touch (load and compare) | 243.2 | 34.6 | 35.6 | 73.7 | 6.2 | 8.7 | 1506.4 |
+| words looked at for a write | 268.5 | 33.6 | 50.3 | 39.8 | 28.9 | 6.3 | 1449.4 |
+| ... taken by compare-and-swap (first write, bytes kept) | 0.008 | 0.008 | 16.8 | 39.8 | 26.3 | 6.2 | 1449.4 |
+| pieces kept / MiB kept | 0.0003 / 0.03 | 0.0003 / 0.03 | 0.52 / 64 | 1.28 / 152 | 0.67 / 100 | 6.2 / 24 | 45.8 / 5529 |
+| 4 KiB shadow pages put in place and zeroed again | 0.033 | 0.033 | 0.049 | 0.078 | 0.067 | 0.187 | 2.1 |
+
+And where the samples fall (the SIGPROF preload sampler `sigprof.so` of round sp53, 2000 Hz of process CPU time, preloaded after `taskset env`; `profile.sh`, `lines.py`: a sample at a `lock cmpxchg` or the instruction after it is "at a compare-and-swap", which includes the page fault of a shadow page's first touch). Percent of all samples of the program at 2 base exact threads:
+
+| | ATAX | GESUMMV | GEMVER | JACOBI2D | s3d-cuda | sc_gpu | LU |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| samples | 1435 | 490 | 833 | 774 | 531 | 961 | 30658 |
+| read notes (`spec_read`, `spec_read_each`): at a compare-and-swap | 3.0 | 9.6 | 9.4 | 15.1 | 12.2 | 12.8 | 11.1 |
+| read notes: the rest (page lookup, loads, compares) | 16.5 | 8.4 | 7.4 | 10.1 | 10.4 | 12.4 | 6.6 |
+| write notes (`spec_write`, `spec_write_each`): at a compare-and-swap | 0.0 | 0.0 | 3.1 | 9.7 | 6.8 | 1.0 | 6.1 |
+| write notes: the rest | 13.0 | 7.1 | 3.7 | 4.7 | 2.6 | 1.6 | 2.4 |
+| `spec_keep` (the undo log's bookkeeping; its copy is in libc) | 0 | 0 | 1.1 | 0.1 | 0.6 | 2.2 | 0.5 |
+| `spec_end` (zeroing and pooling the shadow pages) | 1.0 | 2.0 | 2.2 | 2.6 | 3.0 | 1.6 | 2.2 |
+| libc string functions (memset of shadow pages, the undo copies; also the program's own) | 0.7 | 3.3 | 8.4 | 10.7 | 10.0 | 3.4 | 8.0 |
+| libc memory calls (brk, mprotect, munmap: the undo log and fresh shadow pages; also the program's own) | 2.0 | 11.2 | 5.6 | 0.5 | 6.6 | 0.3 | 0.1 |
+| `ld.so` (`__tls_get_addr`: the hook's look-up of its worker) | 0.7 | 0.8 | 0 | 0.3 | 0.2 | 0.9 | 0.2 |
+
+Reading, per item of the question:
+
+* **Compare-and-swap on first touch.** 17 to 25 % of the program's samples on the kernels that write what they touch (JACOBI2D, s3d, LU), 10 to 14 % where the first touches are reads (GESUMMV, sc_gpu). Most first touches are of words nobody writes: the inputs.
+* **Repeat touches.** A load and three compares a word, inlined: 7 to 17 % for reads and up to 13 % for writes, largest where a kernel keeps a sum in memory (ATAX and GESUMMV store `tmp[i]` 4096 times a thread: 268 M and 34 M words looked at for a write, 8192 of them first writes).
+* **The undo save.** Small as bookkeeping (`spec_keep` 0 to 2 %), larger as memory: the log is a vector that grows from nothing in every trial (the `brk`/`mprotect`/`munmap` row, and part of the string row; the libc rows are by the nearest exported symbol of a stripped libc, so they are groups, not functions). LU keeps 5.4 GiB over its run.
+* **Shadow cache misses.** Not separable on this host (no hardware counters without root). The shadow doubles the bytes a first touch pulls in (4 KiB of words per 4 KiB of data), and its cost is inside the compare-and-swap rows and the zeroing.
+* **The hook's own test.** Under 1 %: the stop flag and a thread-local look-up per call, 3 M to 183 M calls. With no trial on it is the one null test Round sp47 measured.
+* **Hold-back reruns.** None here: every trial of these eight was kept. (The programs whose trials stop are in the A/B table: with the hold-back they run at the speed of one thread.)
+
+### 2. What was tried, in the order of the task
+
+Each mechanism was measured alone by switching it off in one build that had all of them (`VGPU_EXACT_TUNE`, removed again; the build also had the two mechanisms that were not kept). Wall / CPU seconds, 2 exact threads on two cores, medians of 3 (`tune.log`, `tune_table.py`):
+
+| variant (2 exact threads unless said) | ATAX | GESUMMV | GEMVER | JACOBI2D | s3d-cuda | sc_gpu | JACOBI1D | LU |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| base, `VGPU_THREADS=1` | 1.43 / 1.43 | 0.39 / 0.39 | 0.64 / 0.64 | 0.57 / 0.57 | 0.38 / 0.38 | 0.67 / 0.67 | 0.96 / 0.96 | 29.03 / 29.03 |
+| base, `VGPU_THREADS=2` (no proof) | 0.83 / 1.58 | 0.29 / 0.43 | 0.45 / 0.70 | 0.35 / 0.63 | 0.31 / 0.44 | 0.56 / 0.86 | 0.98 / 0.99 | 16.89 / 32.69 |
+| base, 2 exact threads | 1.32 / 2.56 | 0.48 / 0.78 | 0.80 / 1.34 | 0.67 / 1.26 | 0.49 / 0.78 | 0.93 / 1.30 | 0.98 / 0.99 | 26.33 / 48.76 |
+| this round's code, every page by word, no runs, no pairs | 1.86 / 3.63 | 0.58 / 1.00 | 0.80 / 1.35 | 0.65 / 1.22 | 0.49 / 0.76 | 1.04 / 1.60 | 0.97 / 0.98 | 25.36 / 47.42 |
+| every page by word, with runs and pairs | 1.92 / 3.74 | 0.60 / 1.03 | 0.80 / 1.33 | 0.59 / 1.11 | 0.45 / 0.71 | 1.11 / 1.65 | 0.97 / 0.98 | 23.69 / 44.53 |
+| by page; 64 pages remembered by low bits, no runs, no pairs, no refinement | 1.38 / 2.67 | 0.44 / 0.71 | 0.69 / 1.13 | 0.50 / 0.89 | 0.45 / 0.69 | 1.06 / 1.62 | 0.99 / 1.01 | 26.29 / 49.61 |
+| all but the 256 hashed pages (64 by low bits) | 1.31 / 2.54 | 0.43 / 0.70 | 0.67 / 1.09 | 0.47 / 0.84 | 0.42 / 0.66 | 1.19 / 1.65 | 1.00 / 1.01 | 24.11 / 44.77 |
+| all but the runs of words | 1.17 / 2.27 | 0.38 / 0.60 | 0.65 / 1.05 | 0.47 / 0.84 | 0.40 / 0.66 | 1.00 / 1.53 | 0.97 / 1.00 | 24.42 / 45.73 |
+| all but the pairs | 1.08 / 2.08 | 0.36 / 0.55 | 0.65 / 1.07 | 0.48 / 0.90 | 0.40 / 0.70 | 1.24 / 1.74 | 0.98 / 1.00 | 25.65 / 47.58 |
+| all but the written-page refinement | 1.08 / 2.08 | 0.35 / 0.55 | 0.64 / 1.03 | 0.46 / 0.85 | 0.38 / 0.66 | 1.12 / 1.66 | 0.98 / 0.99 | 24.01 / 45.08 |
+| all | 1.08 / 2.08 | 0.35 / 0.55 | 0.64 / 1.03 | 0.47 / 0.84 | 0.40 / 0.66 | 1.11 / 1.65 | 0.97 / 0.98 | 24.00 / 44.73 |
+
+**Kept:**
+
+* **Pages that are only read are noted as a whole** (task items b and d). A state per 4 KiB page beside the words: untouched, read by one block, read by several; a page is noted by word only once a block writes in it (or where the trial's plan says so). A read of a page that nobody writes costs one compare-and-swap per page and block instead of one per word, and nothing per word afterwards. A write in a page other blocks have read by page state cannot be told from a conflict, so it stops the trial as *coarse*; the launch is then tried again with that allocation noted by word from its first touch, and the kernel remembers the allocation ([exact-threads.md](../../exact-threads.md), "A stop the page grain made"). This is what item (d) asked for without needing an earlier launch: the first trial of a kernel finds out which allocations it writes in place. Alone (the row "by page; 64 pages remembered by low bits, no runs, no pairs, no refinement") it takes ATAX from 1.32 to 1.38 s (no gain: see the next item), GESUMMV 0.48 to 0.44, GEMVER 0.80 to 0.69, JACOBI2D 0.67 to 0.50, s3d 0.49 to 0.45.
+* **What a worker remembers** (item a). Three memories, none of them shared: 256 pages its block may read with no further note, at a place given by a hash of the page number (with 64 places by the low bits, ATAX and GESUMMV, whose lanes read rows 4 pages apart, missed on every lane: 142.7 M looks at the shadow in ATAX, 5.2 M with the hash; ATAX 1.31 to 1.08 s, GESUMMV 0.43 to 0.35); the last four runs of words the block took as their writer and the last four it noted for reading (ATAX 1.17 to 1.08, GESUMMV 0.38 to 0.35, LU 24.4 to 24.0: the 268 M repeat write checks of ATAX become 8.4 M range compares; runs of 4 words or more in this table's build, of 16 or more in the end, below); and where the words of the last 64 pages it read in are, so that a read whose words already allow it stays inline (added after the table above: its fourth row shows this round's code with every page by word slower than the base where a warp's lanes are scattered, ATAX 1.86 s against 1.32 and sc_gpu 1.04 against 0.93, because each lane's note had become a call; with the words found inline again sc_gpu, whose big allocation stays by word, measured 0.91 s against the base's 0.89 at 2 threads).
+* **Two words by one compare-and-swap.** Two neighbouring words that are both free for the block are taken by one 64-bit compare-and-swap, and two that already allow the access are passed with one load. LU 25.65 to 24.00 s (6 %), JACOBI2D 0.90 to 0.84 CPU seconds; nothing on the kernels that no longer note their reads by word.
+* **The undo log keeps its memory between trials** (up to 64 MiB a worker). Not measured apart; it removes the `brk`/`munmap` row above.
+
+**Two changes after a first A/B.** The first full A/B of the mechanisms above (`ab-first.json`, `ab-first-table.md`: the same 52 programs and method as the table below) gained on PolyBench (geometric mean 0.92x / 1.21x / 1.46x to 1.16x / 1.55x / 1.77x at 2 / 4 / 8 exact threads) and gained nothing on Rodinia (1.08x / 1.37x / 1.56x to 1.08x / 1.39x / 1.58x) and HeCBench (1.23x / 1.53x / 1.78x to 1.22x / 1.54x / 1.79x), with 21 of 123 program-thread counts more than 3 % slower than the base. Two causes were found and removed; the A/B of section 3 is of the code with both.
+
+* *A lane's few words asked the memory of runs.* lavaMD (1.67x to 1.53x at 2 threads), gaussian (1.28x to 1.19x), sc_gpu, bitonic-sort: kernels that update an allocation in place lane by lane, a word or a structure of eight words a lane, 36 M hook calls in lavaMD. Such an access is not in a remembered run (none of the 36 M was), asking costs it eight range compares, and remembering it pushes out the runs of the other 31 lanes. Runs are now remembered and asked only for accesses of 16 words or more (a warp's lanes one after another). `run-threshold.txt` (`run_threshold.sh`, medians of 3 on four cores, CPU seconds at 2 exact threads; base, before, after): lavaMD 1.85, 1.98, 1.85; gaussian 5.63, 5.96, 5.83; sc_gpu 1.37, 1.46, 1.41; ATAX 2.56, 1.94, 1.95; GESUMMV 0.78, 0.51, 0.51; GEMVER 1.23, 1.03, 1.02.
+* *A grid of a few blocks, and a store at a block's end.* perplexity-cuda fell from 1.40x to 0.73x at 2 threads: its one launch has 4 blocks, each reads the page it will write and stores at its end, so the coarse stop came when the first block was done and all four had been run for nothing. A launch of fewer than 8 blocks is now noted by word from the start (no coarse stop is possible; it runs as on the base). The general case, a kernel of few blocks whose first store in a page it read comes late, still pays up to one block's time on every thread for each allocation it learns; see Unresolved.
+
+**Not kept:**
+
+* **A vector pre-check for a warp's lanes** (item c): built as "lanes one after another are one range" and "lanes in one remembered page need one look", with tests. Measured as counters: of 3.4 M to 183 M hook calls a program, 0 were warps of lanes one after another, and 18 thousand (sc_gpu, of 7.5 M) were warps in one page. The tier already notes a coalesced warp as the one range it is (`load_run`, `store_run`: one hook call and one kept piece for 32 lanes, 31 words a piece in the table above), and what reaches the per-lane hooks is scattered. Removed.
+* **Pages by history** (item d as written, built as a refinement of the above): after a kept trial, only the pages a learned allocation was written in are noted by word at the kernel's next launch, the rest of it by page again, falling back to the whole allocation on a coarse stop. Correct and tested, and worth nothing on these programs (the row "all but the written-page refinement" is the row "all" within noise): the kernels that write an allocation in place read little of it that they do not write (GEMVER, LU), or write it in scattered single words whose pages cover it (sc_gpu: 6.2 M words in 6.2 M pieces). Removed.
+* **Whole pages claimed by a writer** (item b for writes): not built. Blocks share the pages they write (256 threads of 4 bytes are 1 KiB: four blocks a page), so a writer's page claim falls back to words on almost every page, and falling back exactly needs the first writer's words, which a claim by page does not have: the claim would have to keep them privately, and handing a private note to a second thread safely costs an atomic per access again, or a `membarrier` per page.
+* **A generation number instead of clearing** (item e): not built. Clearing is `spec_end`, 1 to 3 % of the samples on the base, and with pages noted as a whole only the pages a block writes in have words to clear (ATAX: 8 pages of words where the base had 32,784). A generation in every word would cost a compare per word looked at to save a `memset` per page.
+
+What a trial costs after this (the same counters, default mode, millions): ATAX looks at 0 words for reads and 0.008 for writes (276.8 and 268.5 on the base), takes 32,776 pages as their reader and answers 8.4 M accesses from remembered runs; JACOBI2D looks at 0 words for reads (119.5) and still takes its 39.8 M output words, two at a time; GEMVER and LU, which update a matrix in place, are tried twice at their first launch (GEMVER: 3 coarse stops for 3 kept trials; LU: 6 for 1928) and then note that matrix by word as before: LU still takes 1451 M words for reads and 1449 M for writes, in pairs.
+
+### 3. A/B on 52 of the 53 programs of Round sp47
+
+`sp55_ab.py` (it uses `sp47_run.py`'s runner and signature): the base build and this round's (bcc01a2a), ten variants interleaved run by run, 5 runs (3 for the seven programs whose first run at one thread took 4 s or more: LU, SYR2K, SYRK, asyncAllocation, black-scholes, shmembench, zerocopy; fpdc-cuda left out, see Unresolved), medians of the wall seconds of the whole program, cpus 0,2,...,14 (one logical CPU of each of the eight cores), the machine lock held for one round of the ten at a time. "Bits": in every run of every exact variant of both builds, and of the new build at `VGPU_THREADS=1`, the normalised output and the files written, the exit code, `VGPU_COUNTERS_FILE` (every counter of every launch) and `VGPU_MEMO_FINAL_HASH` (all live device memory at exit) are those of the base at `VGPU_THREADS=1`. "Base twice" is the A/A control (the base at `VGPU_THREADS=1` a second time in each round, over the first); "default" is the new build at `VGPU_THREADS=1` without the variable over the base.
+
+| corpus | program | `VGPU_THREADS=1` s (base) | base exact 2 / 4 / 8 | this round exact 2 / 4 / 8 | `VGPU_THREADS=8` | base twice | default, new / base | trials at 8: kept / stopped / again | bits |
+|---|---|---:|---|---|---:|---:|---:|---|---|
+| polybench | 2DCONV | 0.70 | 0.83x / 0.98x / 1.05x | 0.97x / 1.13x / 1.18x | 1.47x | 1.022 | 1.018 | 1 / 0 / 0 | same |
+| polybench | 3DCONV | 0.68 | 0.93x / 1.24x / 1.48x | 1.27x / 1.69x / 1.90x | 2.04x | 0.993 | 0.990 | 254 / 0 / 0 | same |
+| polybench | 3MM | 2.08 | 0.93x / 1.27x / 1.45x | 1.26x / 1.52x / 1.68x | 1.75x | 0.992 | 1.006 | 3 / 0 / 0 | same |
+| polybench | ADI | 0.23 | 0.73x / 0.91x / 0.91x | 0.74x / 0.95x / 0.95x | 1.53x | 1.017 | 1.015 | 2049 / 0 / 0 | same |
+| polybench | ATAX | 1.43 | 1.08x / 1.54x / 2.27x | 1.43x / 2.28x / 3.22x | 3.92x | 1.000 | 1.007 | 2 / 0 / 0 | same |
+| polybench | BICG | 0.28 | 0.83x / 1.05x / 1.18x | 1.23x / 1.55x / 1.72x | 1.83x | 1.005 | 1.006 | 2 / 0 / 0 | same |
+| polybench | GEMM | 0.73 | 1.00x / 1.22x / 1.43x | 1.23x / 1.47x / 1.59x | 1.69x | 0.998 | 1.001 | 1 / 0 / 1 | same |
+| polybench | GEMVER | 0.66 | 0.83x / 1.16x / 1.43x | 1.06x / 1.41x / 1.61x | 2.12x | 0.962 | 0.977 | 3 / 0 / 3 | same |
+| polybench | GESUMMV | 0.39 | 0.84x / 0.96x / 1.12x | 1.16x / 1.38x / 1.51x | 1.72x | 1.014 | 1.014 | 1 / 0 / 2 | same |
+| polybench | JACOBI1D | 1.07 | 0.81x / 1.01x / 0.90x | 1.07x / 1.26x / 0.88x | 1.61x | 1.002 | 0.995 | 19744 / 0 / 0 | same |
+| polybench | JACOBI2D | 0.55 | 0.81x / 1.24x / 1.59x | 1.20x / 1.75x / 2.28x | 3.32x | 1.011 | 1.007 | 40 / 0 / 0 | same |
+| polybench | LU | 28.89 | 1.11x / 1.61x / 2.26x | 1.21x / 1.86x / 2.44x | 3.70x | 0.999 | 0.993 | 2498 / 0 / 2 | same |
+| polybench | MVT | 1.58 | 1.09x / 1.56x / 1.97x | 1.39x / 2.05x / 2.62x | 3.07x | 1.001 | 1.007 | 2 / 0 / 2 | same |
+| polybench | SYR2K | 10.40 | 0.99x / 1.35x / 1.87x | 1.15x / 1.71x / 2.19x | 2.77x | 1.013 | 1.006 | 1 / 0 / 1 | same |
+| polybench | SYRK | 5.39 | 0.97x / 1.29x / 1.84x | 1.14x / 1.69x / 2.23x | 2.82x | 1.011 | 1.002 | 1 / 0 / 1 | same |
+| rodinia | backprop | 0.53 | 0.77x / 1.06x / 1.29x | 0.73x / 1.02x / 1.35x | 2.35x | 1.002 | 0.995 | 2 / 0 / 3 | same |
+| rodinia | gaussian | 3.71 | 1.30x / 1.92x / 2.73x | 1.25x / 1.94x / 2.75x | 3.80x | 1.001 | 0.995 | 511 / 0 / 2 | same |
+| rodinia | lud | 2.97 | 1.06x / 1.21x / 1.29x | 1.05x / 1.21x / 1.30x | 1.43x | 1.002 | 0.997 | 124 / 0 / 2 | same |
+| rodinia | needle | 0.33 | 1.00x / 1.31x / 1.48x | 1.22x / 1.65x / 1.93x | 2.63x | 0.997 | 1.010 | 253 / 0 / 2 | same |
+| rodinia | pathfinder | 0.54 | 1.11x / 1.21x / 1.30x | 1.10x / 1.23x / 1.31x | 1.32x | 0.993 | 0.994 | 5 / 0 / 1 | same |
+| rodinia | srad_v2 | 0.03 | 1.00x / 0.99x / 0.97x | 1.00x / 0.97x / 0.96x | 0.96x | 0.940 | 0.936 | 0 / 1 / 0 | same |
+| rodinia | particlefilter_float | 1.38 | 1.37x / 2.04x / 2.49x | 1.23x / 1.90x / 2.34x | 1.22x | 0.994 | 1.010 | 27 / 3 / 5 | not comparable (`VGPU_THREADS=1` differs from run to run) |
+| rodinia | sc_gpu | 0.68 | 0.92x / 1.16x / 1.19x | 0.88x / 1.26x / 1.17x | 1.82x | 1.002 | 1.010 | 1432 / 0 / 33 | same |
+| rodinia | hotspot | 0.95 | 1.36x / 2.06x / 2.71x | 1.41x / 2.17x / 2.83x | 3.25x | 1.023 | 1.013 | 1000 / 0 / 0 | same |
+| rodinia | bfs | 0.01 | 0.88x / 0.89x / 0.92x | 0.86x / 0.93x / 0.88x | 1.23x | 0.965 | 0.929 | 5 / 7 / 5 | same |
+| rodinia | nn | 0.01 | 0.97x / 0.96x / 0.95x | 0.96x / 0.95x / 1.01x | 0.98x | 0.932 | 0.932 | 1 / 0 / 0 | same |
+| rodinia | lavaMD | 1.51 | 1.66x / 2.47x / 3.62x | 1.49x / 2.46x / 3.40x | 4.30x | 1.003 | 1.000 | 1 / 0 / 1 | same |
+| hecbench | adam-cuda | 0.02 | 1.43x / 1.90x / 2.03x | 1.29x / 1.59x / 1.67x | 2.12x | 0.971 | 1.012 | 1 / 0 / 3 | same |
+| hecbench | aobench-cuda | 0.57 | 1.86x / 2.82x / 4.00x | 1.73x / 2.81x / 3.99x | 4.59x | 1.014 | 1.015 | 1 / 0 / 0 | same |
+| hecbench | aop-cuda | 1.79 | 1.48x / 2.23x / 2.93x | 1.55x / 2.34x / 3.06x | 3.50x | 1.001 | 0.990 | 201 / 0 / 2 | same |
+| hecbench | asmooth-cuda | 0.22 | 1.05x / 1.14x / 1.19x | 1.05x / 1.14x / 1.15x | 2.72x | 1.003 | 1.014 | 2 / 1 / 1 | same |
+| hecbench | asyncAllocation-cuda | 3.91 | 1.76x / 2.60x / 3.40x | 1.88x / 2.78x / 3.62x | 3.85x | 1.006 | 1.004 | 800 / 0 / 1 | same |
+| hecbench | atan2-cuda | 0.02 | 0.99x / 1.25x / 1.50x | 1.12x / 1.28x / 1.66x | 1.73x | 0.959 | 0.953 | 3 / 0 / 0 | same |
+| hecbench | atomicAggregate-cuda | 3.65 | 1.00x / 1.00x / 1.00x | 1.03x / 1.02x / 1.02x | 4.08x | 1.000 | 0.976 | 0 / 3 / 0 | same |
+| hecbench | atomicIntrinsics-cuda | 0.18 | 0.98x / 0.98x / 0.96x | 0.99x / 0.99x / 0.99x | 3.86x | 1.013 | 1.010 | 0 / 2 / 0 | same |
+| hecbench | atomicPerf-cuda | 1.06 | 1.59x / 2.14x / 2.51x | 1.59x / 2.10x / 2.50x | 3.74x | 1.002 | 1.002 | 9 / 9 / 0 | same |
+| hecbench | attention-cuda | 0.02 | 0.89x / 0.87x / 0.86x | 0.86x / 0.88x / 0.87x | 1.00x | 0.976 | 0.995 | 1 / 1 / 2 | same |
+| hecbench | axpby-cuda | 0.40 | 1.13x / 1.49x / 1.78x | 1.27x / 1.70x / 1.97x | 2.29x | 1.016 | 1.010 | 34 / 0 / 0 | same |
+| hecbench | background-subtract-cuda | 0.00 | 1.18x / 1.26x / 1.28x | 1.39x / 1.45x / 1.50x | 1.44x | 0.731 | 0.726 | 0 / 0 / 0 | same |
+| hecbench | backprop-cuda | 0.01 | 0.78x / 0.94x / 1.10x | 0.81x / 0.99x / 1.16x | 1.44x | 0.939 | 0.956 | 2 / 0 / 3 | same |
+| hecbench | bh-cuda | 0.74 | 1.41x / 1.97x / 2.55x | 1.45x / 1.99x / 2.39x | 3.55x | 1.002 | 0.979 | 8 / 2 / 4 | same; `VGPU_THREADS=8` differs |
+| hecbench | bilateral-cuda | 1.09 | 1.63x / 2.43x / 3.29x | 1.63x / 2.46x / 3.30x | 3.58x | 1.006 | 1.008 | 3 / 0 / 0 | same |
+| hecbench | bitonic-sort-cuda | 0.26 | 1.36x / 1.97x / 2.49x | 1.24x / 1.86x / 2.42x | 3.16x | 1.011 | 1.012 | 136 / 0 / 1 | same |
+| hecbench | black-scholes-cuda | 19.86 | 1.36x / 1.89x / 2.34x | 1.47x / 2.03x / 2.54x | 2.63x | 1.006 | 1.000 | 1 / 0 / 0 | same |
+| hecbench | blockAccess-cuda | 0.01 | 0.85x / 1.18x / 1.27x | 0.96x / 1.24x / 1.33x | 1.56x | 0.909 | 0.939 | 4 / 0 / 0 | same |
+| hecbench | perplexity-cuda | 0.38 | 1.41x / 2.09x / 2.01x | 1.24x / 1.82x / 1.82x | 2.61x | 1.014 | 1.023 | 1 / 0 / 0 | same |
+| hecbench | radixsort2-cuda | 2.01 | 0.99x / 0.98x / 0.99x | 0.99x / 0.99x / 0.98x | 2.27x | 1.004 | 1.006 | 100 / 7 / 0 | same; `VGPU_THREADS=8` differs |
+| hecbench | s3d-cuda | 0.38 | 0.80x / 1.08x / 1.41x | 0.93x / 1.28x / 1.56x | 2.25x | 0.999 | 1.001 | 54 / 0 / 20 | same |
+| hecbench | shmembench-cuda | 4.84 | 1.80x / 2.94x / 4.13x | 1.80x / 2.91x / 4.12x | 4.20x | 1.008 | 1.003 | 1 / 0 / 0 | same |
+| hecbench | silu-cuda | 0.45 | 1.34x / 1.91x / 2.46x | 1.46x / 2.13x / 2.79x | 3.18x | 1.017 | 1.018 | 50 / 0 / 0 | same |
+| hecbench | sortKV-cuda | 0.18 | 0.98x / 0.98x / 0.98x | 0.98x / 0.98x / 0.97x | 1.81x | 0.993 | 0.989 | 8 / 4 / 0 | same; `VGPU_THREADS=8` differs |
+| hecbench | zerocopy-cuda | 13.76 | 0.99x / 0.99x / 0.99x | 1.00x / 0.99x / 1.00x | 1.50x | 1.008 | 1.000 | 0 / 0 / 0 | same |
+
+| geometric mean of the speed-ups | base exact 2 | 4 | 8 | this round exact 2 | 4 | 8 | `VGPU_THREADS=8` | base twice | default, new / base |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| all (52) | 1.09x | 1.39x | 1.62x | 1.17x | 1.51x | 1.74x | 2.28x | 0.989 | 0.989 |
+| hecbench (25) | 1.20x | 1.52x | 1.76x | 1.23x | 1.55x | 1.79x | 2.55x | 0.982 | 0.984 |
+| polybench (15) | 0.91x | 1.21x | 1.46x | 1.15x | 1.54x | 1.76x | 2.23x | 1.003 | 1.003 |
+| rodinia (12) | 1.09x | 1.36x | 1.56x | 1.08x | 1.39x | 1.60x | 1.85x | 0.987 | 0.984 |
+
+From the table (`tables.py`):
+
+* Summed wall seconds: `VGPU_THREADS=1` 123.5; base exact 108.5 / 83.6 / 69.1; this round exact 100.4 / 75.7 / 64.6; `VGPU_THREADS=8` 47.6.
+* base: 16 of 52 programs more than 3 % slower at 2 exact threads than at one: 2DCONV, 3DCONV, 3MM, ADI, BICG, GEMVER, GESUMMV, JACOBI1D, JACOBI2D, backprop, sc_gpu, bfs, attention-cuda, backprop-cuda, blockAccess-cuda, s3d-cuda
+* this round: 10 of 52 programs more than 3 % slower at 2 exact threads than at one: 2DCONV, ADI, backprop, sc_gpu, bfs, nn, attention-cuda, backprop-cuda, blockAccess-cuda, s3d-cuda
+* Programs of at least 0.2 s whose trials were all kept (35): 8 exact threads take 1.38x the time of 8 plain ones on the base, 1.25x this round.
+* Programs of at least 0.2 s (41): base twice 1.004 (geometric mean; 0.962 to 1.023); default mode, new / base 1.003 (0.976 to 1.023).
+* base, programs of at least 0.2 s: geometric mean 1.11x / 1.48x / 1.78x at 2 / 4 / 8 exact threads; `VGPU_THREADS=8` 2.54x
+* this round, programs of at least 0.2 s: geometric mean 1.22x / 1.65x / 1.94x at 2 / 4 / 8 exact threads; `VGPU_THREADS=8` 2.54x
+* Slower than the base by more than 3 % (programs of at least 0.2 s): backprop x2 0.95, backprop x4 0.96, gaussian x2 0.96, particlefilter_float x2 0.90, particlefilter_float x4 0.93, particlefilter_float x8 0.94, sc_gpu x2 0.96, lavaMD x2 0.89, lavaMD x8 0.94, aobench-cuda x2 0.93, asmooth-cuda x8 0.97, bh-cuda x8 0.94, bitonic-sort-cuda x2 0.91, bitonic-sort-cuda x4 0.95, perplexity-cuda x2 0.88, perplexity-cuda x4 0.87, perplexity-cuda x8 0.91
+* Faster than the base by more than 3 %: 69 of 123 program-thread counts; slower: 17.
+
+Reading:
+
+* **Bits.** The same in every run of every exact variant of both builds, and of the new build without the variable, on 51 of the 52 programs; `particlefilter_float` cannot be compared (its runs at `VGPU_THREADS=1` differ from one another, as in round sp47). Plain `VGPU_THREADS=8` differs from the run in order on `bh-cuda`, `radixsort2-cuda` and `sortKV-cuda`, as in round sp47; the exact variants do not.
+* **Speed.** Geometric mean of the 52: 1.09x / 1.39x / 1.62x on the base, 1.17x / 1.51x / 1.74x now, against 2.28x for plain `VGPU_THREADS=8`. On the 35 programs of at least 0.2 s whose trials were all kept, 8 exact threads took 1.38x the time of 8 plain ones and take 1.25x. The gain is PolyBench's: 0.91x / 1.21x / 1.46x to 1.15x / 1.54x / 1.76x (plain 2.23x), ATAX 2.27x to 3.22x at 8 threads (plain 3.92x), BICG 1.18x to 1.72x (1.83x), JACOBI2D 1.59x to 2.28x (3.32x), MVT 1.97x to 2.62x (3.07x). HeCBench moves from 1.20x / 1.52x / 1.76x to 1.23x / 1.55x / 1.79x (black-scholes, silu, axpby, asyncAllocation, s3d gain; perplexity, bitonic-sort, adam lose), Rodinia from 1.09x / 1.36x / 1.56x to 1.08x / 1.39x / 1.60x (needle and hotspot gain; lavaMD, particlefilter, backprop lose at 2 threads).
+* **2 exact threads at least as fast as one on every program: not reached.** 16 of 52 programs were more than 3 % slower at 2 exact threads than at one on the base, 10 are now: 2DCONV (0.97x), ADI (0.74x), backprop (0.73x), sc_gpu (0.88x), s3d-cuda (0.93x) and five programs of 0.03 s or less (bfs, nn, attention-cuda, backprop-cuda, blockAccess-cuda). All of PolyBench's nine but 2DCONV and ADI are over 1.0 now (BICG 0.83x to 1.23x, GESUMMV 0.84x to 1.16x, JACOBI2D 0.81x to 1.20x, JACOBI1D 0.81x to 1.07x, 3DCONV 0.93x to 1.27x, 3MM 0.93x to 1.26x, GEMVER 0.83x to 1.06x).
+* **Against the base, per program and thread count.** 69 of 123 (the 41 programs of at least 0.2 s) are more than 3 % faster, 17 more than 3 % slower. The slower ones: lavaMD (0.89 of the base's speed at 2 threads, 0.94 at 8), particlefilter_float (0.90 to 0.94; five coarse stops in its 36 launches; a program whose results differ from run to run), perplexity-cuda (0.87 to 0.91: four blocks, so by word from the start as on the base, and still slower), bitonic-sort (0.91 and 0.95 at 2 and 4), backprop, gaussian and sc_gpu at 2 threads (0.95, 0.96, 0.96), bh-cuda at 8 (0.94), aobench at 2 (0.93).
+* **Part of that is the place in the round.** A round runs the base's variants and then this round's, so the base's 2-thread run follows a 1-thread run and this round's follows the 8-thread run and a 1-thread run, on a laptop processor. `order_check.sh` (`order-check.txt`): the two builds' 2-thread runs alone, one after the other, 7 times, in both orders. aobench (one launch, kept, no coarse stop): 0.30 s and 0.32 s with the base first, 0.30 s and 0.32 s with this round's build first: the second run of a pair is 6 % slower whichever build it is, and aobench's 0.93 is that. lavaMD: 0.90 s (base) and 1.00 s with the base first, 0.98 s and 0.94 s (base) with this round's first: about 4 to 7 % of its 11 % is the build. gaussian: 2.87 s (base) and 3.01 s, then 2.99 s and 2.90 s (base): about 3 % is the build. The same bias sits on every 2-thread column of this round in the table (and, less, on the 4-thread ones); it was not corrected.
+* **Controls.** On the 41 programs of at least 0.2 s the base against itself is 1.004 (geometric mean; 0.962 to 1.023), and default mode (`VGPU_THREADS=1` without the variable), new over base, is 1.003 (0.976 to 1.023): no change outside what two runs of one build give. (Over all 52 both are 0.989: the programs of a few hundredths of a second scatter.)
+* **Trials.** A coarse stop and a second trial happened in 25 of the 52 programs (the last column's third number, at 8 threads): once or twice for most (GEMM 1, GESUMMV 2, MVT 2, LU 2 for 2498 kept trials, gaussian 2 for 511), s3d-cuda 20 for 54, sc_gpu 33 for 1432. No program has more trials stopped for a real conflict than on the base.
+
+### 4. Tests, mutation evidence, sanitizers
+
+* `test_exact_threads` (`tests/unit/test_exact_threads.cpp`) has 22 tests (11 before) and is wired four times: default, `VGPU_TIER=0`, `VGPU_FASTPATH=0` and, new, `VGPU_EXACT_PAGES=0` (every page by word: the base's note, which the note by page must agree with). New this round:
+  * a page that blocks only read is noted as a whole and a page a block writes in by word (the counters say which: one page taken by a reader, one made several readers', one by word, one word read by compare-and-swap), and the shadow is empty again after the trial;
+  * **the adversary of the note by page**: block 0 claims a page whole (as its reader; as its reader and then a writer in it; with a second reader; or writes in it first), and a second block, on the same worker and on another, touches the page at 144 places: every byte of the first, a middle and the last word, six lengths from 1 to 8 bytes, the last ones ending in the next page. Nothing goes through that a note by word stops; every stop is undone to the byte; a stop that only the grain made is said to be coarse, names the allocation, and the same accesses are kept when run again with the allocation by word; a stop at a writer's mark is never coarse;
+  * what a worker remembers of a page is the block's and not the next block's on the same worker, and not another page's that shares its place in the memory (two such pages are found with the hash; the same for the pages of words);
+  * every lane of a warp is noted wherever it lies (a word in the middle of 32 lanes one after another taken by another block; a lane in another page than the rest; a lane whose last byte, or whose first, is in another page);
+  * remembered runs of words (sixteen words or more) answer for their block only, on the same worker and on another, for reads and for writes; a short access does not ask them; two runs with another block's word between them are not one run, and a run answers only for an access that lies in it whole;
+  * words a worker finds readable are looked at every time: what allowed block 0 does not allow block 1, and a word another block wrote since is seen;
+  * two words at once: block 1 holds one word (as reader or writer, at an even and at an odd place, with the other word of its pair untouched or block 0's own) and block 0's 40-byte store and load over it from six starting places are stopped exactly where the single-word rules stop them; a store over words the block read one by one keeps every byte once (48 bytes, 12 words);
+  * **600 random interleavings** of four blocks on two workers over five pages (reads, writes, long reads, a warp's loads and stores one after another and scattered) against a model that keeps the four word states of exact-threads.md for every word: noted by word the shadow stops exactly the access the model stops; noted by page it stops every access the model stops and stops earlier only as a coarse stop, after which the same run with the allocation by word is the model's again; a stopped run leaves the bytes of before, a kept one the stores. All three endings are required to occur at least 20 times;
+  * a kernel that updates its buffer in place (sixteen blocks a page) is stopped coarsely, tried again by word and kept, with the words and every counter of the run in order, at 2, 4 and 8 threads; the same kernel on 6 blocks is noted by word from the start (no trial thrown away), on 8 by page; a chain (each block reads what the one before wrote) stopped by a coarse note is tried by word, stopped for the real conflict and run in order.
+* The test in its four forms, Release build of the measured tree (server3): 22 of 22 in each.
+* Mutations (`mutants.py`, `mutants.log`): one wrong line each. A copy of the file with the line changed is compiled with the build's own command and the test is linked with that object ahead of the library, so the trees are not touched; the three files through the same road unchanged pass in the four forms first. 42 mutants: **38 killed** (each by the default form already), **4 survived, all equivalent**:
+
+  | group | mutants | result |
+  |---|---|---|
+  | the note by page | the worker's memory of a page answering for any block; for any page; a write in a page others read let through; the sole reader's reads forgotten when it writes; a second reader not noted; a writer taking a page of several readers; a coarse stop not said (at a page state; at a word of a coarse page); page states not cleared; the plan's by-word ranges ignored; the plan's "no pages" ignored | 11 of 11 killed |
+  | the second trial | no second trial; the second trial with the first one's plan; a grid of a few blocks noted by page | 3 of 3 killed |
+  | | the second trial's counter slots not emptied first | survived, equivalent: every worker of a trial writes its sum into its slot before the trial ends |
+  | runs of words | a run answering for any block; a run known by its first word only; runs joined across a gap | 3 of 3 killed |
+  | | a run remembered before its note is made (reads; writes) | 2 survived, equivalent: a note that fails stops the trial, and every later hook of a stopped trial throws before it asks the memory |
+  | pages of words | readable for another block; not looked at; a lone word taken whatever it holds; the words of another page that shares the place | 4 of 4 killed |
+  | two words at once | a pair written when only the first is free; only the second; over any reader's mark; a written pair not kept; a pair read by its first word; by its second; a pair taken for written by its first word | 7 of 7 killed |
+  | round sp47's, on lines this round moved | a write conflict ignored; a read of written ignored; readers not merged; no write back; nothing kept; the first word of a run only kept; the shadow not cleared; a store outside the device let through; `store_batch` without its hook; a stopped trial kept | 10 of 10 killed |
+  | | the undo log not emptied at the end of a trial | survived, equivalent: the log is emptied again when the next trial begins |
+
+* ThreadSanitizer (server3; the Release tree deleted first; `-fsanitize=thread -g -O1`, Debug, the CI job's flags, `setarch -R`; `tsan.sh`, `tsan.log`): `test_exact_threads` in its four forms 22 of 22 each, and `test_memory` (80), `test_memfast` (15), `test_memalloc` (18), `test_memrmw` (10), `test_memhot_sp8` (4), `test_load_batch16` (3), `test_memcopy_direct` (6), `test_memrmw_lockfree` (6), `test_memcount_forms` (10), `test_atom_rmw` (1) all pass, with 0 ThreadSanitizer reports in every one. (The marks of the shadow are plain 32-bit words moved only by the `__atomic` builtins, so that two can be taken as one 64-bit value; the sanitizer sees every access as atomic.) The rest of the suite, and the other sanitizers, are CI's: nothing was pushed in this round.
+
+### 5. Unresolved
+
+* **Not every program gains.** The note by page pays where a kernel reads much that nobody writes (PolyBench). Where a kernel updates its data in place the allocation is learned and noted by word as before, and what is left of the round for it is the pairs, less what the learning costs: the trial that finds an in-place allocation out is thrown away, once per allocation and kernel. For a kernel that stores early in a block that is nothing (lavaMD: 12 thousand of 36 M hook calls); for one that stores at a block's end it is up to a block's time on every thread, per allocation (adam-cuda: three coarse stops for its one launch of 40 blocks). Against the base 17 of 123 program-thread counts are more than 3 % slower (section 3); what is known of each is there.
+* **A scout instead of a thrown-away trial.** Not built: running the launch's first block alone, in order, before the others start (it is the first block of the run in order, so nothing of it is thrown away) would show which allocations a block of this kernel reads and then writes, all of them in one pass, at the price of one block's time on one thread instead of every thread's time up to the first coarse stop. It would also allow the page grain on grids of fewer than 8 blocks.
+* **2 exact threads still lose on some programs**: 2DCONV (0.97x), ADI (0.74x), backprop (0.73x), sc_gpu (0.88x), s3d-cuda (0.93x) and five programs of 0.03 s or less. They are programs of many small launches or of almost no work (the hand-off to a second thread is what a small launch pays, with or without the proof), and ADI, whose trials are strided stores, each lane a page and a piece of the undo log of its own (3.2 M pieces for 6.3 M words; `spec_keep` is 9 % of its samples at 8 threads).
+* **JACOBI1D at 8 exact threads is slower than at one in both builds** (0.90x on the base, 0.88x now; 1.26x at 4 threads): the width rule tries more of its 20,000 launches at 8 threads as the trial gets cheaper (13,306 on the base, 18,720 in the first A/B), and for launches this small 8 threads' hand-off costs more than it saves under a trial (plain `VGPU_THREADS=8` gains). The rule was not touched.
+* **Kernels that update in place keep the cost of round sp47 per word**, less the pairs: LU still takes 1.45 G words for reads and 1.45 G for writes. Not tried: taking a word as its writer at the block's first read of it where the kernel's last launch wrote it (one compare-and-swap where there are two); a coarser word (a cache line) for allocations whose blocks' footprints are aligned to it.
+* **What is learned is kept by address range and kernel name and never forgotten** (32 ranges, then the kernel is noted by word everywhere). A program that gives a kernel a new buffer at a new address for every launch pays a coarse stop per buffer until then; sc_gpu has 33 coarse stops for 1432 kept trials. Keying by the kernel's argument instead of the address was not tried.
+* **Shadow cache misses** were not measured apart (no hardware counters for an unprivileged user on this host). **A worker's memories are reset for every trial** (about 5 KiB a worker); not measured apart.
+* **fpdc-cuda has no row** (52 programs, not sp47's 53): each run writes its compressed output, hundreds of megabytes, into its directory, and on this host's disk (a USB stick) a run took 30 to 190 s at 3 to 7 % CPU.
+* As in round sp47: the five longest PolyBench programs and the eight HeCBench programs that do not finish at one thread have no rows; the liveness rule has no test; only the SASS engine is tried.
+* Round sp47's table (server2, eight Zen 5 cores) is not reproduced here: on this host the same base build gives 1.09x / 1.39x / 1.62x at 2 / 4 / 8 exact threads where sp47 measured 1.11x / 1.59x / 2.01x, and plain `VGPU_THREADS=8` gives 2.28x where it measured 2.91x.

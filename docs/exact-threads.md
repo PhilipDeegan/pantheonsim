@@ -44,7 +44,7 @@ compare-and-swap, and a block makes an access only after the word allows it:
   made (`MemoryManager::SpecStop`, thrown from the access);
 * the first write of a block to a word copies the bytes that are there into the block's undo log, then writes.
 
-**By page** (round sp55). Most of what a kernel touches it only reads, and a compare-and-swap per word for bytes nobody writes is
+**By page.** Most of what a kernel touches it only reads, and a compare-and-swap per word for bytes nobody writes is
 the larger part of what a trial costs. So each 4 KiB page of the range has a state of its own, and a page is noted by word only
 once a block writes in it:
 
@@ -78,14 +78,16 @@ compare-and-swap; none adds a state:
   asked the page and the block, so the next block on the same worker starts with nothing but the pages of several readers. (The
   place of a page in the memory is a hash of its number: a warp's lanes are often a fixed number of pages apart, the rows of a
   matrix, and the low bits of the page number sent them all to a few places.)
-* **Runs of words a block has noted.** In a page noted by word, a worker remembers the last four runs of four words or more
-  that its block took as their writer (every word holds the block's writer mark, which nothing changes), and the last four it
+* **Runs of words a block has noted.** In a page noted by word, a worker remembers the last four runs of sixteen words or
+  more (a warp's lanes one after another) that its block took as their writer (every word holds the block's writer mark, which nothing changes), and the last four it
   noted for reading (every word held the block's reader mark, its writer mark or the several-readers mark, and from those a
-  word only moves to another of them). An access of the same block inside a remembered run has nothing to note: the store of
-  `tmp[i] += ...` in a loop is one range compare instead of 32 loads and compares. Two runs of one block that touch are
-  remembered as one; a run is asked the block.
+  word only moves to another of them). An access of the same block, of sixteen words or more, inside a remembered run has
+  nothing to note: the store of `tmp[i] += ...` in a loop is one range compare instead of 32 loads and compares. Two runs of
+  one block that touch are remembered as one; a run is asked the block. (One lane's few words neither enter the memory nor ask
+  it: the runs of 32 lanes would push one another out, and the asking cost each of them.)
 * **Pages of words a worker has read in.** The worker remembers where the words of 64 such pages are; a read whose words all
-  allow it already (looked at one by one, every time) needs no call and no compare-and-swap.
+  allow it already (looked at one by one, every time) needs no call and no compare-and-swap, and a lone untouched word (a
+  lane of a scattered load) is taken as its first reader where it is found.
 * **Two words at once.** Two neighbouring words (the first at an even index) are read as one 64-bit value, and taken by one
   64-bit compare-and-swap when both are free for the block (both untouched for a read; each untouched or the block's own reader
   mark for a write). When either holds anything else the words are handled one at a time as before, so no state is entered
@@ -184,13 +186,17 @@ is any stop of a read.
 
 A trial with a coarse stop is undone like any other. The launch is then tried again, with the allocation the stop was in noted by
 word from its first touch (`MemoryManager::SpecPlan`; pages elsewhere stay by page), and what was learned is kept for the kernel's
-later launches (`Module::exact_plan`, by address range). After the third coarse stop in one launch, with nothing new to learn, or
-with more than 32 ranges learned, the kernel is noted by word everywhere, which is the note of round sp47 and has no coarse stops.
-Only a trial that stops for another reason, or commits, ends the launch's trials; what is run in order is run in order exactly as
-before. The second trial changes time only: a trial that commits is the run in order whatever its plan, by the argument above.
+later launches (`Module::exact_plan`, by address range). After the third coarse stop in one launch, after one with nothing new to
+learn, or with more than 32 ranges learned, the kernel is noted by word everywhere, which has no coarse stops. Only a trial that
+stops for another reason, or commits, ends the launch's trials; what is run in order is run in order exactly as before. The
+second trial changes time only: a trial that commits is the run in order whatever its plan, by the argument above.
 
-`VGPU_EXACT_PAGES=0` notes every page by word from its first touch (round sp47's note), for measurements and as the fourth form of
-the test.
+What a coarse stop throws away is the work up to a block's first store in a page it read. With many blocks, or a store early in
+a block, that is little. With a few blocks and a store at a block's end it is most of the launch, so a launch of fewer than 8
+blocks is noted by word from the start and has no coarse stop.
+
+`VGPU_EXACT_PAGES=0` notes every page by word from its first touch (the note the mode began with), for measurements and as the
+fourth form of the test.
 
 ### A kernel that keeps being stopped
 

@@ -1,0 +1,176 @@
+polybench/ATAX               VGPU_THREADS=1                               wall   1.468 cpu   1.437 rc 0
+polybench/ATAX               VGPU_THREADS=1,VGPU_EXACT_THREADS=2          wall   3.186 cpu   2.534 rc 0
+samples 1435
+  3.55%  /home/saqib/.cache/sp55/corp/polybench/bin/ATAX
+  3.00%  /usr/lib/x86_64-linux-gnu/libc.so.6
+ 92.75%  /home/saqib/.cache/sp55/base/
+  0.70%  /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
+ 18.26%  vgpu::(anonymous namespace)::run_out(unsigned char const*, unsigned char*, unsigned long, unsigned int)
+ 14.70%  load_batch(unsigned long const*, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+ 13.03%  spec_write(unsigned long, unsigned long) const
+ 11.78%  spec_read_each(unsigned long const*, unsigned long, unsigned int) const
+  7.74%  spec_read(unsigned long, unsigned long) const
+  4.32%  void h_global<false>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+  3.48%  load_broadcast(unsigned long, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+  3.21%  Runner::step_warp(Block&, Warp&)
+  3.00%  libc.so.6                    ?
+  2.86%  run_allocation(unsigned long, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+  1.67%  void h_global<true>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+  1.67%  ATAX                         main
+  1.53%  count_run(vgpu::exec::LaunchStats&, bool, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int)
+  1.46%  vgpu::simd::avx2_impl::warp_run_k(unsigned int const*, unsigned int const*, unsigned int)
+polybench/GESUMMV            VGPU_THREADS=1                               wall   0.416 cpu   0.386 rc 0
+polybench/GESUMMV            VGPU_THREADS=1,VGPU_EXACT_THREADS=2          wall   0.466 cpu   0.766 rc 0
+samples 490
+ 22.65%  /home/saqib/.cache/sp55/corp/polybench/bin/GESUMMV
+ 14.90%  /usr/lib/x86_64-linux-gnu/libc.so.6
+ 61.63%  /home/saqib/.cache/sp55/base/
+  0.82%  /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
+ 15.51%  spec_read_each(unsigned long const*, unsigned long, unsigned int) const
+ 15.10%  load_batch(unsigned long const*, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+ 14.90%  libc.so.6                    ?
+ 10.61%  GESUMMV                      init(int, float*, float*, float (*) [4096], float (*) [4096], float*)
+  8.78%  GESUMMV                      gesummv(int, float, float, float (*) [4096], float (*) [4096], float*, float*, float*)
+  7.14%  spec_write(unsigned long, unsigned long) const
+  3.47%  void h_global<false>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+  2.45%  Runner::step_warp(Block&, Warp&)
+  2.45%  spec_read(unsigned long, unsigned long) const
+  2.04%  spec_end()
+  1.63%  load_broadcast(unsigned long, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+  1.63%  GESUMMV                      polybench_flush_cache()
+  1.63%  GESUMMV                      gesummvCuda(int, float, float, float (*) [4096], float (*) [4096], float*, float*, float*, float*)
+  1.43%  load_run(unsigned long, void*, unsigned long, unsigned int, unsigned char*) const
+polybench/GEMVER             VGPU_THREADS=1                               wall   0.667 cpu   0.646 rc 0
+polybench/GEMVER             VGPU_THREADS=1,VGPU_EXACT_THREADS=2          wall   0.767 cpu   1.217 rc 0
+samples 833
+ 19.81%  /home/saqib/.cache/sp55/corp/polybench/bin/GEMVER
+ 14.29%  /usr/lib/x86_64-linux-gnu/libc.so.6
+ 65.91%  /home/saqib/.cache/sp55/base/
+ 15.13%  GEMVER                       gemver(int, float, float, float (*) [4096], float*, float*, float*, float*, float*, float*, float*, float*)
+ 14.29%  libc.so.6                    ?
+ 12.85%  spec_read(unsigned long, unsigned long) const
+  6.84%  spec_write(unsigned long, unsigned long) const
+  5.88%  Runner::step_warp(Block&, Warp&)
+  5.40%  vgpu::(anonymous namespace)::run_out(unsigned char const*, unsigned char*, unsigned long, unsigned int)
+  3.96%  spec_read_each(unsigned long const*, unsigned long, unsigned int) const
+  3.12%  void h_global<false>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+  3.00%  GEMVER                       init(int, float*, float*, float (*) [4096], float*, float*, float*, float*, float*, float*, float*, float*)
+  2.40%  load_batch(unsigned long const*, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+  2.16%  spec_end()
+  2.16%  load_broadcast(unsigned long, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+  1.92%  h_imad_wide(void*, vgpu::sass::tier::MOp const&, unsigned int)
+  1.56%  Runner::init_block(Block&, unsigned long)
+polybench/JACOBI2D           VGPU_THREADS=1                               wall   0.566 cpu   0.558 rc 0
+polybench/JACOBI2D           VGPU_THREADS=1,VGPU_EXACT_THREADS=2          wall   0.716 cpu   1.258 rc 0
+samples 774
+  3.62%  /home/saqib/.cache/sp55/corp/polybench/bin/JACOBI2D
+ 11.63%  /usr/lib/x86_64-linux-gnu/libc.so.6
+  0.13%  /usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.33
+ 84.37%  /home/saqib/.cache/sp55/base/
+  0.26%  /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
+ 25.19%  spec_read(unsigned long, unsigned long) const
+ 14.34%  spec_write(unsigned long, unsigned long) const
+ 11.63%  libc.so.6                    ?
+  8.79%  Runner::step_warp(Block&, Warp&)
+  5.56%  vgpu::(anonymous namespace)::run_out(unsigned char const*, unsigned char*, unsigned long, unsigned int)
+  2.71%  void h_global<false>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+  2.58%  Runner::init_block(Block&, unsigned long)
+  2.58%  spec_end()
+  2.20%  vgpu::simd::avx2_impl::icmp_mask_k(unsigned int, bool, unsigned int const*, unsigned int const*, unsigned int)
+  1.94%  vgpu::simd::avx2_impl::warp_run_k(unsigned int const*, unsigned int const*, unsigned int)
+  1.81%  h_imad(void*, vgpu::sass::tier::MOp const&, unsigned int)
+  1.55%  void vgpu::simd::avx2_impl::imad_wide_avx2<true, false, false>(unsigned int*, unsigned int*, unsigned int const*, unsigned int const*, unsigned int co
+  1.55%  load_run(unsigned long, void*, unsigned long, unsigned int, unsigned char*) const
+  1.16%  vgpu::simd::avx2_impl::imad_k(unsigned int*, unsigned int const*, unsigned int const*, unsigned int const*)
+hecbench/s3d-cuda            VGPU_THREADS=1                               wall   0.416 cpu   0.381 rc 0
+hecbench/s3d-cuda            VGPU_THREADS=1,VGPU_EXACT_THREADS=2          wall   0.516 cpu   0.769 rc 0
+samples 531
+ 17.70%  /usr/lib/x86_64-linux-gnu/libc.so.6
+  0.19%  /usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.33
+  0.75%  /usr/lib/x86_64-linux-gnu/libm.so.6
+ 81.17%  /home/saqib/.cache/sp55/base/
+  0.19%  /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
+ 22.60%  spec_read(unsigned long, unsigned long) const
+ 17.70%  libc.so.6                    ?
+ 13.94%  vgpu::(anonymous namespace)::run_out(unsigned char const*, unsigned char*, unsigned long, unsigned int)
+  9.42%  spec_write(unsigned long, unsigned long) const
+  3.01%  spec_end()
+  2.64%  h_imad_wide(void*, vgpu::sass::tier::MOp const&, unsigned int)
+  2.26%  vgpu::simd::avx512_impl::dop_m_k(unsigned int, unsigned int, unsigned int*, unsigned int*, unsigned int const*, unsigned int const*, unsigned int cons
+  2.26%  Runner::step_warp(Block&, Warp&)
+  1.88%  vgpu::(anonymous namespace)::run_in(unsigned char*, unsigned char const*, unsigned long, unsigned int)
+  1.69%  void vgpu::simd::avx2_impl::imad_wide_avx2<false, false, false>(unsigned int*, unsigned int*, unsigned int const*, unsigned int const*, unsigned int c
+  1.32%  void h_global<false>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+  1.32%  vgpu::sass::Code::instr(unsigned long) const::{lambda()#1}::operator()() const
+  1.13%  load_scalar(unsigned long, unsigned int) const
+  0.94%  vgpu::simd::avx2_impl::fadd_k(unsigned int*, unsigned int const*, unsigned int const*)
+rodinia/sc_gpu               VGPU_THREADS=1                               wall   0.666 cpu   0.663 rc 0
+rodinia/sc_gpu               VGPU_THREADS=1,VGPU_EXACT_THREADS=2          wall   1.016 cpu   1.320 rc 0
+samples 961
+  3.95%  /home/saqib/.cache/sp55/corp/rodinia/bin/sc_gpu
+  5.83%  /usr/lib/x86_64-linux-gnu/libc.so.6
+  0.31%  /usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.33
+ 88.45%  /home/saqib/.cache/sp55/base/
+  0.94%  /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
+  0.52%  [anon]
+ 18.21%  spec_read(unsigned long, unsigned long) const
+  6.97%  spec_read_each(unsigned long const*, unsigned long, unsigned int) const
+  5.83%  vgpu::exec::run_parallel_raw(unsigned int, void (*)(void*, unsigned int), void*)
+  5.83%  libc.so.6                    ?
+  4.47%  Runner::step_warp(Block&, Warp&)
+  4.37%  void vgpu::simd::avx2_impl::imad_wide_avx2<true, false, false>(unsigned int*, unsigned int*, unsigned int const*, unsigned int const*, unsigned int co
+  4.37%  void h_global<false>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+  4.06%  h_imad_wide(void*, vgpu::sass::tier::MOp const&, unsigned int)
+  3.75%  sc_gpu                       pgain(long, Points*, float, long*, int, bool*, int*, bool*, bool, double*, double*, double*, double*, double*, double*)
+  3.02%  load_batch(unsigned long const*, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+  2.50%  spec_write_each(unsigned long const*, unsigned long, unsigned int) const
+  2.19%  spec_keep(unsigned long, unsigned long) const
+  1.87%  load_broadcast(unsigned long, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+  1.66%  h_lea(void*, vgpu::sass::tier::MOp const&, unsigned int)
+polybench/JACOBI1D           VGPU_THREADS=1                               wall   0.967 cpu   0.943 rc 0
+polybench/JACOBI1D           VGPU_THREADS=1,VGPU_EXACT_THREADS=2          wall   1.017 cpu   0.975 rc 0
+samples 969
+  3.10%  /home/saqib/.cache/sp55/corp/polybench/bin/JACOBI1D
+  5.26%  /usr/lib/x86_64-linux-gnu/libc.so.6
+  0.10%  /usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.33
+ 90.92%  /home/saqib/.cache/sp55/base/
+  0.41%  /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
+  0.21%  [anon]
+ 17.75%  Runner::step_warp(Block&, Warp&)
+  7.53%  Runner::init_block(Block&, unsigned long)
+  5.68%  h_imad_wide(void*, vgpu::sass::tier::MOp const&, unsigned int)
+  5.26%  libc.so.6                    ?
+  3.61%  vgpu::simd::avx2_impl::warp_run_k(unsigned int const*, unsigned int const*, unsigned int)
+  3.30%  tier_dyn64(TCtx const&, vgpu::sass::tier::Src const&, unsigned int*, unsigned in
+  2.89%  void h_global<false>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+  2.89%  count_run(vgpu::exec::LaunchStats&, bool, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int)
+  2.79%  h_mov(void*, vgpu::sass::tier::MOp const&, unsigned int)
+  2.68%  void vgpu::simd::avx2_impl::imad_wide_avx2<true, false, false>(unsigned int*, unsigned int*, unsigned int const*, unsigned int const*, unsigned int co
+  2.48%  run_allocation(unsigned long, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+  2.37%  vgpu::(anonymous namespace)::run_out(unsigned char const*, unsigned char*, unsigned long, unsigned int)
+  2.27%  vgpu::simd::avx2_impl::icmp_mask_k(unsigned int, bool, unsigned int const*, unsigned int const*, unsigned int)
+  2.27%  h_isetp(void*, vgpu::sass::tier::MOp const&, unsigned int)
+polybench/LU                 VGPU_THREADS=1                               wall  28.979 cpu  28.949 rc 0
+polybench/LU                 VGPU_THREADS=1,VGPU_EXACT_THREADS=2          wall  26.436 cpu  48.960 rc 0
+samples 30658
+  1.30%  /home/saqib/.cache/sp55/corp/polybench/bin/LU
+  8.74%  /usr/lib/x86_64-linux-gnu/libc.so.6
+  0.09%  /usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.33
+ 89.70%  /home/saqib/.cache/sp55/base/
+  0.17%  /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
+  0.01%  [anon]
+ 17.50%  spec_read(unsigned long, unsigned long) const
+ 11.25%  Runner::step_warp(Block&, Warp&)
+  8.74%  libc.so.6                    ?
+  8.54%  spec_write(unsigned long, unsigned long) const
+  5.90%  vgpu::simd::avx2_impl::icmp_mask_k(unsigned int, bool, unsigned int const*, unsigned int const*, unsigned int)
+  5.18%  Runner::init_block(Block&, unsigned long)
+  2.90%  vgpu::(anonymous namespace)::run_out(unsigned char const*, unsigned char*, unsigned long, unsigned int)
+  2.68%  unsigned int const* tier_dyn<false>(TCtx const&, vgpu::sass::tier::Src const&, u
+  2.52%  vgpu::simd::avx2_impl::imad_k(unsigned int*, unsigned int const*, unsigned int const*, unsigned int const*)
+  2.47%  Runner::tier_sreg_fill(Block const&, Warp con
+  2.46%  h_imad_wide(void*, vgpu::sass::tier::MOp const&, unsigned int)
+  2.18%  spec_end()
+  2.17%  h_isetp(void*, vgpu::sass::tier::MOp const&, unsigned int)
+  1.78%  void vgpu::simd::avx2_impl::imad_wide_avx2<true, false, false>(unsigned int*, unsigned int*, unsigned int const*, unsigned int const*, unsigned int co
+done

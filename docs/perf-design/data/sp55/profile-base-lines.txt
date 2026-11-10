@@ -1,0 +1,109 @@
+== ATAX
+samples 1435
+  0.98%  vgpu::MemoryManager::spec_end()                              at a compare-and-swap  0.00%, elsewhere  0.98%
+  7.74%  vgpu::MemoryManager::spec_read(unsigned long, unsigned long) at a compare-and-swap  1.95%, elsewhere  5.78%
+ 13.03%  vgpu::MemoryManager::spec_write(unsigned long, unsigned long at a compare-and-swap  0.00%, elsewhere 13.03%
+ 11.78%  vgpu::MemoryManager::spec_read_each(unsigned long const*, un at a compare-and-swap  1.05%, elsewhere 10.73%
+  1.25%  libc __default_morecore@GLIBC_2.2.5
+  0.70%  libc mprotect@@GLIBC_2.2.5
+  0.70%  libc __nss_database_lookup@GLIBC_2.2.5
+  0.14%  libc read@@GLIBC_2.2.5
+  0.07%  libc open@@GLIBC_2.2.5
+  0.07%  libc madvise@@GLIBC_2.2.5
+  ld.so samples 10
+== GESUMMV
+samples 490
+  2.04%  vgpu::MemoryManager::spec_end()                              at a compare-and-swap  0.00%, elsewhere  2.04%
+  2.45%  vgpu::MemoryManager::spec_read(unsigned long, unsigned long) at a compare-and-swap  0.00%, elsewhere  2.45%
+  7.14%  vgpu::MemoryManager::spec_write(unsigned long, unsigned long at a compare-and-swap  0.00%, elsewhere  7.14%
+ 15.51%  vgpu::MemoryManager::spec_read_each(unsigned long const*, un at a compare-and-swap  9.59%, elsewhere  5.92%
+  7.14%  libc __default_morecore@GLIBC_2.2.5
+  3.67%  libc mprotect@@GLIBC_2.2.5
+  3.27%  libc __nss_database_lookup@GLIBC_2.2.5
+  0.41%  libc munmap@@GLIBC_2.2.5
+  0.20%  libc timer_settime@GLIBC_2.2.5
+  0.20%  libc close@@GLIBC_2.2.5
+  ld.so samples 4
+== GEMVER
+samples 833
+  0.12%  vgpu::MemoryManager::spec_possible() const                   at a compare-and-swap  0.00%, elsewhere  0.12%
+  2.16%  vgpu::MemoryManager::spec_end()                              at a compare-and-swap  0.00%, elsewhere  2.16%
+  1.08%  vgpu::MemoryManager::spec_keep(unsigned long, unsigned long) at a compare-and-swap  0.00%, elsewhere  1.08%
+ 12.85%  vgpu::MemoryManager::spec_read(unsigned long, unsigned long) at a compare-and-swap  6.72%, elsewhere  6.12%
+  6.84%  vgpu::MemoryManager::spec_write(unsigned long, unsigned long at a compare-and-swap  3.12%, elsewhere  3.72%
+  3.96%  vgpu::MemoryManager::spec_read_each(unsigned long const*, un at a compare-and-swap  2.64%, elsewhere  1.32%
+  8.40%  libc __nss_database_lookup@GLIBC_2.2.5
+  2.64%  libc mprotect@@GLIBC_2.2.5
+  1.80%  libc __default_morecore@GLIBC_2.2.5
+  1.20%  libc munmap@@GLIBC_2.2.5
+  0.12%  libc malloc@@GLIBC_2.2.5
+  0.12%  libc open@@GLIBC_2.2.5
+  ld.so samples 0
+== JACOBI2D
+samples 774
+  2.58%  vgpu::MemoryManager::spec_end()                              at a compare-and-swap  0.00%, elsewhere  2.58%
+  0.13%  vgpu::MemoryManager::spec_keep(unsigned long, unsigned long) at a compare-and-swap  0.00%, elsewhere  0.13%
+ 25.19%  vgpu::MemoryManager::spec_read(unsigned long, unsigned long) at a compare-and-swap 15.12%, elsewhere 10.08%
+ 14.34%  vgpu::MemoryManager::spec_write(unsigned long, unsigned long at a compare-and-swap  9.69%, elsewhere  4.65%
+ 10.72%  libc __nss_database_lookup@GLIBC_2.2.5
+  0.26%  libc malloc@@GLIBC_2.2.5
+  0.26%  libc munmap@@GLIBC_2.2.5
+  0.13%  libc __nptl_death_event@@GLIBC_PRIVATE
+  0.13%  libc __default_morecore@GLIBC_2.2.5
+  0.13%  libc mprotect@@GLIBC_2.2.5
+  ld.so samples 2
+== s3d-cuda
+samples 531
+  3.01%  vgpu::MemoryManager::spec_end()                              at a compare-and-swap  0.00%, elsewhere  3.01%
+  0.56%  vgpu::MemoryManager::spec_keep(unsigned long, unsigned long) at a compare-and-swap  0.00%, elsewhere  0.56%
+ 22.60%  vgpu::MemoryManager::spec_read(unsigned long, unsigned long) at a compare-and-swap 12.24%, elsewhere 10.36%
+  9.42%  vgpu::MemoryManager::spec_write(unsigned long, unsigned long at a compare-and-swap  6.78%, elsewhere  2.64%
+  9.98%  libc __nss_database_lookup@GLIBC_2.2.5
+  5.46%  libc __default_morecore@GLIBC_2.2.5
+  0.75%  libc mprotect@@GLIBC_2.2.5
+  0.38%  libc munmap@@GLIBC_2.2.5
+  0.19%  libc parse_printf_format@@GLIBC_2.2.5
+  0.19%  libc pthread_cond_signal@@GLIBC_2.3.2
+  ld.so samples 1
+== sc_gpu
+samples 961
+  1.56%  vgpu::MemoryManager::spec_end()                              at a compare-and-swap  0.00%, elsewhere  1.56%
+  2.19%  vgpu::MemoryManager::spec_keep(unsigned long, unsigned long) at a compare-and-swap  0.00%, elsewhere  2.19%
+ 18.21%  vgpu::MemoryManager::spec_read(unsigned long, unsigned long) at a compare-and-swap 10.51%, elsewhere  7.70%
+  0.10%  vgpu::MemoryManager::spec_write(unsigned long, unsigned long at a compare-and-swap  0.00%, elsewhere  0.10%
+  6.97%  vgpu::MemoryManager::spec_read_each(unsigned long const*, un at a compare-and-swap  2.29%, elsewhere  4.68%
+  2.50%  vgpu::MemoryManager::spec_write_each(unsigned long const*, u at a compare-and-swap  1.04%, elsewhere  1.46%
+  3.43%  libc __nss_database_lookup@GLIBC_2.2.5
+  1.04%  libc pthread_cond_signal@@GLIBC_2.3.2
+  0.52%  libc __nptl_death_event@@GLIBC_PRIVATE
+  0.31%  libc pthread_sigmask@GLIBC_2.2.5
+  0.21%  libc __default_morecore@GLIBC_2.2.5
+  0.10%  libc pthread_mutex_lock@@GLIBC_2.2.5
+  ld.so samples 9
+== JACOBI1D
+samples 969
+  0.41%  vgpu::MemoryManager::spec_read(unsigned long, unsigned long) at a compare-and-swap  0.31%, elsewhere  0.10%
+  0.21%  vgpu::MemoryManager::spec_write(unsigned long, unsigned long at a compare-and-swap  0.10%, elsewhere  0.10%
+  4.54%  libc __nss_database_lookup@GLIBC_2.2.5
+  0.21%  libc __default_morecore@GLIBC_2.2.5
+  0.21%  libc dl_iterate_phdr@@GLIBC_2.2.5
+  0.10%  libc __isoc23_strtoll@@GLIBC_2.38
+  0.10%  libc pthread_mutex_lock@@GLIBC_2.2.5
+  0.10%  libc malloc@@GLIBC_2.2.5
+  ld.so samples 4
+== LU
+samples 30658
+  0.05%  vgpu::MemoryManager::spec_block(unsigned long)               at a compare-and-swap  0.00%, elsewhere  0.05%
+  0.15%  vgpu::MemoryManager::spec_stopped() const                    at a compare-and-swap  0.00%, elsewhere  0.15%
+  2.18%  vgpu::MemoryManager::spec_end()                              at a compare-and-swap  0.00%, elsewhere  2.18%
+  0.46%  vgpu::MemoryManager::spec_keep(unsigned long, unsigned long) at a compare-and-swap  0.00%, elsewhere  0.46%
+ 17.50%  vgpu::MemoryManager::spec_read(unsigned long, unsigned long) at a compare-and-swap 11.07%, elsewhere  6.43%
+  8.54%  vgpu::MemoryManager::spec_write(unsigned long, unsigned long at a compare-and-swap  6.14%, elsewhere  2.40%
+  0.23%  vgpu::MemoryManager::spec_read_each(unsigned long const*, un at a compare-and-swap  0.04%, elsewhere  0.20%
+  7.95%  libc __nss_database_lookup@GLIBC_2.2.5
+  0.47%  libc malloc@@GLIBC_2.2.5
+  0.10%  libc __default_morecore@GLIBC_2.2.5
+  0.06%  libc pthread_cond_signal@@GLIBC_2.3.2
+  0.05%  libc free@@GLIBC_2.2.5
+  0.05%  libc __nptl_death_event@@GLIBC_PRIVATE
+  ld.so samples 53

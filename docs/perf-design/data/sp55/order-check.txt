@@ -1,0 +1,9 @@
+base first (a = base, b = new):
+rodinia    gaussian               a.x2 2.87 b.x2 3.01  x2[511, 0, 0, 0
+rodinia    lavaMD                 a.x2 0.90 b.x2 1.00  x2[1, 0, 0, 0] 
+hecbench   aobench-cuda           a.x2 0.30 b.x2 0.32  x2[1, 0, 0, 0] 
+new first (a = new, b = base):
+rodinia    gaussian               a.x2 2.99 b.x2 2.90  x2[511, 0, 2, 0
+rodinia    lavaMD                 a.x2 0.98 b.x2 0.94  x2[1, 0, 1, 0] 
+hecbench   aobench-cuda           a.x2 0.30 b.x2 0.32  x2[1, 0, 0, 0] 
+ORDER_DONE

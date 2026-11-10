@@ -37,3 +37,15 @@ for b, n in (("a.", "base"), ("b.", "this round")):
 big = [r for r in rows if r["a.t1"] >= 0.2 and r["trials"].get("b.x8", [0, 1])[1] == 0 and r["trials"].get("a.x8", [0, 1])[1] == 0]
 print("Programs of at least 0.2 s whose trials were all kept (%d): 8 exact threads take %.2fx the time of 8 plain ones on the base, %.2fx this round." % (
     len(big), gm([r["a.x8"] / r["b.t8"] for r in big]), gm([r["b.x8"] / r["b.t8"] for r in big])))
+long = [r for r in rows if r["a.t1"] >= 0.2]
+aa = [r["a.t1b"] / r["a.t1"] for r in long]
+dd = [r["b.t1"] / r["a.t1"] for r in long]
+print("Programs of at least 0.2 s (%d): base twice %.3f (geometric mean; %.3f to %.3f); default mode, new / base %.3f (%.3f to %.3f)." % (
+    len(long), gm(aa), min(aa), max(aa), gm(dd), min(dd), max(dd)))
+for b, n in (("a.", "base"), ("b.", "this round")):
+    print("%s, programs of at least 0.2 s: geometric mean %s at 2 / 4 / 8 exact threads; `VGPU_THREADS=8` %.2fx" % (
+        n, " / ".join("%.2fx" % gm([r["a.t1"] / r[b + x] for r in long]) for x in X), gm([r["a.t1"] / r["b.t8"] for r in long])))
+worse = [(r["name"], x, r["a." + x] / r["b." + x]) for r in long for x in X if r["a." + x] / r["b." + x] < 0.97]
+print("Slower than the base by more than 3 % (programs of at least 0.2 s): " + ", ".join("%s %s %.2f" % (n, x, v) for n, x, v in worse))
+better = sum(1 for r in long for x in X if r["a." + x] / r["b." + x] > 1.03)
+print("Faster than the base by more than 3 %%: %d of %d program-thread counts; slower: %d." % (better, 3 * len(long), len(worse)))

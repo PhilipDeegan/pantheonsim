@@ -1,0 +1,45 @@
+(no mutant: src/core/memory_spec.cpp)        passes in the four forms
+(no mutant: src/core/memory.cpp)             passes in the four forms
+(no mutant: src/sass/exec.cpp)               passes in the four forms
+seen_for_any_block                           killed by default
+seen_for_any_page                            killed by default
+write_in_a_page_others_read                  killed by default
+own_reads_forgotten_on_write                 killed by default
+second_reader_not_noted                      killed by default
+writer_takes_a_page_of_several_readers       killed by default
+coarse_stop_not_said                         killed by default
+coarse_word_stop_not_said                    killed by default
+page_states_not_cleared                      killed by default
+plan_by_word_ignored                         killed by default
+plan_pages_off_ignored                       killed by default
+no_second_trial                              killed by default
+few_blocks_noted_by_page                     killed by default
+second_trial_with_the_same_plan              killed by default
+second_trial_keeps_the_first_one_s_counters  SURVIVED
+run_for_any_block                            killed by default
+run_known_by_its_first_word                  killed by default
+runs_joined_across_a_gap                     killed by default
+read_run_remembered_before_it_is_noted       SURVIVED
+write_run_remembered_before_it_is_taken      SURVIVED
+readable_words_of_another_block              killed by default
+readable_words_not_looked_at                 killed by default
+lone_word_taken_whatever_it_holds            killed by default
+word_page_of_another_page                    killed by default
+pair_written_when_the_first_is_free          killed by default
+pair_written_when_the_second_is_free         killed by default
+pair_written_over_any_reader                 killed by default
+pair_written_not_kept                        killed by default
+pair_read_by_its_first_word                  killed by default
+pair_read_by_its_second_word                 killed by default
+pair_already_written_by_its_first_word       killed by default
+write_conflict_ignored                       killed by default
+read_of_written_ignored                      killed by default
+readers_not_merged                           killed by default
+no_write_back                                killed by default
+nothing_kept                                 killed by default
+kept_first_word_of_a_run_only                killed by default
+shadow_not_cleared                           killed by default
+undo_log_not_emptied                         SURVIVED
+host_store_allowed                           killed by default
+hook_store_batch                             killed by default
+stopped_trial_kept                           killed by default
