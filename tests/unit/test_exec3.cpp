@@ -7402,6 +7402,22 @@ VTEST(cvt_float_to_64bit_int_saturates_at_the_limits) {
   VCHECK_EQ(e.mem.load_scalar(out + 40, 8), 0x8000000000000000ull);   // NaN -> the sign bit (an RTX 3060)
 }
 
+// PTX the parser must take: ld.weak/st.weak (the explicit spelling of the default semantics, GiMMiK's
+// loads and stores), and a .reg range past 65,536 (nvcc's unrolled field arithmetic declares 125,511;
+// ptxas allocates physical registers and counts only the ones a kernel uses).
+VTEST(weak_ld_st_and_huge_register_ranges_parse) {
+  const std::string body = std::string(kHeader) + ".visible .entry k(.param .u64 out)\n{\n"
+      "    .reg .b64 %rd<2>;\n    .reg .f64 %fd<2>;\n    .reg .b64 %big<125511>;\n"
+      "    ld.param.u64 %rd0, [out];\n"
+      "    ld.weak.global.cg.f64 %fd0, [%rd0];\n    st.weak.global.f64 [%rd0], %fd0;\n"
+      "    mov.u64 %big125510, 7;\n    ret;\n}\n";
+  const ptx::Module m = ptx::parse(body);
+  VCHECK_EQ(m.entries.size(), size_t(1));
+  // A word that is no directive is a syntax error (INVALID_PTX), not valid PTX this engine lacks.
+  auto err = VCAPTURE(Error, ptx::parse(std::string(kHeader) + "this is not valid ptx\n"));
+  VCHECK(err.code() == Err::PtxParse);
+}
+
 // Malformed PTX gets a precise parse error, never a crash, a wrong register or
 // a silently truncated number.
 VTEST(malformed_ptx_is_refused_with_a_reason) {

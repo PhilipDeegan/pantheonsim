@@ -570,6 +570,8 @@ cudaError_t set_error(State& s, const vgpu::Error& e, const char* api) {
     case Err::OutOfMemory: code = cudaErrorMemoryAllocation; break;
     case Err::UnknownGpu: code = cudaErrorInvalidDevice; break;
     case Err::PtxParse: code = cudaErrorInvalidPtx; break;
+    case Err::PtxVersion: code = cudaErrorUnsupportedPtxVersion; break;
+    case Err::InvalidImage: code = cudaErrorInvalidKernelImage; break;
     case Err::UnsupportedPtx:
     case Err::Unsupported: code = cudaErrorNotSupported; break;
     case Err::NotFound: code = cudaErrorInvalidDeviceFunction; break;

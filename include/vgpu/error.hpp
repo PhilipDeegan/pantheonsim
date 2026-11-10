@@ -24,6 +24,8 @@ enum class Err {
   MisalignedAccess,       // address not aligned to access size
   PtxParse,               // syntactically invalid PTX
   UnsupportedPtx,         // valid-looking PTX we do not implement yet
+  PtxVersion,             // a .version newer than the driver's PTX compiler takes (CUDA_ERROR_UNSUPPORTED_PTX_VERSION, 222)
+  InvalidImage,           // text the driver does not recognise as PTX or a binary (CUDA_ERROR_INVALID_IMAGE, 200)
   UninitializedRegister,  // kernel read a register before writing it
   DataRace,               // two warps reached the same shared word unordered
   Trap,                   // kernel executed "trap": an unreachable path

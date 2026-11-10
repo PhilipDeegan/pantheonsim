@@ -427,6 +427,7 @@ bool translate_option(const std::string& opt, std::vector<std::string>* out, std
   if (starts("-D") || starts("-U") || starts("-I") || starts("--include-path=") ||
       starts("--define-macro=") || starts("--undefine-macro=") || starts("-std=") ||
       starts("--std=") || starts("--use_fast_math") || starts("--fmad=") ||
+      starts("--ftz=") || starts("--prec-div=") || starts("--prec-sqrt=") ||
       starts("--extra-device-vectorization") || starts("--restrict") ||
       starts("--device-debug") || starts("--generate-line-info") || starts("-lineinfo") ||
       starts("-G") || starts("--relocatable-device-code=") || starts("-rdc=") ||
@@ -637,6 +638,14 @@ VGPU_EXPORT nvrtcResult nvrtcCompileProgram(nvrtcProgram prog, int num_options,
   p->lowered.clear();
   p->cubin.clear();
   p->cubin_made = false;
+  // The options are judged first, as NVRTC judges them before it compiles anything: a bad option is
+  // NVRTC_ERROR_INVALID_OPTION whether or not there is a compiler to hand it to.
+  std::vector<std::string> nvcc_opts;
+  for (int i = 0; i < num_options; ++i) {
+    if (!options || !options[i]) return NVRTC_ERROR_INVALID_OPTION;
+    if (!translate_option(options[i], &nvcc_opts, &p->log)) return NVRTC_ERROR_INVALID_OPTION;
+  }
+
   if (!have_nvcc()) {
     p->log =
         "vgpu nvrtc: nvcc was not found on PATH.\n"
@@ -644,12 +653,6 @@ VGPU_EXPORT nvrtcResult nvrtcCompileProgram(nvrtcProgram prog, int num_options,
         "host and needs no GPU. Install the toolkit, or put nvcc on PATH, to compile at run "
         "time.\n";
     return NVRTC_ERROR_COMPILATION;
-  }
-
-  std::vector<std::string> nvcc_opts;
-  for (int i = 0; i < num_options; ++i) {
-    if (!options || !options[i]) return NVRTC_ERROR_INVALID_OPTION;
-    if (!translate_option(options[i], &nvcc_opts, &p->log)) return NVRTC_ERROR_INVALID_OPTION;
   }
 
   if (!p->scratch.empty()) remove_tree(p->scratch);

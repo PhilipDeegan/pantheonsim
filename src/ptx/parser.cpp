@@ -294,6 +294,10 @@ class Parser {
         if (parse_device_func(fn.get())) m.funcs.push_back(std::move(fn));
         continue;
       }
+      // A word that is no directive at all ("this is not valid ptx") is a
+      // syntax error, which is CUDA_ERROR_INVALID_PTX; only a directive is
+      // valid PTX this engine may lack.
+      if (t.text[0] != '.') fail(t.line, "Parsing error near '" + t.text + "': syntax error");
       fail_unsupported(t.line, t.text, "",
                        "directive not in the implemented PTX subset (supported: .version .target "
                        ".address_size .visible .weak .common .extern .global .const .entry .file .loc "
@@ -1047,7 +1051,11 @@ class Parser {
     }
   }
 
-  static constexpr int64_t kMaxRegisterBank = 1 << 16;
+  // The declared (virtual) count of one .reg range. ptxas turns virtual registers
+  // into physical ones and only counts what a kernel uses, so nvcc's fully
+  // unrolled field arithmetic declares well over 65,536 (Zyklop: 125,511) and is
+  // accepted; the bound is only there against an unbounded allocation.
+  static constexpr int64_t kMaxRegisterBank = 1 << 20;
 
   // Declares one register. Its id is fixed the first time the name is interned,
   // in the register file its width selects. A second declaration at another
@@ -1789,6 +1797,9 @@ class Parser {
         else if (p == "shared" || p == "shared::cluster") space = Space::Shared;
         else if (p == "local") space = Space::Local;
         else if (inert_mem_modifier(p)) ;
+        // .weak is the semantics an unqualified ld/st already has (PTX ISA 6.0
+        // and later); GiMMiK's PTX writes it explicitly.
+        else if (p == "weak") ;
         else if (p == "v2") vec = 2;
         else if (p == "v4") vec = 4;
         // 256-bit accesses (PTX ISA 8.8, sm_100 and later): eight 32-bit

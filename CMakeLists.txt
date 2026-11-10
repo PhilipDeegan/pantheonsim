@@ -2282,6 +2282,20 @@ target_link_libraries(link_devrt PRIVATE vgpucuda)
 add_test(NAME c_harness_link_devrt COMMAND link_devrt)
 set_tests_properties(c_harness_link_devrt PROPERTIES ENVIRONMENT "VGPU_GPU=nvidia/h100")
 
+# PTX the driver takes or refuses -- ld.weak, 70,000 declared registers, the JIT error log, a .version too
+# new, malformed input to cuLinkAddData -- and the NVRTC floating-point options, each as an RTX 3060 does.
+add_executable(ptx_driver_jit nvidia/tests/c_harness/ptx_driver_jit.c)
+target_include_directories(ptx_driver_jit PRIVATE nvidia/include include)
+target_link_libraries(ptx_driver_jit PRIVATE vgpucuda ${CMAKE_DL_LIBS})
+if(TARGET vgpunvrtc)
+  add_test(NAME c_harness_ptx_driver_jit COMMAND ptx_driver_jit $<TARGET_FILE:vgpunvrtc>)
+  set_tests_properties(c_harness_ptx_driver_jit PROPERTIES DEPENDS vgpunvrtc)
+else()
+  add_test(NAME c_harness_ptx_driver_jit COMMAND ptx_driver_jit)
+endif()
+set_tests_properties(c_harness_ptx_driver_jit PROPERTIES
+  ENVIRONMENT "VGPU_GPU=nvidia/h100;VGPU_NVRTC=nvcc;VGPU_QUIET=1")
+
 # The register C API for bring-up software (vgpu_regs.h), and a plain C
 # program against it.
 add_library(vgpuregs SHARED src/capi/regs_capi.cpp)

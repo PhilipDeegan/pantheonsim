@@ -16,6 +16,8 @@ const char* err_name(Err e) {
     case Err::MisalignedAccess: return "misaligned-access";
     case Err::PtxParse: return "ptx-parse";
     case Err::UnsupportedPtx: return "unsupported-ptx";
+    case Err::PtxVersion: return "ptx-version";
+    case Err::InvalidImage: return "invalid-image";
     case Err::UninitializedRegister: return "uninitialized-register";
     case Err::DataRace: return "data-race";
     case Err::Trap: return "trap";
