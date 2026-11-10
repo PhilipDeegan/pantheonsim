@@ -1616,6 +1616,16 @@ endforeach()
 # An empty VGPU_SIMD is no setting at all: the default table.
 add_test(NAME test_simd_dispatch_simd_empty COMMAND test_simd_dispatch)
 set_tests_properties(test_simd_dispatch_simd_empty PROPERTIES ENVIRONMENT "VGPU_SIMD=")
+# The binary64 lane kernel of the AVX-512 table (dop_m, src/simd/lanes512.inc) against the AVX2 table's, bit for bit, on a host that runs both; on
+# any other host the executable prints "SKIP: ..." and the test is reported as skipped, not as passed.
+vgpu_unit_test(test_lanes512)
+set_tests_properties(test_lanes512 PROPERTIES SKIP_REGULAR_EXPRESSION "^SKIP:")
+# The tests of the SASS tier's ALU forms again with the 256-bit dop_m pinned (VGPU_SIMD=avx2): on a host with AVX-512 the default run of each is the
+# 512-bit kernel, and the AVX2 one is what every other host runs (a host without AVX-512 runs the same code twice).
+foreach(_t test_simd test_tier test_sass_alu_runs)
+  add_test(NAME ${_t}_lanes_avx2 COMMAND ${_t})
+  set_tests_properties(${_t}_lanes_avx2 PROPERTIES ENVIRONMENT "VGPU_SIMD=avx2")
+endforeach()
 # The PTX engine's tile route for the other mma.sync forms against the general form, bit for bit.
 vgpu_unit_test(test_mma_tiles)
 # The SASS executor's tile route for the MMA forms its SIMD HMMA kernel does not take, against its general form (the kernels off in a second run).
