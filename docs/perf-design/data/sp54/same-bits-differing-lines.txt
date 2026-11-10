@@ -1,0 +1,35 @@
+rodinia/lavaMD                       thr=4 base#again  counters/digest/rc/lines same ref=('6ae2e1cb', '23a45d91', 0, 1, 1) var=('6ae2e1cb', '23a45d91', 0, 1, 1) | output:
+        ref:  0.000014000000 s,  0.001479805913 % : GPU: SET DEVICE / DRIVER INIT
+        var:  0.000019999999 s,  0.002122157719 % : GPU: SET DEVICE / DRIVER INIT
+        ref:  0.000015000000 s,  0.001585506252 % : GPU MEM: ALO
+        var:  0.000018000001 s,  0.001909942017 % : GPU MEM: ALO
+        ref:  0.000300999993 s,  0.031815826893 % : GPU MEM: COPY IN
+        var:  0.000302000000 s,  0.032044582069 % : GPU MEM: COPY IN
+hec2/lulesh-cuda                     thr=4 base#again  counters/digest/rc/lines same ref=('c9c83c46', '6fc6ae27', 0, 150, 150) var=('c9c83c46', '6fc6ae27', 0, 150, 150) |
+        ref: Elapsed time         =       4.85 (s)
+        var: Elapsed time         =       4.77 (s)
+        ref: Grind time (us/z/c)  =  4.3858931 (per dom)  ( 4.3858931 overall)
+        var: Grind time (us/z/c)  =   4.315144 (per dom)  (  4.315144 overall)
+        ref: FOM                  =  228.00373 (z/s)
+        var: FOM                  =  231.74198 (z/s)
+polybench/SYRK                       thr=4 base#again  counters/digest/rc/lines same ref=('82d8fb6a', '738df747', 0, 1, 1) var=('82d8fb6a', '738df747', 0, 1, 1) | output:
+        ref: 2.373777
+        var: 2.380108
+        ref: 0.650896
+        var: 0.651213
+polybench/SYRK                       thr=4 work        counters/digest/rc/lines same ref=('82d8fb6a', '738df747', 0, 1, 1) var=('82d8fb6a', '738df747', 0, 1, 1) | output:
+        ref: 2.373777
+hec2/xsbench-cuda                    thr=4 base#again  counters/digest/rc/lines DIFFERENT ref=('ccfb7021', '5d8df621', 0, 1, 1) var=('ccfb7021', '82028aaa', 0, 1, 1) | ou
+        ref: Runtime:               0.864 seconds
+        var: Runtime:               0.863 seconds
+        ref: Lookups/s:             231,393
+        var: Lookups/s:             231,621
+        ref: Average kernel execution time: 0.638 seconds
+        var: Average kernel execution time: 0.637 seconds
+hecbench/radixsort2-cuda             thr=4 base#again  counters/digest/rc/lines DIFFERENT ref=('7348eddc', 'dfff5606', 0, 600, 600) var=('defd89cf', 'dfff5606', 0, 600, 6
+        ref: Throughput = 4.2036 MElements/s, Time = 0.01559 s
+        var: Throughput = 4.2027 MElements/s, Time = 0.01559 s
+hecbench/radixsort2-cuda             thr=4 work        counters/digest/rc/lines DIFFERENT ref=('7348eddc', 'dfff5606', 0, 600, 600) var=('1b851d8e', 'dfff5606', 0, 600, 6
+        ref: Throughput = 4.2036 MElements/s, Time = 0.01559 s
+        var: Throughput = 4.2103 MElements/s, Time = 0.01557 s
+hecbench/radixsort2-cuda             thr=4 work@avx2   counters/digest/rc/lines DIFFERENT ref=('7348eddc', 'dfff5606', 0, 600, 600) var=('d99e5382', 'dfff5606', 0, 600, 6

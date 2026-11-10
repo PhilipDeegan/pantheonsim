@@ -2,7 +2,7 @@
 // (two vectors of eight doubles) where kernels.inc's dop_avx2_t takes four. simd.cpp includes this file inside namespace avx512_impl, under the
 // same #pragma GCC target as kernels512.inc, and make_avx512 puts the entry in the Avx512 table; VGPU_SIMD=avx2 keeps the 256-bit one. It is the
 // one lane kernel with a 512-bit form: round sp50 built sixteen-lane forms of thirteen others, and none of them paid; round sp54 measured this
-// one alone (docs/perf-design/rounds/11-rounds-sp36-sp41.md, Round sp50 and Round sp54).
+// one alone (docs/perf-design/rounds/11-rounds-sp36-sp41.md, Round sp54).
 //
 // The kernel gives the bits of the AVX2 one: tests/unit/test_lanes512.cpp runs it against the Avx2 table's entry, and against a definition
 // written lane by lane, on a host that has both (and reports itself skipped on a host that has not). The same operations at another width: one

@@ -1,0 +1,21 @@
+total samples 1321
+ 13.78%      182  lookup_reference
+ 13.17%      174  [libcudart.so.13] vgpu::MemoryManager::load_batch
+ 10.98%      145  grid_init_do_not_profile
+  6.06%       80  [libcudart.so.13] vgpu::exec::memcount::detail::sectors_hash
+  4.47%       59  [libcudart.so.13] step_warp
+  4.01%       53  [libcudart.so.13] void vgpu::sass::h_global<false>
+  3.86%       51  [libc.so.6] __nss_database_lookup
+  3.79%       50  [libcudart.so.13] void vgpu::simd::avx2_impl::dop_avx2_t<2u, true>
+  3.63%       48  [libcudart.so.13] void vgpu::simd::avx2_impl::dop_avx2_t<2u, false>
+  3.33%       44  [libcudart.so.13] vgpu::sass::tier_global_addresses
+  3.18%       42  [libcudart.so.13] void vgpu::simd::avx2_impl::dop_avx2_t<0u, true>
+  2.80%       37  [libc.so.6] putenv
+  2.20%       29  NGP_compare
+  1.89%       25  [libcudart.so.13] vgpu::exec::memcount::detail::sectors_fast
+  1.89%       25  double_compare
+  1.59%       21  [libcudart.so.13] vgpu::simd::avx2_impl::blend_m_k
+  1.29%       17  [libcudart.so.13] vgpu::simd::avx2_impl::dop_m_k
+  1.21%       16  [libcudart.so.13] vgpu::sass::h_dop
+  1.06%       14  [libcudart.so.13] vgpu::sass::tier_issue
+  0.91%       12  [libcudart.so.13] vgpu::sass::Runner::fast_float
