@@ -215,7 +215,7 @@ enum class Where : uint8_t {
 // copies what it returns; a copy in the other direction is never needed for correctness, only for speed.
 class Residency {
  public:
-  explicit Residency(uint64_t chunks = 0) : state_(chunks, Where::Host) {}
+  explicit Residency(uint64_t chunks = 0) : state_(chunks, Where::Host) { n_[0] = chunks; }
   uint64_t chunks() const { return state_.size(); }
   Where at(uint64_t c) const { return state_[c]; }
 
@@ -226,7 +226,7 @@ class Residency {
     std::vector<uint64_t> pull;
     for (uint64_t c = first; c <= last && c < state_.size(); ++c) {
       if (state_[c] == Where::Card && !whole) pull.push_back(c);
-      state_[c] = Where::Host;
+      put(c, Where::Host);
     }
     return pull;
   }
@@ -236,7 +236,7 @@ class Residency {
     for (uint64_t c = first; c <= last && c < state_.size(); ++c)
       if (state_[c] == Where::Card) {
         pull.push_back(c);
-        state_[c] = Where::Both;
+        put(c, Where::Both);
       }
     return pull;
   }
@@ -247,21 +247,35 @@ class Residency {
     for (uint64_t c = 0; c < state_.size(); ++c)
       if (state_[c] == Where::Host) {
         push.push_back(c);
-        state_[c] = Where::Both;
+        put(c, Where::Both);
       }
     return push;
   }
-  void card_launched() { std::fill(state_.begin(), state_.end(), Where::Card); }
+  void card_launched() {
+    std::fill(state_.begin(), state_.end(), Where::Card);
+    n_[0] = n_[2] = 0;
+    n_[1] = state_.size();
+  }
   // After a launch whose written chunks are known (a host-side diff, or a kernel whose stores are bounded).
   void card_launched_writing(uint64_t first, uint64_t last) {
-    for (uint64_t c = first; c <= last && c < state_.size(); ++c) state_[c] = Where::Card;
+    for (uint64_t c = first; c <= last && c < state_.size(); ++c) put(c, Where::Card);
   }
-  uint64_t count(Where w) const { return static_cast<uint64_t>(std::count(state_.begin(), state_.end(), w)); }
+  // O(1): the counts are kept by every change of a chunk (the gate asked for them after every access to a card-valid allocation, in a loop over the chunks, which
+  // made PolyBench 2DCONV with VGPU_HOST_GPU_VERIFY=1 and 128 MiB live run for more than 8 minutes, Round sp42 finding 6).
+  uint64_t count(Where w) const { return n_[static_cast<unsigned>(w)]; }
   // Chunks whose card copy is valid (Card or Both): an allocation with any is kept out of the memory manager's lookup memories.
-  uint64_t card_valid() const { return count(Where::Card) + count(Where::Both); }
+  uint64_t card_valid() const { return n_[1] + n_[2]; }
+  // Whether an access of [first, last] needs the gate to change anything: a read, when a chunk of it is the card's alone (it has to be pulled); a write, when a chunk
+  // of it is not the simulator's alone (a card copy goes stale, or has to be pulled first). Reads of Host and Both chunks, and writes to Host chunks, change nothing.
+  bool access_changes_state(uint64_t first, uint64_t last, bool write) const {
+    for (uint64_t c = first; c <= last && c < state_.size(); ++c)
+      if (write ? state_[c] != Where::Host : state_[c] == Where::Card) return true;
+    return false;
+  }
   // The chunks a launch on the card has to push (the simulator's bytes are the truth for them).
   std::vector<uint64_t> host_chunks() const {
     std::vector<uint64_t> out;
+    if (n_[0] == 0) return out;
     for (uint64_t c = 0; c < state_.size(); ++c)
       if (state_[c] == Where::Host) out.push_back(c);
     return out;
@@ -269,17 +283,24 @@ class Residency {
   // A launch the simulator runs: it may read or write anything, so the Card chunks come back first and every chunk is then Host.
   std::vector<uint64_t> sim_launch() {
     std::vector<uint64_t> pull;
-    for (uint64_t c = 0; c < state_.size(); ++c) {
+    for (uint64_t c = 0; c < state_.size(); ++c)
       if (state_[c] == Where::Card) pull.push_back(c);
-      state_[c] = Where::Host;
-    }
+    std::fill(state_.begin(), state_.end(), Where::Host);
+    n_[1] = n_[2] = 0;
+    n_[0] = state_.size();
     return pull;
   }
   // The same, for the chunks a simulator launch is known not to write (not used by the runtime: pointers inside memory cannot be followed).
-  void set(uint64_t c, Where w) { state_[c] = w; }
+  void set(uint64_t c, Where w) { put(c, w); }
 
  private:
+  void put(uint64_t c, Where w) {
+    --n_[static_cast<unsigned>(state_[c])];
+    ++n_[static_cast<unsigned>(w)];
+    state_[c] = w;
+  }
   std::vector<Where> state_;
+  uint64_t n_[3] = {0, 0, 0};   // chunks per Where (Host, Card, Both)
 };
 
 // Chunk indices to [first, count) runs, for one copy call per run of adjacent chunks.
@@ -325,6 +346,10 @@ struct Costs {
   double margin = 2.0;                // offload only when the simulator is expected to take this many times the card path
   double sim_warp_instr_per_s = 100e6;   // a lower bound of the simulator's speed in warp instructions per second (tens to ~150 M per thread in the benchmarks)
   double min_sim_s = 200e-6;          // never below this, whatever the arithmetic says (timer noise, the estimate's error)
+  // The one-off cost of the first card launch: loading the driver, cuInit, the primary context and the window reservation. Measured on an A10G at 0.23 s of
+  // process wall time (docs/performance.md "Round sp42": the native process of a trivial program also takes 0.24 s). 0.25 rounds it up. VGPU_HOST_GPU_START_COST
+  // sets it in seconds; 0 charges nothing (the rule before sp43: the driver starts at the first launch the per-launch rule accepts).
+  double start_cost_s = 0.25;
 };
 
 struct Estimate {
@@ -332,10 +357,11 @@ struct Estimate {
   std::optional<double> card_kernel_s;
   uint64_t push_bytes = 0;
   uint64_t pull_bytes = 0;
+  double start_s = 0;                 // the driver start this launch would pay (the first card launch of the process); 0 once the driver is up
 };
 
 inline double card_path_seconds(const Estimate& e, const Costs& c) {
-  return c.launch_s + e.card_kernel_s.value_or(c.kernel_s_default) + static_cast<double>(e.push_bytes) / c.push_bytes_per_s +
+  return e.start_s + c.launch_s + e.card_kernel_s.value_or(c.kernel_s_default) + static_cast<double>(e.push_bytes) / c.push_bytes_per_s +
          static_cast<double>(e.pull_bytes) / c.pull_bytes_per_s;
 }
 
@@ -343,15 +369,31 @@ inline bool should_offload(const Estimate& e, const Costs& c) {
   return e.sim_s >= c.min_sim_s && e.sim_s > c.margin * card_path_seconds(e, c);
 }
 
-// ---- start-up of the real driver ---------------------------------------------------------------------------------------------------
-// Loading the driver and making its context costs 0.15 to 0.35 s (09 doc, section 5). It starts, on a thread, at the first launch of a kernel in the exact set
-// that is big enough to be a candidate; a program with no such launch never loads the driver. A launch of fewer than kStartMinWarps warps in all runs in well
-// under a millisecond in the simulator and cannot repay a start by itself; a kernel whose small grid runs long gets its start when the card path is first needed.
-inline constexpr uint64_t kStartMinWarps = 32;
-inline bool start_worthwhile(uint64_t blocks, uint32_t threads_per_block) {
-  const uint64_t warps_per_block = (static_cast<uint64_t>(threads_per_block) + 31) / 32;
-  return blocks * warps_per_block >= kStartMinWarps;
+// The rule for a launch, charging the driver start while it has not been paid (sp43). Before it, the rule judged a launch against the card path ALONE and a
+// program whose launches each looked worth a card paid the 0.23 s start for a saving of milliseconds (all 8 Rodinia programs: 0.04x to 0.29x), and some paid
+// it with every launch kept in the simulator (the start was kicked off at the first big-enough launch and awaited at exit). The driver now starts only when
+// this function says a launch goes, and it says so when EITHER
+//   * the launch alone repays the start: the simulator is expected to take more than `margin` times the card path INCLUDING the start (a single large launch:
+//     PolyBench SYRK, SYR2K, 2MM, FDTD-2D), or
+//   * the launch is worth a card with the driver up (should_offload without the start) AND the program has already spent at least `start_cost_s` of simulator
+//     time in launches that could have gone to the card (`eligible_sim_spent_s`: the sum over every launch of an exact-set kernel that stayed in the simulator).
+//     This is the ski-rental rule: the start is bought only after as much has been spent renting as buying costs, so a start that turns out useless costs at most
+//     the time the program had already spent, never more than doubling it, and a program that never spends that much never starts the driver.
+// With the driver up the start is paid and only should_offload applies. start_cost_s <= 0 is the old rule.
+inline bool should_offload_with_start(const Estimate& e, const Costs& c, bool driver_started, double eligible_sim_spent_s) {
+  if (!should_offload(e, c)) return false;                      // not worth a card even with the driver up
+  if (driver_started || c.start_cost_s <= 0) return true;
+  Estimate cold = e;
+  cold.start_s = c.start_cost_s;
+  return should_offload(cold, c) || eligible_sim_spent_s >= c.start_cost_s;
 }
+
+// ---- start-up of the real driver ---------------------------------------------------------------------------------------------------
+// Loading the driver and making its context costs 0.15 to 0.35 s (09 doc, section 5; 0.23 s on the A10G of docs/performance.md "Round sp42"). Nothing touches
+// the driver, and no thread is started for it, until should_offload_with_start has decided that a launch goes to the card: the start is then made at that launch
+// and the launch waits for it (Costs::start_cost_s is part of that decision). A program that never has such a launch never loads the driver and does not wait for it
+// at exit. (Until sp42 the start was kicked off, on a thread, at the first launch of an exact-set kernel on a grid of 32 warps or more and awaited at exit, so
+// every program with one such launch paid it, offloaded or not.)
 
 // An estimate for a launch the simulator has not run yet: every warp of the grid executes the kernel's static instruction count, at the
 // simulator's rate. It is NOT a lower bound: a thread that leaves at a bounds check runs a few instructions (PolyBench 3DCONV, a stencil
@@ -440,13 +482,13 @@ struct FirstLaunch {
   uint64_t live_bytes = 0;
 };
 
-inline bool first_launch_offload(const FirstLaunch& f, const Costs& c) {
+inline bool first_launch_offload(const FirstLaunch& f, const Costs& c, bool driver_started = true, double eligible_sim_spent_s = 0) {
   if (!f.back_edge || f.multiprocessors == 0 || f.blocks < kFirstLaunchBlocksPerSm * f.multiprocessors || f.live_bytes > kFirstLaunchMaxBytes) return false;
   Estimate e;
   e.sim_s = static_sim_seconds(f.blocks, f.threads_per_block, f.static_instrs, c);
   e.push_bytes = f.live_bytes;
   e.pull_bytes = f.live_bytes;
-  return should_offload(e, c);
+  return should_offload_with_start(e, c, driver_started, eligible_sim_spent_s);
 }
 
 // A safety net for any estimate that turns out wrong: an offloaded launch that took longer on the card path (copies, launch, copy back)

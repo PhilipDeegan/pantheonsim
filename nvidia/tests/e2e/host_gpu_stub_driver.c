@@ -41,9 +41,12 @@ int cuMemsetD8_v2(u64 p, unsigned char v, size_t n) { (void)p; (void)v; (void)n;
 int cuMemcpyHtoD_v2(u64 d, const void* s, size_t n) { (void)d; (void)s; (void)n; note("cuMemcpyHtoD"); return 0; }
 int cuMemcpyDtoH_v2(void* d, u64 s, size_t n) { (void)d; (void)s; (void)n; return 0; }
 int cuMemGetInfo_v2(size_t* f, size_t* t) { *f = 1ull << 40; *t = 1ull << 40; return 0; }
-int cuModuleLoadData(void** m, const void* image) { (void)m; (void)image; note("cuModuleLoadData"); return 1; }
-int cuModuleGetFunction(void** f, void* m, const char* name) { (void)f; (void)m; (void)name; return 1; }
+/* STUB_CARD_OK=1: the module loads and a launch succeeds without doing anything (the card's memory is whatever the stub's copies left: nothing). For a run that only
+ * needs the mode to believe a launch ran on the card, such as VGPU_HOST_GPU_VERIFY=1, whose result is the simulator's whatever the card did. Never for a run whose
+ * output matters in the plain mode: the offloaded launches would not have run at all. */
+int cuModuleLoadData(void** m, const void* image) { (void)image; note("cuModuleLoadData"); if (env_int("STUB_CARD_OK", 0)) { *m = (void*)0x2000; return 0; } return 1; }
+int cuModuleGetFunction(void** f, void* m, const char* name) { (void)m; (void)name; if (env_int("STUB_CARD_OK", 0)) { *f = (void*)0x3000; return 0; } return 1; }
 int cuFuncSetAttribute(void* f, int a, int v) { (void)f; (void)a; (void)v; return 0; }
 int cuLaunchKernel(void* f, unsigned a, unsigned b, unsigned c, unsigned d, unsigned e, unsigned g, unsigned sh, void* s, void** p, void** x) {
-  (void)f; (void)a; (void)b; (void)c; (void)d; (void)e; (void)g; (void)sh; (void)s; (void)p; (void)x; note("cuLaunchKernel"); return 1;
+  (void)f; (void)a; (void)b; (void)c; (void)d; (void)e; (void)g; (void)sh; (void)s; (void)p; (void)x; note("cuLaunchKernel"); return env_int("STUB_CARD_OK", 0) ? 0 : 1;
 }
