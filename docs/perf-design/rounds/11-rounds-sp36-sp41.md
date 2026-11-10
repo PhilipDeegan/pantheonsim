@@ -366,3 +366,140 @@ Nothing in the PTX counting sorts: `distinct_sectors` keeps a list and searches 
 
 ### Result
 No source change is kept: the branch carries only this section. No timings against a control copy were taken because nothing was built (so there is no A/A figure to report; the IBS runs are single profiles, one per program, not repeated). Mutation tests and a differential test are therefore not added. Cleanup: the scratch directories of this round on server2 were removed by exact path.
+
+## Round sp51 (persistent on-disk caches for short programs): the split measured first, load, decode and compile are 3 percent of a short program, nothing built (branch `sp51-disk-cache`, base `origin/main` 27f09add)
+
+Question: most CI programs run well under a second, so does work a process repeats at every start (decoding a module's SASS, building the tier's micro-ops, parsing PTX) dominate them, and would an opt-in directory of decoded modules or compiled kernels (`VGPU_CACHE_DIR`), read back by the next process, pay? Rule set beforehand: split the wall time of about 15 short programs first; build the cache only if decode and compile are 15 % or more of the wall on them; keep it only if warm runs gain 10 % or more in the geometric mean. Result: on the default engine the four phases a cache of decoded modules could replace (module load, SASS check and decode, tier analysis, PTX parse) are 2.9 % of the samples in the mean of 20 short programs and at most 13.7 % in one; removing every one of those samples and adding nothing would be 1.031x in the geometric mean. On the PTX engine it is 6.1 % and 1.069x. Both gates fail by a wide margin, so no cache was built. What is kept: the tool that makes the split (`tools/bench/real/short.py`) with a CMake-wired self-test of its rules, the tables, and this section.
+
+### What is on disk already (read from the code and earlier rounds before measuring)
+
+* The SASS verdict file (`src/sass/ok_cache.cpp`, #438, on by default since round sp11): a 16-byte hash per cubin found to run in full, in `$XDG_CACHE_HOME/pantheonsim/sass-ok-v1-<build id>`. It saves the check that decodes every instruction word of a cubin when a fatbin is registered. It holds no code and no decoded form.
+* The JIT's object cache (`VGPU_JIT_CACHE`, off unless `VGPU_JIT=1`): shared objects of hot regions, compiled only after 100 M warp instructions of a section, so a short program never reaches it.
+* In the process: a code section is decoded when first run (`Code::instr`, one `call_once` per section), the tier's program is built per section when first run, a PTX module of 16 KiB or more is parsed a kernel at a time (round sp19), the launch and look-up caches. So a short program already decodes only the sections it runs.
+* An earlier design for a persistent cache of generated code exists (`docs/perf-design/02-tiering-and-caching.md`, hypothetical `VGPU_CACHE_DIR`) and round 10's "design only" section for the verdict file, which became the file above. No earlier round built a cache of decoded modules.
+
+### Method
+
+server3 (Ryzen 7 PRO 8840U, 16 CPUs, Linux 6.8, GCC 13.3), Release build with LTO of `origin/main` 27f09add, `VGPU_THREADS=1`, `VGPU_GPU=nvidia/rtx3060`, `taskset -c 12`, `nice -n 19`, every run under the builder lock, a private `XDG_CACHE_HOME`. The programs are the cached binaries of the four real-program corpora (`tools/bench/real`, CUDA 13.0, sm_86), Rodinia at the small sizes of the card/sim runner. `short.py survey` ran all 124 candidates (4 s limit, the box busy at the time): 36 hit the limit, one does not start (a missing library), 71 finish under a second and 42 under 100 ms. The 20 below were picked from those across the corpora and from 3.5 ms to 300 ms, with the two dynamic-parallelism samples (their cubins carry the device runtime library, the largest modules of the short set) to give decoding its best case.
+
+`short.py split`: each program 10 times under `perf record -F 20000 -g -e cycles` (user and kernel), every sample of the program's process put in one phase by its call chain. The rules are in the tool (`PHASES`, checked by `lint_short_split_selftest`): the first rule that matches a frame's function name wins, the specific phases before `execute`, so decoding inside the first launch is decoding; `loader` is exec plus the dynamic loader; `sim-other` is the simulator's API outside the named phases (allocation, `cudaMemcpy`, first-touch page faults of device memory); `program-host` is the program's own code and libc. `perf_event_paranoid` is 4 on this host: perf ran as `sudo -n perf record ... -- sudo -n -u <user> -- <program>`, the program as the ordinary user, no system setting changed. Wall is the median of five unprofiled runs. The 1-minute load was 4.0 when the split started (the previous lock holder's tail) and 0.8 when it ended; shares do not depend on it, the wall column may by a few percent. The first split had a rule that matched `vgpu::ptx::` anywhere in a symbol and so counted `launch(vgpu::ptx::EntryFn const&, ...)` as parsing (33 % to 70 % "parse" on the PTX engine): rules now look at the function's own name only, the self-test has that case, and the tables are from the rerun.
+
+### Split, SASS engine (the default), verdict file warm: percent of samples
+
+| program | wall ms | samples | loader | device-init | module-load | sass-decode | tier-build | ptx-parse | execute | teardown | sim-other | program-host | **load+decode+compile** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| samples/simpleTemplates | 3.5 | 513 | 62.0 | 3.1 | 0.4 | 1.9 | 0.2 | 0.0 | 4.1 | 1.2 | 18.3 | 8.8 | **2.5** |
+| rodinia/srad_v2 | 4.5 | 737 | 52.5 | 2.7 | 0.0 | 6.8 | 0.5 | 0.1 | 4.6 | 0.3 | 19.1 | 13.3 | **7.5** |
+| samples/cdpSimpleQuicksort | 4.5 | 883 | 37.4 | 3.1 | 4.8 | 7.2 | 0.3 | 0.3 | 7.4 | 0.2 | 20.8 | 18.5 | **12.7** |
+| samples/vectorAdd | 4.5 | 820 | 45.1 | 3.7 | 0.2 | 1.3 | 0.0 | 0.0 | 13.9 | 0.0 | 11.3 | 24.4 | **1.6** |
+| samples/cdpQuadtree | 8.1 | 1647 | 25.0 | 1.5 | 3.9 | 8.8 | 0.8 | 0.1 | 31.3 | 0.2 | 14.7 | 13.8 | **13.7** |
+| rodinia/bfs | 8.3 | 1532 | 20.8 | 1.8 | 0.3 | 1.1 | 0.3 | 0.2 | 46.9 | 0.3 | 6.1 | 22.3 | **1.9** |
+| hecbench/backprop-cuda | 9.7 | 1896 | 16.9 | 1.9 | 0.3 | 1.0 | 0.1 | 0.2 | 50.8 | 0.3 | 6.5 | 22.0 | **1.6** |
+| samples/binaryPartitionCG | 10.7 | 2209 | 15.3 | 1.1 | 0.1 | 1.6 | 0.0 | 0.0 | 64.6 | 0.3 | 8.5 | 8.3 | **1.9** |
+| rodinia/gaussian | 12.5 | 2176 | 15.2 | 1.5 | 0.4 | 1.2 | 0.1 | 0.1 | 65.8 | 0.2 | 6.3 | 9.2 | **1.8** |
+| hecbench/atan2-cuda | 17.7 | 3560 | 7.5 | 0.7 | 0.0 | 1.8 | 0.1 | 0.0 | 61.9 | 0.0 | 4.4 | 23.5 | **2.0** |
+| samples/fp16ScalarProduct | 19.0 | 3784 | 9.6 | 0.6 | 0.1 | 0.5 | 0.1 | 0.0 | 29.6 | 0.1 | 5.0 | 54.5 | **0.7** |
+| hecbench/adam-cuda | 22.0 | 4402 | 6.7 | 0.7 | 0.0 | 1.5 | 0.2 | 0.0 | 76.1 | 0.0 | 2.7 | 12.0 | **1.7** |
+| samples/scalarProd | 31.7 | 6251 | 5.5 | 0.4 | 0.1 | 0.8 | 0.0 | 0.0 | 39.4 | 0.1 | 5.7 | 47.9 | **1.0** |
+| rodinia/lud | 33.3 | 6475 | 6.1 | 0.3 | 0.0 | 2.4 | 0.2 | 0.0 | 69.9 | 0.0 | 4.2 | 16.8 | **2.7** |
+| rodinia/backprop | 39.4 | 8187 | 5.1 | 0.4 | 0.0 | 0.6 | 0.0 | 0.0 | 71.2 | 0.1 | 3.5 | 19.1 | **0.7** |
+| rodinia/particlefilter_float | 80.6 | 16769 | 2.1 | 0.2 | 0.0 | 1.1 | 0.2 | 0.0 | 93.5 | 0.0 | 1.6 | 1.3 | **1.4** |
+| samples/shfl_scan | 94.3 | 19240 | 1.7 | 0.2 | 0.0 | 0.5 | 0.0 | 0.0 | 81.4 | 0.0 | 7.3 | 8.8 | **0.6** |
+| hecbench/sortKV-cuda | 168.2 | 34790 | 1.0 | 0.1 | 0.1 | 2.0 | 0.3 | 0.0 | 80.3 | 0.0 | 4.0 | 12.2 | **2.4** |
+| polybench/ADI | 215.0 | 49182 | 0.8 | 0.2 | 0.0 | 0.4 | 0.0 | 0.1 | 75.7 | 0.0 | 1.6 | 21.2 | **0.5** |
+| polybench/BICG | 303.4 | 63785 | 0.6 | 0.2 | 0.0 | 0.1 | 0.0 | 0.0 | 62.3 | 0.0 | 3.4 | 33.4 | **0.1** |
+| mean of shares | | | 16.8 | 1.2 | 0.5 | 2.1 | 0.2 | 0.1 | 51.5 | 0.2 | 7.8 | 19.6 | **2.9** |
+| wall-weighted | 1090.9 | | 3.3 | 0.3 | 0.1 | 0.9 | 0.1 | 0.0 | 70.0 | 0.0 | 3.9 | 21.3 | **1.1** |
+
+Ceiling (every sample of those four columns removed, nothing added): geomean 1.031x over 20 programs; 0 of 20 programs at or above 15 %.
+
+
+### Split, PTX engine (`VGPU_SASS=0`): percent of samples
+
+| program | wall ms | samples | loader | device-init | module-load | sass-decode | tier-build | ptx-parse | execute | teardown | sim-other | program-host | **load+decode+compile** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| samples/simpleTemplates | 2.8 | 584 | 57.9 | 3.8 | 5.8 | 0.0 | 0.0 | 4.8 | 3.9 | 0.9 | 17.8 | 5.1 | **10.6** |
+| samples/vectorAdd | 4.6 | 890 | 33.6 | 2.4 | 3.8 | 0.0 | 0.0 | 2.4 | 26.2 | 0.3 | 9.2 | 22.1 | **6.2** |
+| samples/cdpSimpleQuicksort | 5.0 | 1053 | 37.0 | 2.6 | 11.5 | 0.0 | 0.0 | 9.3 | 7.6 | 0.2 | 16.2 | 15.6 | **20.8** |
+| rodinia/srad_v2 | 5.5 | 989 | 36.4 | 2.8 | 2.2 | 0.0 | 0.0 | 16.8 | 3.0 | 0.2 | 18.7 | 19.8 | **19.0** |
+| rodinia/bfs | 12.4 | 2382 | 14.0 | 1.2 | 1.0 | 0.0 | 0.0 | 2.2 | 62.6 | 0.1 | 5.5 | 13.4 | **3.2** |
+| samples/binaryPartitionCG | 14.3 | 2884 | 10.9 | 1.1 | 2.3 | 0.0 | 0.0 | 4.5 | 61.0 | 0.7 | 11.3 | 8.3 | **6.8** |
+| hecbench/backprop-cuda | 15.4 | 3166 | 12.6 | 1.0 | 0.9 | 0.0 | 0.0 | 1.9 | 66.3 | 0.1 | 5.1 | 12.1 | **2.7** |
+| samples/cdpQuadtree | 16.7 | 3446 | 12.0 | 0.8 | 5.8 | 0.0 | 0.0 | 22.8 | 22.2 | 0.1 | 15.4 | 20.9 | **28.6** |
+| rodinia/gaussian | 24.2 | 4846 | 7.7 | 0.5 | 0.5 | 0.0 | 0.0 | 1.1 | 84.5 | 0.1 | 3.5 | 2.1 | **1.6** |
+| hecbench/atan2-cuda | 28.6 | 5805 | 7.0 | 0.5 | 0.4 | 0.0 | 0.0 | 1.7 | 70.7 | 0.1 | 3.3 | 16.3 | **2.1** |
+| hecbench/adam-cuda | 32.1 | 6613 | 5.1 | 0.4 | 0.5 | 0.0 | 0.0 | 2.9 | 76.4 | 0.1 | 3.3 | 11.3 | **3.4** |
+| samples/fp16ScalarProduct | 33.2 | 6701 | 5.5 | 0.5 | 1.0 | 0.0 | 0.0 | 1.9 | 55.4 | 0.1 | 3.5 | 32.0 | **2.9** |
+| samples/scalarProd | 33.6 | 6822 | 5.5 | 0.6 | 0.9 | 0.0 | 0.0 | 1.7 | 41.5 | 0.1 | 5.6 | 44.2 | **2.6** |
+| rodinia/backprop | 65.4 | 13431 | 2.8 | 0.2 | 0.2 | 0.0 | 0.0 | 0.8 | 82.1 | 0.0 | 2.7 | 11.1 | **1.0** |
+| rodinia/lud | 86.8 | 18325 | 2.3 | 0.1 | 0.2 | 0.0 | 0.0 | 2.3 | 86.4 | 0.0 | 2.0 | 6.7 | **2.5** |
+| samples/shfl_scan | 165.1 | 34265 | 1.2 | 0.1 | 0.4 | 0.0 | 0.0 | 1.5 | 88.7 | 0.0 | 2.6 | 5.6 | **1.8** |
+| rodinia/particlefilter_float | 176.1 | 36551 | 1.0 | 0.1 | 0.2 | 0.0 | 0.0 | 2.2 | 91.0 | 0.0 | 2.7 | 3.0 | **2.3** |
+| polybench/ADI | 186.3 | 38793 | 0.9 | 0.2 | 0.1 | 0.0 | 0.0 | 0.5 | 72.2 | 0.0 | 2.2 | 23.9 | **0.6** |
+| polybench/BICG | 444.6 | 93954 | 0.4 | 0.1 | 0.0 | 0.0 | 0.0 | 0.1 | 76.4 | 0.0 | 2.2 | 20.7 | **0.1** |
+| hecbench/sortKV-cuda | 765.5 | 163058 | 0.2 | 0.0 | 0.2 | 0.0 | 0.0 | 3.0 | 80.6 | 0.0 | 8.2 | 7.8 | **3.2** |
+| mean of shares | | | 12.7 | 0.9 | 1.9 | 0.0 | 0.0 | 4.2 | 57.9 | 0.2 | 7.1 | 15.1 | **6.1** |
+| wall-weighted | 2118.3 | | 1.7 | 0.2 | 0.3 | 0.0 | 0.0 | 2.0 | 78.2 | 0.0 | 4.9 | 12.7 | **2.3** |
+
+Ceiling (every sample of those four columns removed, nothing added): geomean 1.069x over 20 programs; 3 of 20 programs at or above 15 %.
+
+
+What the columns say:
+
+* **Loader.** The shortest programs are the dynamic loader: 37 % to 62 % of a 3.5 to 4.5 ms program, 15 % to 25 % at 8 to 12 ms, under 10 % from 18 ms. Round sp19 took this apart (2503 symbol bindings, 1729 of them libstdc++'s own; `-Bsymbolic` is not safe for the two libraries that carry the core; lazy binding is already the right setting); the 10 MB shim has 2302 relative relocations, which is nothing. No new lever here.
+* **Load, decode, compile.** Under 3 % for 17 of the 20 on the default engine. The three above are `cdpQuadtree` (13.7 %), `cdpSimpleQuicksort` (12.7 %) and `srad_v2` (7.5 %, a 4.5 ms run). In those the decode samples are spread over `malloc` under `sass::decode` (an `Instr` owns its operand vector and mnemonic string), `Code::instr` and `parse_cubin`; no single symbol is 1 % of the program (`data/sp51/detail-shortest.txt`).
+* **PTX engine.** Parsing and lowering is 4.2 % in the mean; three programs are at or over 15 % (`cdpQuadtree` 28.6 %, `cdpSimpleQuicksort` 20.8 %, `srad_v2` 19.0 %, with zstd decompression of the fatbin's PTX inside module-load). `vgpu::ptx::lex` alone is 9 % of `cdpQuadtree`'s samples.
+* **Device init and teardown** are 1.2 % and 0.2 % in the mean (profile YAML, telemetry segment, the fault hook's directory); nothing in them reaches the 2 % bar round sp19 used, so no lazy-init change was made.
+* **sim-other** in the shortest programs (11 % to 21 %) is led by the kernel clearing pages under `cudaMemcpy` (3 % to 5 %: the first touch of device memory the program copies into), the rest in pieces under 1 %.
+
+### The verdict file there already is (`VGPU_SASS_CACHE`): off, cold, warm
+
+| program | off ms | cold ms | warm ms | off/warm | off/cold | outputs |
+|---|---:|---:|---:|---:|---:|---|
+| samples/simpleTemplates | 2.92 | 3.41 | 2.69 | 1.087 | 0.856 | same |
+| samples/vectorAdd | 3.90 | 4.72 | 3.79 | 1.030 | 0.827 | same |
+| rodinia/srad_v2 | 4.33 | 4.19 | 4.30 | 1.008 | 1.034 | same |
+| samples/cdpSimpleQuicksort | 4.92 | 5.92 | 4.50 | 1.092 | 0.830 | same |
+| samples/cdpQuadtree | 8.93 | 9.41 | 8.25 | 1.082 | 0.948 | same |
+| rodinia/bfs | 8.63 | 8.08 | 8.43 | 1.025 | 1.068 | same |
+| hecbench/backprop-cuda | 9.24 | 9.93 | 9.46 | 0.976 | 0.930 | same |
+| samples/binaryPartitionCG | 11.10 | 11.41 | 10.93 | 1.016 | 0.973 | same |
+| rodinia/gaussian | 11.08 | 11.09 | 10.96 | 1.011 | 0.999 | same |
+| hecbench/atan2-cuda | 18.32 | 18.90 | 18.02 | 1.016 | 0.969 | same |
+| samples/fp16ScalarProduct | 19.58 | 19.47 | 19.34 | 1.012 | 1.005 | same |
+| hecbench/adam-cuda | 22.40 | 22.62 | 22.16 | 1.011 | 0.990 | same |
+| rodinia/lud | 32.53 | 32.25 | 31.79 | 1.023 | 1.009 | same |
+| samples/scalarProd | 32.25 | 32.58 | 32.45 | 0.994 | 0.990 | same |
+| rodinia/backprop | 35.41 | 35.55 | 35.45 | 0.999 | 0.996 | same |
+| rodinia/particlefilter_float | 82.52 | 81.91 | 81.55 | 1.012 | 1.007 | DIFFER |
+| samples/shfl_scan | 95.38 | 95.85 | 96.12 | 0.992 | 0.995 | same |
+| hecbench/sortKV-cuda | 173.47 | 174.55 | 170.69 | 1.016 | 0.994 | same |
+| polybench/ADI | 216.92 | 215.41 | 216.01 | 1.004 | 1.007 | same |
+| polybench/BICG | 277.14 | 277.36 | 276.99 | 1.001 | 0.999 | same |
+
+geomean off/warm = 1.0199 over 20 programs
+
+geomean off/cold = 0.9692 over 20 programs
+
+
+`off` is `VGPU_SASS_CACHE=0`, `cold` deletes the file before every run (so every run checks the cubin in full and writes the file), `warm` is the default with the file present; 7 interleaved runs, medians, unprofiled, load under 1.5. Outputs are the same in every variant for every program except `particlefilter_float`, which differs from itself between runs (the known nondeterministic program). The file that exists is worth 2 % on the short set when warm and costs 3 % on a first run (the hash, a directory and one append; 0.5 to 1 ms on the 3 to 5 ms programs). This is the measured size of the part of decoding that is already cached across processes; what a new cache could still remove is the bold column above.
+
+### Decision
+
+Not built. The gate was 15 % of wall in decode and compile: the default engine has 2.9 % in the mean (1.1 % wall-weighted), no program at 15 %, and a ceiling of 1.031x with a free, perfect cache; the keep bar was 10 %. A real cache would return less than the ceiling: it has to hash the module (the verdict file's hash already does), open and validate a file, and rebuild the pointers of the decoded form. The PTX engine's ceiling is 1.069x, also under the bar, and that engine runs in the nightly suite, not on every pull request.
+
+Design notes for whoever revisits this with a different workload (many processes loading the same very large modules, as the PyTorch sweeps do): cache the decoded form (`Instr` arrays, the tier's `MOp` arrays with handler indexes rather than pointers), never machine code; key on the image hash, the simulator's build id, the device's `sm` and the knobs that change decoding (`VGPU_TIER`, `VGPU_FASTPATH`, `VGPU_SIMD`); reuse `ok_cache.cpp`'s trust rules (directory and file owned by the user, not group- or world-writable, `O_NOFOLLOW`, regular file) and write through a temporary file and `rename`. The verdict file is the model for all of that.
+
+### Leads the split leaves (not followed: each is under the bar on this set)
+
+* `vgpu::ptx::lex` on the PTX engine for modules that carry the device runtime (9 % of `cdpQuadtree`): the token vector is not reserved and a lazily parsed kernel lexes the module's declarations again.
+* The first run with a verdict file missing is 3 % slower than no file at all on the short set, 17 % to 21 % on the three shortest samples (0.5 to 1.0 ms): a CI job that starts each program in a fresh cache directory pays it every time. `actions/cache` of `~/.cache/pantheonsim`, or `VGPU_SASS_CACHE=0` in such a job, avoids it.
+* `malloc` under `sass::decode`: an `Instr` with inline operand storage would shrink the decode of large modules; worth looking at only where decode is large (it is not on these programs).
+
+### Tests (CMake-wired, no build needed) and mutants
+
+`lint_short_split_selftest` (`python3 -I tools/bench/real/short.py selftest`): 25 call chains of the shapes perf gives, each with the phase it belongs to (decode and tier analysis inside a launch, a handler whose chain perf could not walk, a destructor frame inside a launch, kernel frames under the program's own code, the loader by object and by symbol, a `ptx::` type among a function's parameters or template arguments). Six mutants of the rules, each run on server3, each fails it (`data/sp51/selftest-mutants.txt`): the execute rule placed first (3 cases wrong), rules matched on the whole symbol (4), any destructor counted as teardown (2), no executor-leaf rule (3), no loader-by-object rule (1), kernel frames taken as user frames (1).
+
+No simulator source changed, so there is no same-bits check of counters to report beyond the output check of the off/cold/warm table.
+
+Data: `docs/perf-design/data/sp51/` (`survey.txt`, `split-sass.txt` and `split-ptx.txt` with the top leaf symbols per program, the JSON behind the tables, `tables.py` and `tables.md`, `ab-okfile.*`, `detail-shortest.txt`, `selftest-mutants.txt`, the load before and after). Caveats: one host; perf's chains are cut under the tier's handlers, which the leaf rule covers for execution but which could hide a callee of decode in `sim-other` (bounded: the whole of `sim-other` is listed by its leaves in `detail-shortest.txt` and none of the top entries is decode); HIP programs were not measured (round sp19 found their start mostly kernel time); the 20 programs are short programs of the benchmark corpora, not the e2e suite itself, which needs nvcc and is not built on this host. Cleanup: the scratch directory of this round on server3 was removed by exact path.
