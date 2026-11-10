@@ -4,7 +4,7 @@ This directory holds the complete, unedited measurement log that used to be `doc
 behind a number: the machine, the commands, the A/B tables, the mutation checks and the dead ends.
 
 The text of the eleven files, concatenated in order, is the old page (plus the sections *Round sp40* and *Round sp41*, which were written on
-branch `sp41-ptx-amd-counting` and appended at the end). Nothing was edited when it was split, so a sentence such as "the section above" or
+branch `sp41-ptx-amd-counting` and appended at the end, and *Round sp47*, written on branch `sp47-parallel-blocks` and appended after them). Nothing was edited when it was split, so a sentence such as "the section above" or
 "see 'Noise'" refers to the order of these files. Section names in source comments, `docs/cli.md` and the other docs now point at the file
 that holds the section.
 
@@ -180,7 +180,7 @@ Rounds sp19 to sp27: PTX warp loads, LDS forms, bank passes, a hang, launch cost
 
 ## [11-rounds-sp36-sp41](11-rounds-sp36-sp41.md)
 
-Rounds sp28 to sp41: lockstep, reader lock, memoisation (measured, then built as VGPU_MEMO), JIT control flow, counting, dispatch loop, follow-ups, PGO, sp40 and sp41.
+Rounds sp28 to sp41: lockstep, reader lock, memoisation (measured, then built as VGPU_MEMO), JIT control flow, counting, dispatch loop, follow-ups, PGO, sp40 and sp41; and Round sp47 (exact parallel launches).
 
 * [Round sp36 (memory counting): the passes and sectors of the warps that the closed forms and the table of sh...](11-rounds-sp36-sp41.md#round-sp36-memory-counting-the-passes-and-sectors-of-the-warps-that-the-closed-forms-and-the-table-of-shapes-miss-branch-sp36-counting-base-originmain-735c2626): Built AVX2 bank-pass and sector counting kernels (sp36-counting); worth 1.037x pooled over 15 programs (354.7 s -> ~342 s), same bits; random scatter still 60-70 ns a call.
 * [Round sp37 (dispatch loop and block setup): measured per line, one hot line removed, the rest measured and...](11-rounds-sp36-sp41.md#round-sp37-dispatch-loop-and-block-setup-measured-per-line-one-hot-line-removed-the-rest-measured-and-not-kept-branch-sp37-dispatch-base-originspeedups-combined-48d3e8df): Removed one hot EXIT line in the run loop (sp37-dispatch); 1.5% pooled, FDTD-2D 1.043, LU 1.018; four dispatch variants measured and not kept; first cycles:u profile was wrong.
@@ -188,3 +188,4 @@ Rounds sp28 to sp41: lockstep, reader lock, memoisation (measured, then built as
 * [Round sp39 (release-wide PGO): no speed-up on held-out programs, stays opt-in (branch `sp39-pgo`)](11-rounds-sp36-sp41.md#round-sp39-release-wide-pgo-no-speed-up-on-held-out-programs-stays-opt-in-branch-sp39-pgo): Measured release-wide PGO on 47 held-out programs; A/P geomean 0.993 (NVIDIA 0.958, AMD 0.958), 8-thread geomean 0.946; not enabled for releases, stays opt-in.
 * [Round sp40 (store-forwarding stalls in the SIMD kernels, register-file clear at block setup): both measured...](11-rounds-sp36-sp41.md#round-sp40-store-forwarding-stalls-in-the-simd-kernels-register-file-clear-at-block-setup-both-measured-neither-kept-branch-sp40-simd-stalls-base-originmain-d462bc2f): Measured, neither kept: wide row stores for store-forwarding stalls (pooled 0.989x, slower) and register-file clear (at most 1.020x with whole clear removed); no source change kept.
 * [Round sp41 (counting of memory accesses in the PTX interpreter and the AMD engine): ceilings measured first...](11-rounds-sp36-sp41.md#round-sp41-counting-of-memory-accesses-in-the-ptx-interpreter-and-the-amd-engine-ceilings-measured-first-all-three-leads-below-the-bar-nothing-built-branch-sp41-ptx-amd-counting-base-originmain-d462bc2f): Measured, nothing built: PTX/AMD counting and 32-key AVX2 sort ceilings; all counting 6.07% pooled so at most 1.065x, each lead 1-2.6%, below the 3% bar; AMD has no bank counters.
+* [Round sp47 (the blocks of one launch on several host threads, with the bits of running them in order: `VGPU_EXACT_THREADS`...)](11-rounds-sp36-sp41.md#round-sp47-the-blocks-of-one-launch-on-several-host-threads-with-the-bits-of-running-them-in-order-vgpu_exact_threads-branch-sp47-parallel-blocks-base-originmain-27f09add): Built opt-in `VGPU_EXACT_THREADS=N` beside `VGPU_THREADS=1` (a trial under a shadow of device memory, undone and rerun in order on any conflict); 53 programs: same output, counters and final memory as one thread in every run, 1.11x / 1.59x / 2.01x at 2 / 4 / 8 threads (unproven `VGPU_THREADS=8`: 2.91x, and different results on 3 programs); trial costs 1.38x per thread; ThreadSanitizer not run.

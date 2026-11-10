@@ -130,6 +130,6 @@ totals to a test.
 
 `tests/unit/test_exact_threads.cpp` (also run with `VGPU_TIER=0` and `VGPU_FASTPATH=0`, which send the accesses through other
 methods of the memory manager): kernels with independent blocks, blocks that store to the same words, a chain in which each block
-reads what the one before stored, a fault in block 1, and `%smid` on a grid larger than the device, each compared word for word and
+reads what the one before stored, a fault in block 1, a step budget that fails every block before its store, and `%smid` on a grid larger than the device, each compared word for word and
 counter for counter with the run in order at 2, 3, 4 and 8 threads; every reading and writing method of `MemoryManager` against the
 shadow; a stopped trial undone to the byte across chunk ends and at an allocation's tail.

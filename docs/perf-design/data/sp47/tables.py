@@ -50,7 +50,11 @@ def ab(rows):
         tr = r.get("x8_trials") or r.get("x4_trials") or r.get("x2_trials") or [0, 0]
         same = all(r[v + "_same"] for v in vs if v.startswith("x"))
         t8 = "" if "t8" not in r or r["t8_same"] else "; `VGPU_THREADS=8` differs"
-        print("| %s | %s | %s | %d / %d | %s%s |" % (r["corpus"], r["name"], " | ".join(cells), tr[1], tr[0], "same" if same else "DIFFER", t8))
+        if len(r["sig_t1"]) > 1:   # the program gives different output from run to run at VGPU_THREADS=1 itself
+            verdict, t8 = "not comparable (%d different results in the runs at `VGPU_THREADS=1`)" % len(r["sig_t1"]), ""
+        else:
+            verdict = "same" if same else "DIFFER"
+        print("| %s | %s | %s | %d / %d | %s%s |" % (r["corpus"], r["name"], " | ".join(cells), tr[1], tr[0], verdict, t8))
     print()
     print("| geometric mean of the speed-ups | " + " | ".join(head[v] for v in vs[1:]) + " |")
     print("|---|" + "---:|" * (len(vs) - 1))
