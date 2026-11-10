@@ -1,0 +1,8 @@
+# Shows the "Sponsor" button on the repository. It links to pantheonsim.com, and
+# https://pantheonsim.com/funding.json says what support would be spent on (a
+# server for the simulator and CI, and time on real GPUs).
+#
+# There is deliberately no `github:` entry: a GitHub Sponsors listing is per
+# account, and the pantheongpu organisation's belongs to PantheonGPU, a different
+# project. Add `github: [<account>]` here once pantheonsim has a listing of its own.
+custom: ["https://pantheonsim.com"]
