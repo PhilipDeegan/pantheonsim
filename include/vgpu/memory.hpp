@@ -849,7 +849,9 @@ class MemoryManager {
   // takes resolve(), so every diagnostic is the one resolve() makes.
   // The ordinary allocation holding [addr, addr + len), from the memory of
   // recent lookups or the table; null if there is none or the memory is off.
-  const Allocation* find_ordinary(uint64_t addr, uint64_t len, uint64_t* base_out, uint8_t* hint = nullptr) const;
+  // `card_ok` (the scalar path while a card gate is in play): an allocation with a valid card copy is answered too (from the table, never remembered), and the caller
+  // asks the gate for it; without it such an allocation is a miss, which takes resolve().
+  const Allocation* find_ordinary(uint64_t addr, uint64_t len, uint64_t* base_out, uint8_t* hint = nullptr, bool card_ok = false) const;
   uint8_t* hot_location(uint64_t addr, uint32_t size) const;
   // True when no address in [base, base + size) can be in a host mapping, by the one range test that covers them all: the span is
   // wholly in the device windows and no host buffer has ever been mapped inside one. (False says nothing: ask each address.)
@@ -863,7 +865,7 @@ class MemoryManager {
     uint64_t base;
   };
   // `memory` is the calling thread's lookup memory (found by the caller, which has just looked in it).
-  Found find_ordinary_miss(uint64_t addr, uint64_t len, void* memory) const;
+  Found find_ordinary_miss(uint64_t addr, uint64_t len, void* memory, bool card_ok = false) const;
   bool batch_ok(const uint64_t* addrs, size_t count, uint32_t size, bool store, const Allocation** alloc,
                 uint64_t* base, uint8_t* hint = nullptr) const;
   // The part of batch_ok that is about armed faults, for a load or for a store, and the part that is about the addresses.

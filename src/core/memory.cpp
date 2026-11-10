@@ -431,6 +431,8 @@ struct LookupMemory {
     const void* allocation = nullptr;
   };
   Entry way[kWays];
+  Entry card;            // the allocation with a valid card copy this thread's scalar accesses found last (resolve_scalar, while a card gate is in play):
+                         // kept apart from the ways, whose hits never look at the card copy
   unsigned last = 0;     // the way that answered last: the next lookup tries it first
   unsigned prev = 0;     // the way that answered before it: the miss path tries it second (a kernel that reads one allocation and
                          // writes another alternates between two)
@@ -507,7 +509,7 @@ bool MemoryManager::lookup_cache_default() {
 }
 
 // The table lookup behind a miss in the memory of recent lookups.
-[[gnu::noinline]] MemoryManager::Found MemoryManager::find_ordinary_miss(uint64_t addr, uint64_t len, void* memory) const {
+[[gnu::noinline]] MemoryManager::Found MemoryManager::find_ordinary_miss(uint64_t addr, uint64_t len, void* memory, bool card_ok) const {
   BigReaderLock* lock = table_lock_.get();
   LookupMemory& mem = *static_cast<LookupMemory*>(memory);
   const uint64_t epoch = lock->epoch();
@@ -536,7 +538,10 @@ bool MemoryManager::lookup_cache_default() {
   const Allocation& a = prev->second;
   const uint64_t off = addr - prev->first;
   if (!(off < a.size && len <= a.size - off)) return {nullptr, 0};
-  if (a.card_valid.load(std::memory_order_relaxed) != 0) return {nullptr, 0};   // a card copy: every access takes resolve(), which asks the gate
+  if (a.card_valid.load(std::memory_order_relaxed) != 0) {   // a card copy: every access asks the gate
+    if (card_ok) return {&a, prev->first};   // (the scalar path asks it itself, and never remembers this answer)
+    return {nullptr, 0};   // everything else takes resolve(), which asks it
+  }
   if (&mem == &g_ended_lookups) return {&a, prev->first};
   // The epoch read under the shared lock cannot move while it is held.
   uint32_t v = mem.victim;
@@ -553,7 +558,7 @@ bool MemoryManager::lookup_cache_default() {
 }
 
 [[gnu::always_inline]] inline const MemoryManager::Allocation* MemoryManager::find_ordinary(
-    uint64_t addr, uint64_t len, uint64_t* base_out, uint8_t* hint) const {
+    uint64_t addr, uint64_t len, uint64_t* base_out, uint8_t* hint, bool card_ok) const {
   BigReaderLock* lock = table_lock_.get();
   if (!lock || !lookup_cache_) return nullptr;
   LookupMemory& mem = lookups();
@@ -568,7 +573,7 @@ bool MemoryManager::lookup_cache_default() {
     if (base_out) *base_out = e.base;
     return static_cast<const Allocation*>(e.allocation);
   }
-  const Found f = find_ordinary_miss(addr, len, &mem);
+  const Found f = find_ordinary_miss(addr, len, &mem, card_ok);
   if (f.a) {
     if (base_out) *base_out = f.base;
     if (hint) __atomic_store_n(hint, static_cast<uint8_t>(mem.last), __ATOMIC_RELAXED);
@@ -596,6 +601,43 @@ bool MemoryManager::lookup_cache_default() {
 const MemoryManager::Allocation& MemoryManager::resolve_scalar(uint64_t addr, uint64_t len, const char* op,
                                                                uint64_t* base_out, bool writing,
                                                                bool page_slack) const {
+  if (card_resident_.load(std::memory_order_relaxed) > 0) {
+    // A card gate is in play (host-GPU mode). resolve() asks the gate and then looks the allocation up, and the lookup above has already found a card-valid
+    // allocation's record under the table lock for nothing (it is never remembered, so every access repeated it): ask the gate here, for the allocation
+    // that lookup found, and return it as resolve() would (an access wholly inside it; anything else is resolve()'s, diagnostics and all).
+    // The thread remembers the card-valid allocation it found last (the way the lookup memory does for the others, under the table lock's epoch), so an access to
+    // it takes neither the table lock nor the map; the gate is asked on every access, as before.
+    BigReaderLock* lock = table_lock_.get();
+    LookupMemory* mem = lock && lookup_cache_ ? &lookups() : nullptr;
+    const uint64_t epoch = mem ? lock->epoch() : 0;   // (read before the lookup: a table that changes after it voids the entry made below)
+    if (mem && epoch != 0 && mem->card.epoch == epoch) {
+      const uint64_t off = addr - mem->card.base;
+      if (off < mem->card.size && len <= mem->card.size - off) {
+        const Allocation* a = static_cast<const Allocation*>(mem->card.allocation);
+        if (a->card_valid.load(std::memory_order_relaxed) != 0)
+          if (CardGate* gate = card_gate_.load(std::memory_order_acquire))
+            gate->before_access(addr, len, writing || (op && std::strcmp(op, "device memory write") == 0));
+        if (base_out) *base_out = mem->card.base;
+        return *a;
+      }
+    }
+    uint64_t base = 0;
+    if (const Allocation* a = find_ordinary(addr, len, &base, nullptr, /*card_ok=*/true)) {
+      if (a->card_valid.load(std::memory_order_relaxed) != 0) {
+        if (CardGate* gate = card_gate_.load(std::memory_order_acquire))
+          gate->before_access(addr, len, writing || (op && std::strcmp(op, "device memory write") == 0));
+        if (mem && mem != &g_ended_lookups) {
+          mem->card.epoch = epoch;
+          mem->card.base = base;
+          mem->card.size = a->size;
+          mem->card.allocation = a;
+        }
+      }
+      if (base_out) *base_out = base;
+      return *a;
+    }
+    return resolve(addr, len, op, base_out, writing, page_slack);
+  }
   if (const Allocation* a = find_ordinary(addr, len, base_out)) return *a;
   return resolve(addr, len, op, base_out, writing, page_slack);
 }

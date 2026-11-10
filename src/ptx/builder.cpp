@@ -69,6 +69,7 @@ void link_calls(Module& m) {
 }
 
 void finalize_function(EntryFn& fn, const FinalizeOptions& opt) {
+  if (opt.drop_dead_wmma_loads) drop_dead_wmma_loads(fn);
   if (opt.contract_mul_add) contract_mul_add(fn);
   if (opt.nan_order) mark_nan_order(fn);
   if (opt.fold_sync_masks) fold_constant_sync_masks(fn);
