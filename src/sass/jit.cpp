@@ -274,6 +274,8 @@ Config Config::from_env() {
 #ifdef VGPU_JIT_MUTANTS
 // Mutation checks (tests only, -DVGPU_JIT_MUTANTS=ON; VGPU_JIT_MUTANT=<name>, as the generator's in jit_gen.cpp): share_all_on keeps every section, share_all_off declines
 // every section, share_no_defer lets a section ask the cache before the rule has decided, cid_nocache never believes a remembered compiler identity. A test that does not fail with each of them does not test the rule.
+// (round sp57, the wait on the plain loop) wait_never: a section never waits; wait_stuck: a wait never ends; wait_no_credit: the waited instructions do not count towards the threshold;
+// wait_no_profile: the wait goes all the way to the threshold (the compile is asked for with the counts of before the wait).
 // The ctl_* mutants break one rule of the control flow in generated code (milestone 5, see mutation-checks in round15-jit.md).
 static bool mutant(const char* what) {
   const char* m = std::getenv("VGPU_JIT_MUTANT");
@@ -1408,6 +1410,7 @@ namespace {
 constexpr uint64_t kDefaultMinShare = 40;      // percent
 constexpr uint64_t kDefaultSample = 50000;     // warp instructions
 constexpr uint64_t kMinSample = 1000;
+constexpr uint64_t kDefaultProfile = 4000000;  // region instructions counted in the hook loop just before the threshold (VGPU_JIT_PROFILE)
 
 enum class Job { Lookup, Compile };
 
@@ -1423,6 +1426,7 @@ struct Manager {
   unsigned hot_permille;   // a region is compiled if it ran at least this many thousandths of the section's counted instructions (0: every region)
   uint64_t max_ops;        // ... and the compiled regions hold at most this many ops
   ShareRule share;         // the share rule (jit.hpp)
+  uint64_t profile;        // a section whose threshold is more than twice this far away after its lookup waits on the plain loop until it is this near (0: never waits)
   unsigned min_gen_percent;   // a region is compiled only if at least this share of its ops are computed by generated code (VGPU_JIT_MIN_GEN)
   bool worth(const Region& r) const { return r.gen * 100u >= r.k * min_gen_percent; }
   std::atomic<bool> disabled{false};
@@ -1458,6 +1462,7 @@ struct Manager {
     hot_permille = static_cast<unsigned>(num("VGPU_JIT_HOT_PERMILLE", 1));
     min_region = static_cast<unsigned>(std::clamp<uint64_t>(num("VGPU_JIT_MIN_REGION", 4), 1, 4096));
     max_ops = num("VGPU_JIT_MAX_OPS", 1500);
+    profile = num("VGPU_JIT_PROFILE", kDefaultProfile);
     min_gen_percent = static_cast<unsigned>(std::min<uint64_t>(num("VGPU_JIT_MIN_GEN", 50), 100));
     // The share rule: VGPU_JIT_MIN_SHARE (percent of the sample; 0: no rule) and VGPU_JIT_SAMPLE (warp instructions). A sample is never taken from fewer than
     // kMinSample instructions (a threshold of 1, "compile everything now", has no sample to judge), and not when every region is to be compiled (HOT_PERMILLE=0).
@@ -1578,8 +1583,16 @@ struct Manager {
       } else if (r.status != Status::Ok) {
         fail(*u, r);
       } else {
+        // A miss. The threshold far away: the section waits on the plain loop until it is `profile` instructions short of it (State::Waiting); near: it counts on.
+        const uint64_t done = u->executed.load(std::memory_order_relaxed);
+        const bool wait = profile != 0 && threshold > done && threshold - done > 2 * profile && !mutant("wait_never");
+        if (wait) {
+          const uint64_t n = threshold - done - (mutant("wait_no_profile") ? 0 : profile);
+          u->wait_for.store(n, std::memory_order_relaxed);
+          u->waited.store(0, std::memory_order_relaxed);
+        }
         int exp = static_cast<int>(State::Looking);
-        u->state.compare_exchange_strong(exp, static_cast<int>(State::Counting));
+        if (u->state.compare_exchange_strong(exp, static_cast<int>(wait ? State::Waiting : State::Counting)) && wait) stats().waits.fetch_add(1);
       }
     } else {
       const std::vector<uint32_t> sel = select(*u);
@@ -1652,6 +1665,7 @@ void Unit::note(uint32_t region, uint32_t k) {
   uint64_t total = 0;
   for (size_t i = 0; i < regions.size(); ++i) total += counts[i].load(std::memory_order_relaxed);
   executed.store(total, std::memory_order_relaxed);
+  total += credit.load(std::memory_order_relaxed);   // (what a wait on the plain loop ran, once it is over)
   if (s == static_cast<int>(State::Idle) && total >= mgr.lookup_after && (mutant("share_no_defer") || !sampling.load(std::memory_order_acquire))) {   // (the share rule decides first: a declined section asks nobody)
     int exp = static_cast<int>(State::Idle);
     if (state.compare_exchange_strong(exp, static_cast<int>(State::Looking))) mgr.submit(Job::Lookup, shared_from_this());   // (inline in synchronous mode)
@@ -1660,6 +1674,15 @@ void Unit::note(uint32_t region, uint32_t k) {
   if (total < mgr.threshold || s != static_cast<int>(State::Counting)) return;
   int exp = static_cast<int>(State::Counting);
   if (state.compare_exchange_strong(exp, static_cast<int>(State::Queued))) mgr.submit(Job::Compile, shared_from_this());
+}
+
+// The wait is over: what it ran counts towards the threshold, and the section is Counting again (the hook loop, the regions' counts) for the last stretch.
+void Unit::wait_over() {
+  if (mutant("wait_stuck")) return;
+  int exp = static_cast<int>(State::Waiting);
+  if (!state.compare_exchange_strong(exp, static_cast<int>(State::Counting), std::memory_order_acq_rel)) return;
+  if (!mutant("wait_no_credit")) credit.store(wait_for.load(std::memory_order_relaxed), std::memory_order_relaxed);
+  stats().wait_ends.fetch_add(1);
 }
 
 const ShareRule& share_rule() { return manager().share; }
@@ -1727,6 +1750,8 @@ void Manager::report() {
                (unsigned long long)s.failures.load(), (unsigned long long)s.corrupt.load(), (unsigned long long)s.regions_run.load(),
                (unsigned long long)s.instructions_run.load(), (unsigned long long)s.generated_run.load(), (unsigned long long)s.region_throws.load(), (unsigned long long)s.declined.load(),
                (unsigned long long)s.accepted.load(), (unsigned long long)s.continued.load());
+  if (s.waits.load())   // (after the summary, and not a "jit: " line: what reads a statistics file takes its last "jit: " line for the summary)
+    std::fprintf(out, "jit-wait: %llu sections waited on the plain loop for their threshold, %llu came back to count\n", (unsigned long long)s.waits.load(), (unsigned long long)s.wait_ends.load());
   if (out != stderr) std::fclose(out);
 }
 

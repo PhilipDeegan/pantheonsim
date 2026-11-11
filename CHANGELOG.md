@@ -7,6 +7,11 @@ release says what runs and what it produces, never how fast a real GPU would run
 
 ## Unreleased
 
+- Tier 2 (`VGPU_JIT=1`, still off by default): a code section the cache has nothing for no longer runs in the counting loop all the
+  way to its compile threshold. It waits on the plain run loop, where only the warp instructions of each call are added up, and is
+  counted region by region again for the last `VGPU_JIT_PROFILE` (4,000,000) instructions before the threshold. Programs that never
+  reach the threshold paid 2 to 16 % for the counting with `VGPU_JIT=1`; results and counters are unchanged
+  ([round sp57](docs/perf-design/rounds/11-rounds-sp36-sp41.md), which also says why the JIT stays opt-in).
 - PTX: `ld.weak` and `st.weak` are accepted (the explicit spelling of the default memory semantics, PTX ISA 6.0 and later). They
   stopped GiMMiK 4.0's matrix-multiply kernels, and so PyFR's CUDA backend, at module load (pantheonsim #554).
 - NVRTC (the built-in compiler, used when no toolkit is visible): `--ftz=`, `--prec-div=` and `--prec-sqrt=` are accepted beside
