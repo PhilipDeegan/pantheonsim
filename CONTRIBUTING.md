@@ -91,8 +91,10 @@ a physical card with the characterization tools in `nvidia/tools` and
 `amd/tools` and mark the profile `verified: true` only if you did; otherwise it
 stays `verified: false` and its header comment says where every number came
 from. Then: list it in `nvidia/docs/profiles.md` (or the AMD README), update
-the counts in `docs/status.md`, and add a row for it to the machines in
-`.github/workflows/workloads.yml` (a check fails when a profile has none).
+the counts in `docs/status.md`, and, only if it has a compute capability no profile
+has yet, add a row for it to the machines in `.github/workflows/workloads.yml` (a
+check fails when a compute capability has none). A new card of an existing capability
+needs no row: the tests that run on every profile cover its data.
 
 ## Third-party code
 
