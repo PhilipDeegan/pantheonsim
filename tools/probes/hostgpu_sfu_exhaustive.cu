@@ -9,12 +9,14 @@
 //        idiv, sidiv            32-bit integer x / y, unsigned and signed, for 12 dividends and every nonzero divisor            (the integer division idiom: must be 0 different; sp43)
 //        sin cos tanh           sin.approx.ftz.f32, cos.approx.ftz.f32, tanh.approx.f32 against the simulator's             (relaxed mode, docs/perf-design/12-host-gpu-relaxed.md:
 //                               expected to differ; the count, the share and the largest distance are what relaxed mode's tolerance has to cover)
-//                               The compiler turns sin and cos into FMUL by 1/(2 pi) (the float 0x3e22f983) and MUFU.SIN / MUFU.COS, whose argument is in turns;
-//                               the simulator side here is that product in float and then the simulator's MUFU. If a card shows more than half of the patterns
-//                               different, read the kernel's SASS first: the model of the product is the suspect, not the card.
+//                               The compiler turns sin and cos into FMUL.RZ by 1/(2 pi) (the float 0x3e22f983, rounded toward zero) and MUFU.SIN / MUFU.COS, whose
+//                               argument is in turns; the simulator side here is that product and then the simulator's MUFU (the SASS was read on an A10G rig
+//                               with VGPU_HOST_GPU_LOG=2; a toolkit that compiles it otherwise needs the model changed).
 //   stride: test every stride-th pattern (default 1 = all 2^32; a smoke run uses 4099)
 //
-// Output, one line per op and dividend: "RESULT op=<op> [a=0x...] tested=N differ=N max_ulp=N first=0x<in>:card=0x<bits>:sim=0x<bits> share=<percent>"; the exit status is 0 when
+// Output, one line per op and dividend: "RESULT op=<op> [a=0x...] tested=N differ=N max_ulp=N first=0x<in>:card=0x<bits>:sim=0x<bits> share=<percent> outside_tol=N max_abs=X" (outside_tol: results outside relaxed mode's default tolerance,
+// atol 1e-8 and rtol 1e-5; max_abs: the largest difference of two finite results; ordinary_*: the same two over the inputs with 2^-20 <= |x| < 2^10,
+// 30/256 of the patterns); the exit status is 0 when
 // differ=0 for every line, 1 otherwise. A mutation of the card side (e.g. a one-ulp nudge of the quotient) must make `div` report differ>0; run with
 // HOSTGPU_SFU_MUTATE=1 to check the harness itself.
 //   build: nvcc -std=c++20 -O2 -arch=sm_86 -I include tools/probes/hostgpu_sfu_exhaustive.cu -o hostgpu_sfu_exhaustive      (no -ftz, no -use_fast_math)
@@ -22,6 +24,7 @@
 
 #include <algorithm>
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -31,6 +34,7 @@
 #include <vector>
 
 #include "vgpu/host_gpu_ref.hpp"
+#include "vgpu/host_gpu_tol.hpp"
 
 #define CK(x) do { cudaError_t e_ = (x); if (e_ != cudaSuccess) { std::fprintf(stderr, "CUDA error %s at %d\n", cudaGetErrorString(e_), __LINE__); std::exit(2); } } while (0)
 
@@ -63,15 +67,17 @@ __global__ void run(int op, uint32_t a, uint64_t first, uint64_t count, uint64_t
   out[i] = card_op(op, (uint32_t)((first + i) * stride), a, mutate);
 }
 
-// The argument of MUFU.SIN and MUFU.COS for sin.approx.ftz.f32(x): x * 1/(2 pi) in float (FMUL.FTZ by 0x3e22f983), a subnormal x read as zero.
+// The argument of MUFU.SIN and MUFU.COS for sin.approx.ftz.f32(x), as nvcc 13.0 compiles it for sm_86 (read from the kernel's SASS on an A10G rig, Round sp59):
+// FMUL.RZ R, x, 0.15915493667125701904 (the float 0x3e22f983, the product rounded TOWARD ZERO, no flush), then MUFU. The product of two floats is exact in a
+// double, so it is rounded here by hand.
 static uint32_t turns(uint32_t in) {
-  using namespace vgpu::hostgpu;
   uint32_t c = 0x3e22f983u, out;
-  float inv_two_pi;
+  float inv_two_pi, x;
   std::memcpy(&inv_two_pi, &c, 4);
-  float x;
   std::memcpy(&x, &in, 4);
-  const float t = ref::flush(x) * inv_two_pi;
+  const double exact = (double)x * (double)inv_two_pi;
+  float t = (float)exact;
+  if (t == t && std::fabs((double)t) > std::fabs(exact)) t = std::nextafterf(t, 0.0f);
   std::memcpy(&out, &t, 4);
   return out;
 }
@@ -100,7 +106,8 @@ int main(int argc, char** argv) {
   int status = 0;
   for (int di = 0; di < n_div; ++di) {
     const uint32_t a = (op == 8 || op == 9) ? int_dividends[di] : dividends[di];
-    uint64_t differ = 0;
+    uint64_t differ = 0, outside = 0, mid_outside = 0;
+    double max_abs = 0, mid_max_abs = 0;
     uint32_t max_ulp = 0, first_in = 0, first_card = 0, first_sim = 0;
     for (uint64_t first = 0; first < total; first += chunk) {
       const uint64_t count = total - first < chunk ? total - first : chunk;
@@ -108,7 +115,8 @@ int main(int argc, char** argv) {
       CK(cudaMemcpy(h.data(), d, count * 4, cudaMemcpyDeviceToHost));
       const unsigned nt = std::max(1u, std::thread::hardware_concurrency());
       std::vector<std::thread> th;
-      std::vector<uint64_t> bad(nt, 0);
+      std::vector<uint64_t> bad(nt, 0), out_tol(nt, 0), mid_out(nt, 0);
+      std::vector<double> mabs(nt, 0), mid_abs(nt, 0);
       std::vector<uint32_t> mx(nt, 0), fi(nt, 0), fc(nt, 0), fs(nt, 0);
       std::vector<uint64_t> fidx(nt, UINT64_MAX);
       for (unsigned t = 0; t < nt; ++t)
@@ -123,20 +131,40 @@ int main(int argc, char** argv) {
             if (!bad[t]++ || i < fidx[t]) { fidx[t] = i; fi[t] = in; fc[t] = card; fs[t] = sim; }
             const uint32_t u = ref::ulp_distance(card, sim);
             if (u > mx[t]) mx[t] = u;
+            // (the same pair by relaxed mode's default tolerance: the ulp distance of two results near zero says little)
+            float cf, sf;
+            std::memcpy(&cf, &card, 4);
+            std::memcpy(&sf, &sim, 4);
+            double a = 0;
+            const bool close = values_close(cf, sf, Tolerance{}, &a);
+            if (!close) ++out_tol[t];
+            if (a > mabs[t]) mabs[t] = a;
+            // ... and over the inputs of ordinary size alone, 2^-20 <= |x| < 2^10 (exponent fields 107 to 136): an argument of 2^40 turns is not what
+            // a program takes the sine of
+            const uint32_t e = (in >> 23) & 0xff;
+            if (e >= 107 && e <= 136) {
+              if (!close) ++mid_out[t];
+              if (a > mid_abs[t]) mid_abs[t] = a;
+            }
           }
         });
       for (auto& x : th) x.join();
       uint64_t best = UINT64_MAX;
       for (unsigned t = 0; t < nt; ++t) {
         differ += bad[t];
+        outside += out_tol[t];
+        mid_outside += mid_out[t];
+        if (mabs[t] > max_abs) max_abs = mabs[t];
+        if (mid_abs[t] > mid_max_abs) mid_max_abs = mid_abs[t];
         if (mx[t] > max_ulp) max_ulp = mx[t];
         if (bad[t] && fidx[t] < best && !(differ - bad[t])) { best = fidx[t]; first_in = fi[t]; first_card = fc[t]; first_sim = fs[t]; }
       }
     }
     char ds[32] = "";
     if (op == 5 || op == 8 || op == 9) std::snprintf(ds, sizeof ds, " a=0x%08x", a);
-    std::printf("RESULT op=%s%s tested=%llu differ=%llu max_ulp=%u first=0x%08x:card=0x%08x:sim=0x%08x share=%.3f%%\n", name.c_str(), ds, (unsigned long long)total,
-                (unsigned long long)differ, max_ulp, first_in, first_card, first_sim, 100.0 * (double)differ / (double)total);
+    std::printf("RESULT op=%s%s tested=%llu differ=%llu max_ulp=%u first=0x%08x:card=0x%08x:sim=0x%08x share=%.3f%% outside_tol=%llu max_abs=%.9g ordinary_outside_tol=%llu ordinary_max_abs=%.9g\n", name.c_str(), ds, (unsigned long long)total,
+                (unsigned long long)differ, max_ulp, first_in, first_card, first_sim, 100.0 * (double)differ / (double)total, (unsigned long long)outside, max_abs,
+                (unsigned long long)mid_outside, mid_max_abs);
     std::fflush(stdout);
     if (differ) status = 1;
   }

@@ -16,7 +16,9 @@ and timeouts' meaning).  See docs/perf-design/12-host-gpu-relaxed.md.
          --json out.json --md out.md
   run.py --dry-run          # self-test, no card, no simulator (wired into ctest)
 
-Forms.  sim, exact and relaxed are timed --runs times each, interleaved.
+Forms.  sim, exact, exactdiv (exact with VGPU_HOST_GPU_DIV=1) and relaxed are timed
+--runs times each, interleaved; a program whose first sim run takes longer
+than --long-secs gets --long-runs runs of each.
 exact prints its machine-readable lines only with VGPU_HOST_GPU_LOG, which
 also prints a line per launch, so the timed exact runs go without it and ONE
 extra, untimed exact run with the log collects card_s, sim_s and the refusal
@@ -49,7 +51,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "real"))
 import real  # noqa: E402  (tools/bench/real/real.py: the corpus manifest and the timing-line filter)
 
-FORMS = ("sim", "exact", "relaxed", "verify")
+FORMS = ("sim", "exact", "exactdiv", "relaxed", "verify")
+CARD_FORMS = ("exact", "exactdiv", "relaxed")   # the timed forms that use the card, in the table's order
 # lines the simulator or the mode prints: never part of the program's output
 OURS = re.compile(r"^(host_gpu[a-z_]*:|\[vgpu\]|vgpu:)")
 # A word of the output is a number when all of it is one and it has a fraction or an exponent: an integer (a count, an index, a checksum printed in
@@ -204,8 +207,10 @@ def compare_outputs(sim, other, atol, rtol):
 
 def form_env(form, a):
     env = {}
-    if form == "exact":
+    if form in ("exact", "exactdiv"):
         env["VGPU_HOST_GPU"] = "exact"
+        if form == "exactdiv":
+            env["VGPU_HOST_GPU_DIV"] = "1"   # the IEEE division sequence joins the exact set (docs/cli.md)
     elif form in ("relaxed", "verify"):
         env["VGPU_HOST_GPU"] = "relaxed"
         env["VGPU_HOST_GPU_ATOL"] = repr(a.atol)
@@ -317,7 +322,10 @@ def bench(a):
         key = corpus + "/" + name
         runs = {f: [] for f in forms}
         dead = set()   # forms that timed out: not run again
-        for i in range(a.runs):
+        nruns = a.runs
+        i = -1
+        while i + 1 < nruns:
+            i += 1
             for f in (timed if i % 2 == 0 else timed[::-1]):
                 if f in dead:
                     continue
@@ -327,6 +335,8 @@ def bench(a):
                 runs[f].append(r)
                 if r["timeout"]:
                     dead.add(f)
+            if i == 0 and runs["sim"] and runs["sim"][0]["wall"] > a.long_secs:
+                nruns = min(nruns, a.long_runs)   # a program this slow in the simulator gets fewer runs of every form
         ref = None
         if runs["sim"] and not runs["sim"][0]["timeout"]:
             s0 = runs["sim"][0]
@@ -444,7 +454,7 @@ def markdown(res):
     out = ["Host-GPU benchmark: %s, %d runs (median wall seconds), timeout %g s, atol %g, rtol %g, threads %s%s." % (
         m["gpu"], m["runs"], m["timeout"], m["atol"], m["rtol"], m["threads"], (", " + " ".join(m["env"])) if m["env"] else ""), ""]
     cols = ["program", "sim s"]
-    for f in ("exact", "relaxed"):
+    for f in CARD_FORMS:
         if f in forms:
             cols += ["%s s" % f, "x sim", "%s card / all launches" % f, "%s card s / sim s" % f, "%s output" % f]
     if "relaxed" in forms:
@@ -453,11 +463,11 @@ def markdown(res):
         cols += ["verify words different / outside (largest)", "verify kernels outside", "verify output"]
     out.append("| " + " | ".join(cols) + " |")
     out.append("|" + "|".join("---" if i == 0 else "---:" for i in range(len(cols))) + "|")
-    speed = {"exact": [], "relaxed": []}
+    speed = {f: [] for f in CARD_FORMS}
     notes = []
     for key, rec in res["programs"].items():
         row = [key, _time(rec.get("sim"))]
-        for f in ("exact", "relaxed"):
+        for f in CARD_FORMS:
             if f not in forms:
                 continue
             d = rec.get(f)
@@ -479,7 +489,7 @@ def markdown(res):
             notes.append("%s: the sim runs do not print the same output twice: its comparisons mean little" % key)
         out.append("| " + " | ".join(row) + " |")
     out.append("")
-    for f in ("exact", "relaxed"):
+    for f in CARD_FORMS:
         if speed[f]:
             out.append("%s: geometric mean speed-up over sim %.2fx (%d programs)." % (f, real.geomean(speed[f]), len(speed[f])))
     missing = {}
@@ -650,6 +660,7 @@ def selftest():
         atol, rtol, env = 1e-8, 1e-5, ["VGPU_HOST_GPU_ATOMICS=1"]
     check(form_env("sim", B) == {}, "sim sets nothing")
     check(form_env("exact", B) == {"VGPU_HOST_GPU": "exact", "VGPU_HOST_GPU_ATOMICS": "1"}, "exact env")
+    check(form_env("exactdiv", B) == {"VGPU_HOST_GPU": "exact", "VGPU_HOST_GPU_DIV": "1", "VGPU_HOST_GPU_ATOMICS": "1"}, "exactdiv env")
     v = form_env("verify", B)
     check(v["VGPU_HOST_GPU"] == "relaxed" and v["VGPU_HOST_GPU_VERIFY"] == "all" and float(v["VGPU_HOST_GPU_RTOL"]) == 1e-5 and v["VGPU_HOST_GPU_ATOMICS"] == "1", "verify env")
     check("VGPU_HOST_GPU_VERIFY" not in form_env("relaxed", B), "relaxed env")
@@ -669,8 +680,10 @@ def main():
     ap.add_argument("--corpora", default="polybench,rodinia,hecbench")
     ap.add_argument("--programs", default="", help="comma list of corpus/name or name; default all")
     ap.add_argument("--skip", default="", help="comma list of corpus/name or name to leave out")
-    ap.add_argument("--forms", default="sim,exact,relaxed", help="of sim,exact,relaxed,verify (verify: one untimed relaxed run with VGPU_HOST_GPU_VERIFY=all)")
+    ap.add_argument("--forms", default="sim,exact,relaxed", help="of sim,exact,exactdiv,relaxed,verify (exactdiv: exact with VGPU_HOST_GPU_DIV=1; verify: one untimed relaxed run with VGPU_HOST_GPU_VERIFY=all)")
     ap.add_argument("--runs", type=int, default=3)
+    ap.add_argument("--long-secs", type=float, default=120, help="a program whose first sim run takes longer gets --long-runs runs")
+    ap.add_argument("--long-runs", type=int, default=1)
     ap.add_argument("--timeout", type=float, default=600, help="seconds per run; a run past it is killed and recorded")
     ap.add_argument("--verify-timeout", type=float, default=0, help="seconds for the verify run (default: --timeout)")
     ap.add_argument("--threads", default="default", help="VGPU_THREADS, or 'default' to leave it unset")
