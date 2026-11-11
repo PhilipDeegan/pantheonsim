@@ -10,7 +10,9 @@ jobs="$root/ci/jobs.sh"
 [[ -x $jobs ]] || { echo "FAIL: $jobs is not executable"; exit 1; }
 d="$(mktemp -d "${TMPDIR:-/tmp}/vgpu_ci_jobs.XXXXXX")"
 trap 'rm -rf "$d"' EXIT
-unset CI_JOBS CI_JOBS_MAX CI_MEM_CHECK CI_MEM_LIMIT_GIB
+unset CI_JOBS CI_JOBS_MAX CI_MEM_CHECK CI_MEM_LIMIT_GIB CI_RESERVE CI_RESERVE_CAPACITY_GIB CI_RESERVE_TTL_SECS CI_RESERVE_ID
+# The reservation ledger of every run below is a directory of its own, never the host's.
+export CI_RESERVE_DIR="$d/reserve" CI_MEM_SETTLE_SECS=0 CI_NOW=1000000
 
 GiB=1073741824
 fails=0
@@ -147,6 +149,75 @@ done
 # A 24 CPU, 26 GB shared box is what the profiles are for.
 fixture server "$(kib 26)"
 expect "24 CPUs / 26 GB, release" 8 "$(run server 24 -p release)"
+
+# 9. The reservation (#575, #576): --check takes a share of a ledger before it samples the memory,
+# so two heavy jobs cannot both pass on the same free memory; --release gives it back, and a
+# share a killed runner never released expires.
+fixture roomy "$(kib 64)"
+export CI_RESERVE_DIR="$d/ledger9"
+rj() { local id=$1; shift; CI_RESERVE_ID=$id run roomy 24 "$@"; }   # rj JOBID args...
+out="$(rj a --check sass 2>&1)"; rc=$?
+expect "the first heavy job passes: exit" 0 "$rc"
+[[ $out == *"reserved 5 GiB as a "* ]] || fail "the first job's report: $out"
+expect "the ledger holds one entry" 1 "$(rj a --reservations | wc -l)"
+out="$(rj b --check ollama 2>&1)"; rc=$?
+expect "a second heavy job with no wait is refused although 64 GiB are free: exit" 1 "$rc"
+[[ $out == *"a=5120MiB"* ]] || fail "the refusal names the holder: $out"
+expect "the refused job took no share" 1 "$(rj a --reservations | wc -l)"
+# It waits, and gets in when the first releases.
+( sleep 2; rj a --release >/dev/null ) &
+out="$(CI_MEM_WAIT_SECS=20 CI_MEM_POLL_SECS=1 rj b --check ollama 2>&1)"; rc=$?
+wait
+expect "the waiting job gets in once the first releases: exit" 0 "$rc"
+[[ $out == *"waiting up to 20 s"*"reserved 5 GiB as b"*"after waiting"* ]] || fail "the wait: $out"
+expect "only the second job holds a share now" "b" "$(rj a --reservations | awk '{ print $1 }')"
+# Release is idempotent and never fails; releasing one job leaves the other's share.
+rj a --release >/dev/null || fail "releasing a share that is not held failed"
+expect "an unrelated release changed nothing" 1 "$(rj a --reservations | wc -l)"
+rj b --release >/dev/null
+expect "the ledger is empty after both release" 0 "$(rj a --reservations | wc -l)"
+# A share that was never released (the runner was killed) expires after its time to live.
+rj dead --check asan >/dev/null 2>&1
+out="$(CI_NOW=$((1000000 + 100)) rj live --check asan 2>&1)"; rc=$?
+expect "a stale share still holds inside its time to live: exit" 1 "$rc"
+out="$(CI_NOW=$((1000000 + 14401)) rj live --check asan 2>&1)"; rc=$?
+expect "an expired share is dropped: exit" 0 "$rc"
+expect "only the live job is in the ledger" "live" "$(rj a --reservations | awk '{ print $1 }')"
+rj live --release >/dev/null
+# A capacity of two jobs lets two in and refuses the third.
+export CI_RESERVE_CAPACITY_GIB=10
+rj a --check sass >/dev/null 2>&1 || fail "capacity 10: the first was refused"
+rj b --check sass >/dev/null 2>&1 || fail "capacity 10: the second was refused"
+rj c --check sass >/dev/null 2>&1 && fail "capacity 10: the third was admitted"
+rj a --release >/dev/null; rj b --release >/dev/null
+unset CI_RESERVE_CAPACITY_GIB
+# A capacity below the profile's minimum cannot lock a profile out for good.
+CI_RESERVE_CAPACITY_GIB=1 rj a --check sass >/dev/null 2>&1 || fail "a capacity of 1 GiB locked the 5 GiB profile out"
+rj a --release >/dev/null
+# A job that fails the memory check gives its share back at once.
+fixture starved "$(kib 3)"
+CI_RESERVE_ID=s run starved 24 --check asan >/dev/null 2>&1 && fail "the starved box passed"
+expect "a failed memory check keeps no share" 0 "$(rj a --reservations | wc -l)"
+# Profiles with no minimum reserve nothing; CI_RESERVE=0 and an unusable ledger directory
+# fall back to sampling, with a note, and never fail by themselves.
+rj a --check release >/dev/null 2>&1 || fail "release check failed"
+rj a --check build >/dev/null 2>&1 || fail "build check failed"
+expect "profiles with no minimum take no share" 0 "$(rj a --reservations | wc -l)"
+CI_RESERVE=0 rj a --check sass >/dev/null 2>&1 || fail "CI_RESERVE=0 check failed"
+expect "CI_RESERVE=0 takes no share" 0 "$(rj a --reservations | wc -l)"
+touch "$d/notadir"
+out="$(CI_RESERVE_DIR="$d/notadir/x" rj a --check sass 2>&1)"; rc=$?
+expect "an unusable ledger directory: exit" 0 "$rc"
+[[ $out == *"no reservation"* ]] || fail "an unusable ledger directory is said: $out"
+# Many jobs racing for a one-job ledger: exactly one wins.
+rm -rf "$d/ledger9"; wins="$d/wins"; : > "$wins"
+for i in 1 2 3 4 5 6 7 8; do
+  ( rj "r$i" --check sass >/dev/null 2>&1 && echo "r$i" >> "$wins" ) &
+done
+wait
+expect "eight concurrent heavy jobs: exactly one admitted" 1 "$(wc -l < "$wins")"
+expect "and one share in the ledger" 1 "$(rj a --reservations | wc -l)"
+export CI_RESERVE_DIR="$d/reserve"
 
 # 8. On this machine it prints a positive integer.
 out="$("$jobs" -p release)"
