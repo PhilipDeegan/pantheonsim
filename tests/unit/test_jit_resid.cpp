@@ -1100,29 +1100,6 @@ int64_t link_ret(jit::Ctx* c, uint32_t op, uint32_t ex, uint32_t group) {
   if (kind < 8) return static_cast<int64_t>((h >> 8) % static_cast<uint64_t>(s.k + 5)) - 2;
   return INT64_MIN;
 }
-// A BSYNC in a region (round sp53): the host runs it and names the group the chain picks afterwards. Here the answer is drawn: the pass is over; or the
-// same group, a group that holds it (lanes joined at the barrier), part of it, or other lanes altogether; at the next op (mostly), at an entry of the
-// region, or anywhere in or just around it; with no other lane able to run, or with the lowest of them above that place (mostly) or anywhere.
-int64_t link_bsync(jit::Ctx* c, uint32_t op, uint32_t ex, uint32_t group) {
-  LSim& s = *static_cast<LSim*>(static_cast<GSim*>(c->host));
-  const uint64_t h = mix(s.seed ^ 0x6273796eull, op * 37u + 11u * s.visit++ + ex * 3u);
-  s.log.push_back(h);
-  if (h % 11 == 0) return INT64_MIN;
-  const unsigned gk = static_cast<unsigned>((h >> 4) % 8);
-  const uint32_t r = static_cast<uint32_t>(h >> 24) | (1u << ((h >> 12) % 32));
-  const uint32_t g = gk < 3 ? group : gk < 5 ? (group | r) : gk < 6 && (group & r) ? (group & r) : r;
-  const unsigned wk = static_cast<unsigned>((h >> 8) % 10);
-  int64_t x = static_cast<int64_t>(op) + 1;
-  if (wk >= 5 && wk < 8 && !s.starts->empty()) x = (*s.starts)[(h >> 16) % s.starts->size()];
-  else if (wk >= 8) x = static_cast<int64_t>((h >> 16) % static_cast<uint64_t>(s.k + 5)) - 2;
-  const unsigned ok = static_cast<unsigned>((h >> 20) % 10);
-  c->group = g;
-  c->pcs_at = static_cast<int32_t>(x);
-  c->olo = ok < 4 ? INT64_MAX : ok < 6 ? 1000000 : ok < 9 ? x + 1 + static_cast<int64_t>((h >> 40) % 9) : static_cast<int64_t>((h >> 40) % static_cast<uint64_t>(s.k + 6)) - 2;
-  for (unsigned l = 0; l < 32; ++l)
-    if ((g >> l) & 1u) s.pcs[l] = x;
-  return x;
-}
 void link_split(jit::Ctx* c, uint32_t group, uint32_t take, int32_t tgt, int32_t fall) {
   LSim& s = *static_cast<LSim*>(static_cast<GSim*>(c->host));
   for (unsigned l = 0; l < 32; ++l)
@@ -1132,8 +1109,6 @@ void link_split(jit::Ctx* c, uint32_t group, uint32_t take, int32_t tgt, int32_t
 struct LoopState {
   uint32_t group, flags;   // the group the loop runs, and its chain / link bits
   unsigned links = 0, spun = 0, splits = 0, bssys = 0, exits = 0, calls = 0, rets = 0;
-  unsigned bsyncs = 0, regroups = 0, after_bsync = 0;   // BSYNCs the loop ran and went on after, those that changed the group, links after one
-  bool over = false;       // a BSYNC after which the chain starts no pass: the op is counted, the loop returns
 };
 
 // The run loop for the op at `at`, where the unlinked code stopped: whether the loop's next pass starts with a group this code knows, and where (`next`). The
@@ -1167,35 +1142,6 @@ bool loop_step(const jit::RegionSpec& r, LSim& s, LoopState& ls, int32_t at, int
   }
   jit::Ctx host{};
   host.host = static_cast<GSim*>(&s);
-  if (o.hostctl == 4) {
-    // A BSYNC: the loop counts it and runs it whatever the other lanes' place, then its chain picks (the host's answer): no pass (the turn is not charged),
-    // or the next pass's group and place, with the chain bit when no other lane can run and the link bit and the others' lowest place when some can.
-    ++s.steps;
-    ++s.insts;
-    s.tinsts += static_cast<uint32_t>(__builtin_popcount(ex));
-    s.by_class[o.cls] += static_cast<uint32_t>(__builtin_popcount(ex));
-    const int64_t r = link_bsync(&host, static_cast<uint32_t>(at), ex, group);
-    if (r == INT64_MIN) {
-      ls.over = true;
-      next = at + 1;
-      return true;
-    }
-    --s.budget;
-    ++s.extra;
-    ++ls.links;
-    ++ls.bsyncs;
-    if (host.group != group) ++ls.regroups;
-    ls.group = host.group;
-    if (host.olo == INT64_MAX) {
-      ls.flags = (ls.flags & ~(jit::kFlagChain | jit::kFlagLink)) | jit::kFlagChain;
-    } else {
-      ls.flags = (ls.flags & ~(jit::kFlagChain | jit::kFlagLink)) | jit::kFlagLink;
-      s.olo = host.olo;
-    }
-    next = static_cast<int32_t>(r);
-    return true;
-  }
-  if (ls.bsyncs) ++ls.after_bsync;
   if (o.hostctl == 3) {                                 // a RET: where the registers say, if the whole group goes to one place
     const int64_t r = link_ret(&host, static_cast<uint32_t>(at), ex, group);
     if (r == INT64_MIN) return false;
@@ -1257,7 +1203,6 @@ jit::Ctx make_lctx(LSim& s, uint32_t flags, uint32_t group) {
   c.exit0 = &link_exit0;
   c.callok = &link_callok;
   c.ret = &link_ret;
-  c.bsync = &link_bsync;
   c.group = group;
   return c;
 }
@@ -1269,7 +1214,7 @@ VTEST(jit_linked_regions_equal_the_unlinked_code_and_the_run_loop_between_its_ca
   const unsigned units = static_cast<unsigned>(std::strtoul(std::getenv("VGPU_JIT_GRAPH_UNITS") ? std::getenv("VGPU_JIT_GRAPH_UNITS") : "6", nullptr, 10));
   const uint64_t seed0 = std::getenv("VGPU_JIT_RANDOM_SEED") ? std::strtoull(std::getenv("VGPU_JIT_RANDOM_SEED"), nullptr, 10) : 1;
   const std::string dir = tmp_dir("link");
-  std::atomic<unsigned> next{0}, failures{0}, runs{0}, links{0}, linked_runs{0}, spins_counted{0}, spin_stops{0}, olo_stops{0}, throws{0}, splits{0}, after_split{0}, bssys{0}, exits{0}, calls{0}, rets{0}, bsyncs{0}, regroups{0}, after_bsync{0}, overs{0};
+  std::atomic<unsigned> next{0}, failures{0}, runs{0}, links{0}, linked_runs{0}, spins_counted{0}, spin_stops{0}, olo_stops{0}, throws{0}, splits{0}, after_split{0}, bssys{0}, exits{0}, calls{0}, rets{0};
   std::mutex mu;
   std::string first_failure;
   // The regions: escapes, branches and cont ops; of the cont ops a fifth each are BSSYs (the host's call, no handler), EXITs and RETs, a fifth of the branches
@@ -1290,8 +1235,6 @@ VTEST(jit_linked_regions_equal_the_unlinked_code_and_the_run_loop_between_its_ca
             o.p2 = g.pred();
           } else if (kind < 62) {   // a RET
             o.hostctl = 3;
-          } else if (kind < 80) {   // a BSYNC
-            o.hostctl = 4;
           }
         } else if (o.br) {
           if (kind < 22) {          // a CALL: no condition beside the guard
@@ -1315,7 +1258,6 @@ VTEST(jit_linked_regions_equal_the_unlinked_code_and_the_run_loop_between_its_ca
     const std::string on = jit::Engine::source(spec, true, false, false, true), off = jit::Engine::source(spec, true, false, false, false);
     VCHECK(on.find("< olo)") != std::string::npos && on.find("c->split(") != std::string::npos && on.find("++*c->spins") != std::string::npos);
     VCHECK(off.find("< olo)") == std::string::npos && off.find("c->spins") == std::string::npos && off.find("c->split(") == std::string::npos);
-    VCHECK(on.find("c->bsync(") != std::string::npos && on.find("c->over = 1u") != std::string::npos && off.find("c->bsync(") == std::string::npos);
   }
   const auto worker = [&] {
     for (;;) {
@@ -1393,10 +1335,6 @@ VTEST(jit_linked_regions_equal_the_unlinked_code_and_the_run_loop_between_its_ca
                 b.exit_idx = cb.exit_idx;
                 break;
               }
-              if (ls.over) {   // a BSYNC that ended the pass: counted, nothing after it
-                b.exit_idx = x;
-                break;
-              }
               ps = x;   // the next pass starts there: the 256-op run with it
               if (x < 0 || x >= k) {
                 b.exit_idx = x;
@@ -1415,10 +1353,6 @@ VTEST(jit_linked_regions_equal_the_unlinked_code_and_the_run_loop_between_its_ca
           exits += ls.exits;
           calls += ls.calls;
           rets += ls.rets;
-          bsyncs += ls.bsyncs;
-          regroups += ls.regroups;
-          after_bsync += ls.after_bsync ? 1u : 0u;
-          overs += ls.over ? 1u : 0u;
           if (ls.links) ++linked_runs;
           if (ls.splits && ls.links > ls.splits) ++after_split;
           if (ta) ++throws;
@@ -1427,7 +1361,7 @@ VTEST(jit_linked_regions_equal_the_unlinked_code_and_the_run_loop_between_its_ca
             else ++olo_stops;
           }
           const bool state = same_g(a, b, !ta) && a.spins == b.spins && std::memcmp(a.pcs, b.pcs, sizeof a.pcs) == 0 && ca.group == ls.group &&
-                             ((ls.splits == 0 && ls.bsyncs == 0) || ca.olo == ((ls.flags & jit::kFlagLink) ? b.olo : INT64_MAX)) && (ca.over != 0) == ls.over;
+                             (ls.splits == 0 || ca.olo == b.olo);
           if (ta != tb || !state) {
             std::lock_guard<std::mutex> lk(mu);
             ++failures;
@@ -1455,8 +1389,6 @@ VTEST(jit_linked_regions_equal_the_unlinked_code_and_the_run_loop_between_its_ca
               "on after a split), %u stopped by the spin rule, %u by the other lanes' address, %u threw, %u failures\n",
               units, runs.load(), linked_runs.load(), links.load(), splits.load(), bssys.load(), exits.load(), calls.load(), rets.load(), spins_counted.load(), after_split.load(),
               spin_stops.load(), olo_stops.load(), throws.load(), failures.load());
-  std::printf("  link: %u BSYNCs gone on after (%u with another group; %u runs linked on after one), %u BSYNCs that ended the pass\n", bsyncs.load(), regroups.load(), after_bsync.load(),
-              overs.load());
   std::error_code ec;
   fs::remove_all(dir, ec);
   if (failures) throw vtest::Failure(first_failure);
@@ -1469,10 +1401,6 @@ VTEST(jit_linked_regions_equal_the_unlinked_code_and_the_run_loop_between_its_ca
   VCHECK(exits.load() > 50);
   VCHECK(calls.load() > 50);
   VCHECK(rets.load() > 50);
-  VCHECK(bsyncs.load() > 50);        // BSYNCs run and gone on after (round sp53)
-  VCHECK(regroups.load() > 30);      // ... with another group
-  VCHECK(after_bsync.load() > 20);   // runs that linked on after one
-  VCHECK(overs.load() > 5);          // BSYNCs that ended the pass
   VCHECK(spins_counted.load() > 20);
   VCHECK(spin_stops.load() > 5);
   VCHECK(olo_stops.load() > runs.load() / 50);
@@ -1484,7 +1412,7 @@ VTEST(jit_linked_regions_equal_the_unlinked_code_and_the_run_loop_between_its_ca
 // a time; CI's "linking, the full form" found what none of them could: with linking the regions of a section are merged around `stop` ops, and the
 // generator kept its account of the rows it held in locals across a stop op, so with residence the code after it read local copies that were never loaded
 // (wrong results in the ldsm kernel of sass_tier with more than one warp a block). This test runs regions that mix generated ALU ops, escapes, stores,
-// branches, cont ops, every op linking adds (BSSY, EXIT, CALL, RET, BSYNC) and stop ops, compiled in all sixteen combinations: for linking off and on,
+// branches, cont ops, every op linking adds (BSSY, EXIT, CALL, RET) and stop ops, compiled in all sixteen combinations: for linking off and on,
 // the seven other forms against the plainest one (no residence, no specialisation, no fused runs), called once each with the same trial. Registers,
 // predicates, counters, the turn's calls, the spin count, the log of escapes and host calls, the lanes' addresses, the group, the others' place, where the
 // code stopped and where the 256-op run restarted must be equal. (VGPU_JIT_MUTANT=res_stop_keep is the bug.)
@@ -1516,7 +1444,6 @@ VTEST(jit_every_combination_of_linking_fusing_residence_and_specialisation_equal
             if (kind < 10) o.cont = true, o.hostctl = 1;
             else if (kind < 20) { o.cont = true; o.hostctl = 2; o.aux = static_cast<uint8_t>(g.u(3)); o.p = g.pred(); o.p2 = g.pred(); }
             else if (kind < 27) o.cont = true, o.hostctl = 3;
-            else if (kind < 37) o.cont = true, o.hostctl = 4;
             else if (kind < 55 && i > 0) { jit::OpFacts stop; stop.stop = true; o = stop; }
           }
         }
@@ -1588,8 +1515,7 @@ VTEST(jit_every_combination_of_linking_fusing_residence_and_specialisation_equal
               try { res[link][f].lib->fns[r](&cb, tr.group, gl, tr.entry, tr.n0); } catch (const std::runtime_error&) { tb = true; }
               b.exit_idx = cb.exit_idx; b.exit_ps = cb.exit_ps;
               ++runs;
-              const bool state = same_g(ref, b, !tref) && ref.spins == b.spins && std::memcmp(ref.pcs, b.pcs, sizeof ref.pcs) == 0 && cr.group == cb.group && cr.olo == cb.olo &&
-                                 cr.over == cb.over;
+              const bool state = same_g(ref, b, !tref) && ref.spins == b.spins && std::memcmp(ref.pcs, b.pcs, sizeof ref.pcs) == 0 && cr.group == cb.group && cr.olo == cb.olo;
               if (tref != tb || !state) {
                 std::lock_guard<std::mutex> lk(mu);
                 ++failures;
