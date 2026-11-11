@@ -872,12 +872,12 @@ jobs:
       - uses: ./.github/actions/pr-guard
 
       # This job needs a lot of memory, and on a shared runner another job may
-      # hold most of it. Wait up to 30 minutes for the memory (CI_MEM_WAIT_SECS: a peak
+      # hold most of it. Wait up to 2 hours (a sanitizer job queues behind the other one, which runs for most of an hour) for the memory (CI_MEM_WAIT_SECS: a peak
       # from another job usually passes), then fail here, alone, if this one cannot fit, rather than
       # take the machine down part-way (the minimums are in ci/jobs.sh).
       - name: Check the memory
         env:
-          CI_MEM_WAIT_SECS: '1800'
+          CI_MEM_WAIT_SECS: '7200'
         run: ci/jobs.sh --check asan
 
       # The checkout belongs to the runner's user and the job runs as root in
@@ -965,12 +965,12 @@ jobs:
       - uses: ./.github/actions/pr-guard
 
       # This job needs a lot of memory, and on a shared runner another job may
-      # hold most of it. Wait up to 30 minutes for the memory (CI_MEM_WAIT_SECS: a peak
+      # hold most of it. Wait up to 2 hours (a sanitizer job queues behind the other one, which runs for most of an hour) for the memory (CI_MEM_WAIT_SECS: a peak
       # from another job usually passes), then fail here, alone, if this one cannot fit, rather than
       # take the machine down part-way (the minimums are in ci/jobs.sh).
       - name: Check the memory
         env:
-          CI_MEM_WAIT_SECS: '1800'
+          CI_MEM_WAIT_SECS: '7200'
         run: ci/jobs.sh --check tsan
 
       # The checkout belongs to the runner's user and the job runs as root in
