@@ -7,6 +7,9 @@ release says what runs and what it produces, never how fast a real GPU would run
 
 ## Unreleased
 
+- CI and setup action: when the apt mirror host of a GitHub-hosted runner image (azure.archive.ubuntu.com) does not resolve, the
+  toolchain install points apt at archive.ubuntu.com instead of failing three times with exit 100 (`scripts/apt-mirror-fallback.sh`,
+  run before every hosted-runner `apt-get update`; it changes nothing when the mirror resolves).
 - AMD: a scalar load whose destination is VCC (`s_load_dwordx2 vcc, s[94:95], 0x0`, which LLVM writes when it runs short of scalar
   registers) fills VCC. It wrote the loaded pair to s0 and s1, which on gfx90a hold the private segment buffer, so the kernel's next
   stack access stopped with "buffer_load_dword through a buffer that adds the lane's id" (Kokkos kernels such as OPALX's

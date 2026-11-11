@@ -108,6 +108,7 @@ runs:
         # The simulator is C++20 and needs gcc 12 or newer; 22.04's default is 11.
         . /etc/os-release
         [[ "$ID" == ubuntu && "${VERSION_ID%%.*}" -lt 24 ]] && pkgs="$pkgs g++-12"
+        [ ! -x "${GITHUB_ACTION_PATH}/scripts/apt-mirror-fallback.sh" ] || "${GITHUB_ACTION_PATH}/scripts/apt-mirror-fallback.sh"
         $SUDO apt-get update -qq
         # Unpacking the NVIDIA runtime libraries that nvidia-cuda-toolkit pulls in has hung a hosted
         # runner for the whole 45 minutes, twice running. Bound each attempt, and finish whatever dpkg
@@ -134,6 +135,7 @@ runs:
         repo="https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${VERSION_ID//./}/x86_64"
         wget -qO "$RUNNER_TEMP/cuda-keyring.deb" "$repo/cuda-keyring_1.1-1_all.deb"
         $SUDO dpkg -i "$RUNNER_TEMP/cuda-keyring.deb"
+        [ ! -x "${GITHUB_ACTION_PATH}/scripts/apt-mirror-fallback.sh" ] || "${GITHUB_ACTION_PATH}/scripts/apt-mirror-fallback.sh"
         $SUDO apt-get update -qq
         v="${TOOLKIT//./-}"
         # CUDA 13 renamed the NVVM package.
@@ -171,6 +173,7 @@ runs:
           | $SUDO tee /etc/apt/sources.list.d/rocm.list > /dev/null
         # AMD's packages, not Ubuntu's hipcc of the same name.
         printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 1001\n' | $SUDO tee /etc/apt/preferences.d/rocm > /dev/null
+        [ ! -x "${GITHUB_ACTION_PATH}/scripts/apt-mirror-fallback.sh" ] || "${GITHUB_ACTION_PATH}/scripts/apt-mirror-fallback.sh"
         $SUDO apt-get update -qq
         dir="$RUNNER_TEMP/rocm-debs"; mkdir -p "$dir"
         (cd "$dir" && apt-get download hipcc hip-dev rocm-llvm rocm-device-libs rocm-core hsa-rocr-dev) \

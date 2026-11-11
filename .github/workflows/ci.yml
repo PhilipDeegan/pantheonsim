@@ -66,6 +66,7 @@ jobs:
       - name: Install toolchain
         if: runner.environment == 'github-hosted'
         run: |
+          [ ! -x scripts/apt-mirror-fallback.sh ] || scripts/apt-mirror-fallback.sh
           sudo apt-get update -qq
           # nvidia-profiler is nvprof, an unmodified profiler run against the
           # simulator by e2e_nvprof; without it that test skips.
@@ -194,6 +195,7 @@ jobs:
       - name: Install toolchain
         if: runner.environment == 'github-hosted' && !job.container.id
         run: |
+          [ ! -x scripts/apt-mirror-fallback.sh ] || scripts/apt-mirror-fallback.sh
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
             build-essential cmake ninja-build g++-12 nvidia-cuda-toolkit
@@ -677,6 +679,7 @@ jobs:
       - name: Install toolchain
         if: runner.environment == 'github-hosted' && !job.container.id
         run: |
+          [ ! -x scripts/apt-mirror-fallback.sh ] || scripts/apt-mirror-fallback.sh
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends build-essential cmake ninja-build clang llvm
 
