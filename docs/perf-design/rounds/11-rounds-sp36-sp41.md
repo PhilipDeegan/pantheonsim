@@ -1605,7 +1605,7 @@ The short kernels compile as fast or faster (one function instead of two or thre
 
 ### Fused runs on top (round sp48's patch, item 5 of the brief)
 
-Linking clears 5 % on more than three programs, so round sp48's fused runs (`data/sp48/fused-runs.patch`: runs of register-only ops computed block by block of eight lanes, `VGPU_JIT_FUSE=1`) were put on top: the patch applies to this branch with five one-line conflicts (the option beside `link` in `Config`, `Engine::source` and its three callers; a `stop` op is never fusable, nothing else interacts). Its own test (`jit_fused_runs_equal_the_op_by_op_code`: 202 runs of 925 ops, 336 region runs, 0 failures) passes on the combined build. Five sides of that build, same protocol:
+Linking clears 5 % on more than three programs, so round sp48's fused runs (the patch round sp48 measured, no longer kept beside its data: runs of register-only ops computed block by block of eight lanes, `VGPU_JIT_FUSE=1`) were put on top: the patch applies to this branch with five one-line conflicts (the option beside `link` in `Config`, `Engine::source` and its three callers; a `stop` op is never fusable, nothing else interacts). Its own test (`jit_fused_runs_equal_the_op_by_op_code`: 202 runs of 925 ops, 336 region runs, 0 failures) passes on the combined build. Five sides of that build, same protocol:
 
 | program | JIT s | linked s | linked again s | linked + fused s | JIT + fused s | **linked / linked + fused** | control linked / linked again | JIT / linked + fused | JIT / JIT + fused | outputs |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
