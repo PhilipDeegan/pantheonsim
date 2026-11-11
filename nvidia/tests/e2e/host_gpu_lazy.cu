@@ -2,6 +2,9 @@
 // worth a card, `small` the same kernel on a few warps, `mufu` a kernel outside the set (expf); `div`, `rcp`, `divexp` an IEEE division, a bare rcp.approx and a division with an expf (the division idiom: in the set
 // only with VGPU_HOST_GPU_DIV=1, and only when it is the sole thing outside it). It prints the results on stdout, which must not depend on the
 // host-GPU mode, and on stderr how long the first launch took in milliseconds ("first_launch_ms=").
+// For relaxed mode (VGPU_HOST_GPU=relaxed, docs/perf-design/12-host-gpu-relaxed.md): `iatom` an integer atomicAdd whose old value is used (admitted),
+// `fatom` a float atomicAdd whose old value is used and `cas` a compare-and-swap (both only with VGPU_HOST_GPU_ATOMICS=1). Each thread's result
+// does not depend on the order the threads run in, so these print the same lines wherever they run.
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -42,12 +45,35 @@ __global__ void divexp(float* d, int n) {   // the division idiom and an EX2 in 
   if (i < n) d[i] = expf(d[i] * 0.001f) / (float(i % 977) + 1.25f);
 }
 
+__global__ void iatomk(unsigned* d, int n) {   // an integer atomic with a returned value: ATOMG.ADD
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  unsigned acc = 0;
+  for (unsigned r = 0; r < 16; ++r) acc += atomicAdd(&d[i], r + 1);   // its own element: the old values are the same in any order
+  d[i] += acc;
+}
+__global__ void fatomk(float* d, int n) {   // a float atomic with a returned value (ATOMG.ADD.F32 or a compare-and-swap loop, by toolkit and architecture)
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  float acc = 0;
+  for (int r = 0; r < 16; ++r) acc += atomicAdd(&d[i], 1.0f);   // small integers: exact in any order
+  d[i] += acc;
+}
+__global__ void cask(unsigned* d, int n) {   // compare-and-swap: ATOMG.CAS
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  unsigned acc = 0;
+  for (unsigned r = 0; r < 16; ++r) acc += atomicCAS(&d[i], d[i], d[i] + r);
+  d[i] ^= acc;
+}
+
 void leak_heap();   // host_gpu_lazy_heap.cu: a kernel of a module of its own (a kernel that calls malloc keeps every kernel of its module in the simulator)
 
 int main(int argc, char** argv) {
   const char* mode = argc > 1 ? argv[1] : "big";
   const bool small = !std::strcmp(mode, "small"), mufu = !std::strcmp(mode, "mufu");
   const bool div = !std::strcmp(mode, "div"), rcp = !std::strcmp(mode, "rcp"), divexp_mode = !std::strcmp(mode, "divexp");
+  const bool iatom = !std::strcmp(mode, "iatom"), fatom = !std::strcmp(mode, "fatom"), cas = !std::strcmp(mode, "cas");
   const int rounds = !std::strcmp(mode, "acct") ? 2048 : 64;   // `acct`: `big` with 32 times the work per thread, a launch of a fraction of a second (run_host_gpu_stub.sh step 8)
   const bool heap = !std::strcmp(mode, "heap");   // `big`, after a kernel left a block of the device heap in use: no launch may go to the card
   const int n = small ? 64 : 1 << 18;
@@ -62,6 +88,9 @@ int main(int argc, char** argv) {
     else if (div) divk<<<(n + 255) / 256, 256>>>(static_cast<float*>(d), n);
     else if (rcp) rcpk<<<(n + 255) / 256, 256>>>(static_cast<float*>(d), n);
     else if (divexp_mode) divexp<<<(n + 255) / 256, 256>>>(static_cast<float*>(d), n);
+    else if (iatom) iatomk<<<(n + 255) / 256, 256>>>(static_cast<unsigned*>(d), n);
+    else if (fatom) fatomk<<<(n + 255) / 256, 256>>>(static_cast<float*>(d), n);
+    else if (cas) cask<<<(n + 255) / 256, 256>>>(static_cast<unsigned*>(d), n);
     else scramble<<<(n + 255) / 256, 256>>>(static_cast<uint32_t*>(d), n, rounds);
     cudaDeviceSynchronize();
     if (launch == 0) std::fprintf(stderr, "first_launch_ms=%.0f\n", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());

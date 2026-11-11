@@ -4,7 +4,11 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <algorithm>
+#include <initializer_list>
+#include <map>
 #include <random>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -13,12 +17,15 @@
 
 using namespace vgpu::hostgpu;
 
-VTEST(mode_is_exact_or_off) {
+VTEST(mode_is_exact_relaxed_or_off) {
   VCHECK(mode_from_text("exact") == Mode::Exact);
+  VCHECK(mode_from_text("relaxed") == Mode::Relaxed);
   VCHECK(mode_from_text(nullptr) == Mode::Off);
   VCHECK(mode_from_text("") == Mode::Off);
-  VCHECK(mode_from_text("approx") == Mode::Off);   // not built: a typo must not turn a mode on
+  VCHECK(mode_from_text("approx") == Mode::Off);   // not a mode: a typo must not turn one on
   VCHECK(mode_from_text("EXACT") == Mode::Off);
+  VCHECK(mode_from_text("RELAXED") == Mode::Off);
+  VCHECK(mode_from_text("relaxed ") == Mode::Off);
   VCHECK(mode_from_text("1") == Mode::Off);
 }
 
@@ -771,7 +778,8 @@ VTEST(idiom_classification_by_mnemonic) {
 // The start-up refusals (08 section 3): a mode value that is not a mode is said, and every diagnostic that only the simulator gives switches the mode off.
 VTEST(mode_text_known_and_diagnostic_switches) {
   VCHECK(mode_text_is_known(nullptr) && mode_text_is_known("") && mode_text_is_known("off") && mode_text_is_known("exact") && mode_text_is_known("0"));
-  VCHECK(!mode_text_is_known("approx") && !mode_text_is_known("EXACT") && !mode_text_is_known("on") && !mode_text_is_known("1"));
+  VCHECK(mode_text_is_known("relaxed"));
+  VCHECK(!mode_text_is_known("approx") && !mode_text_is_known("EXACT") && !mode_text_is_known("on") && !mode_text_is_known("1") && !mode_text_is_known("Relaxed"));
   for (const char* v : kIncompatibleVars) {
     const std::string name(v);
     VCHECK(!diagnostic_switched_on(name, nullptr));
@@ -791,6 +799,218 @@ VTEST(mode_text_known_and_diagnostic_switches) {
     if (!found) std::fprintf(stderr, "%s is not in kIncompatibleVars\n", m);
     VCHECK(found);
   }
+}
+
+// ---- relaxed mode (docs/perf-design/12-host-gpu-relaxed.md) -------------------------------------------------------------------------------------
+
+// Exact mode is what it was: the mnemonics it takes are this list and no other name the decoder can print. The list is a copy made when relaxed mode
+// was added; a change to exact_mnemonic_allowed has to change it here too, on purpose.
+VTEST(exact_set_is_the_list_it_was_before_relaxed_mode) {
+  const std::set<std::string> frozen = {
+      "IMAD", "IADD3", "IADD", "LOP3", "LOP", "LEA", "SHF", "SHL", "SHR", "ISETP", "IMNMX", "IABS", "POPC", "FLO", "BREV", "PRMT", "SEL", "MOV", "R2P", "P2R",
+      "PLOP3", "UPLOP3", "PSETP", "ISET", "FSET", "DSET", "I2I", "I2IP", "SGXT", "BMSK", "VIADD", "VIMNMX", "FADD", "FMUL", "FFMA", "FSETP", "FSEL", "FMNMX",
+      "DADD", "DMUL", "DFMA", "DSETP", "DMNMX", "I2F", "I2FP", "F2I", "F2F", "F2FP", "FRND", "FCHK", "LDG", "STG", "LDS", "STS", "LDL", "STL", "LD", "ST",
+      "LDC", "ULDC", "S2R", "S2UR", "CS2R", "UMOV", "UIADD3", "UIMAD", "ULOP3", "USHF", "ULEA", "UISETP", "USEL", "UPRMT", "UFLO", "UPOPC", "UP2UR", "R2UR",
+      "VOTEU", "BRA", "BRX", "BSSY", "BSYNC", "BREAK", "BMOV", "EXIT", "NOP", "YIELD", "WARPSYNC", "BAR", "MEMBAR", "ERRBAR", "DEPBAR", "CCTL", "SHFL", "VOTE",
+      "MATCH", "RED"};
+  VCHECK_EQ(frozen.size(), size_t{96});
+  for (const std::string& m : frozen) VCHECK(exact_opcode_allowed(m, {}));
+  // every instruction the decoder knows, and a few names it does not
+  std::vector<std::string> names = {"REDG", "OMMA", "VPRINTF", "", "imad", "MUFU.RCP"};
+#define VGPU_SASS_OP(name) names.push_back(#name);
+#include "vgpu/sass/ops.inc"
+#undef VGPU_SASS_OP
+  VCHECK(names.size() > 150);
+  unsigned taken = 0;
+  for (const std::string& m : names) {
+    const bool want = frozen.count(m) != 0;
+    if (exact_opcode_allowed(m, {}) != want) std::fprintf(stderr, "%s: exact mode %s it\n", m.c_str(), want ? "no longer takes" : "now takes");
+    VCHECK_EQ(exact_opcode_allowed(m, {}), want);
+    taken += want;
+  }
+  VCHECK_EQ(taken, 89u);   // (the other 7 are spellings that are no instruction of the decoder: LOP, SHL, SHR, ISET, DSET, DMNMX, PSETP)
+  // RED's modifiers, as before
+  for (const char* bad : {"F16", "F32", "F64", "BF16", "FTZ", "CAS", "EXCH", "INC", "DEC", "SPIN", "CAST", "POPC"}) VCHECK(!exact_opcode_allowed("RED", {"E", bad}));
+  for (const char* good : {"E", "ADD", "MIN", "MAX", "AND", "OR", "XOR", "S32", "64", "S64", "STRONG", "GPU"}) VCHECK(exact_opcode_allowed("RED", {good}));
+}
+
+VTEST(relaxed_classes_every_kind_of_instruction) {
+  using C = InsnClass;
+  // exact: whatever the exact set takes
+  for (const char* m : {"IMAD", "FFMA", "DFMA", "LDG", "STG", "BAR", "BRA", "EXIT", "SHFL", "FCHK", "S2R"}) VCHECK(relaxed_class(m, {}) == C::Exact);
+  VCHECK(relaxed_class("RED", {"E", "ADD", "STRONG", "GPU"}) == C::Exact);
+  // approximate
+  for (const char* f : {"COS", "SIN", "EX2", "LG2", "RCP", "RSQ", "RCP64H", "RSQ64H", "SQRT", "TANH"}) VCHECK(relaxed_class("MUFU", {f}) == C::Mufu);
+  VCHECK(relaxed_class("MUFU", {"(10)"}) == C::Never);   // a function the decoder cannot name
+  for (const char* m : {"HADD2", "HMUL2", "HFMA2", "HSETP2", "HSET2", "HMNMX2"}) VCHECK(relaxed_class(m, {}) == C::Half);
+  VCHECK(relaxed_class("HFMA2", {"MMA"}) == C::Half);
+  VCHECK(relaxed_class("CALL", {"REL", "NOINC"}) == C::Call);
+  VCHECK(relaxed_class("RET", {"REL", "NODEC"}) == C::Call);
+  // the decoder's own spellings of a float reduction: the type is ONE modifier, "F32.FTZ.RN"
+  VCHECK(relaxed_class("RED", {"E", "ADD", "F32.FTZ.RN", "STRONG", "GPU"}) == C::FloatRed);
+  VCHECK(relaxed_class("RED", {"E", "ADD", "F64.RN", "STRONG", "GPU"}) == C::FloatRed);
+  VCHECK(relaxed_class("RED", {"E", "ADD", "F16x2.RN"}) == C::FloatRed);
+  VCHECK(relaxed_class("REDG", {"E", "ADD", "F32x2.FTZ.RN"}) == C::FloatRed);
+  VCHECK(relaxed_class("REDG", {"E", "MAX", "BF16x4.RN"}) == C::FloatRed);
+  VCHECK(relaxed_class("RED", {"E", "ADD", "F32", "FTZ", "RN"}) == C::FloatRed);   // and split
+  VCHECK(relaxed_class("REDG", {"E", "ADD", "STRONG", "GPU"}) == C::Extra);
+  VCHECK(relaxed_class("RED", {"E", "INC"}) == C::AtomInt);
+  VCHECK(relaxed_class("RED", {"E", "EXCH"}) == C::AtomSwap);
+  // tensor
+  for (const char* m : {"HMMA", "IMMA", "DMMA"}) VCHECK(relaxed_class(m, {"16816", "F32"}) == C::Tensor);
+  // atomics
+  for (const char* m : {"ATOM", "ATOMG", "ATOMS"}) {
+    for (const char* op : {"ADD", "MIN", "MAX", "INC", "DEC", "AND", "OR", "XOR"}) {
+      VCHECK(relaxed_class(m, {"E", op}) == C::AtomInt);
+      VCHECK(relaxed_class(m, {"E", op, "S32"}) == C::AtomInt);
+      VCHECK(relaxed_class(m, {op, "64", "STRONG", "GPU"}) == C::AtomInt);
+    }
+    VCHECK(relaxed_class(m, {"E", "ADD", "F32.FTZ.RN"}) == C::AtomFloat);
+    VCHECK(relaxed_class(m, {"E", "ADD", "F64.RN"}) == C::AtomFloat);
+    VCHECK(relaxed_class(m, {"E", "MIN", "F16x2.RN"}) == C::AtomFloat);
+    VCHECK(relaxed_class(m, {"E", "CAS", "STRONG", "GPU"}) == C::AtomSwap);
+    VCHECK(relaxed_class(m, {"CAST", "SPIN", "64"}) == C::AtomSwap);
+    VCHECK(relaxed_class(m, {"E", "EXCH"}) == C::AtomSwap);
+    VCHECK(relaxed_class(m, {"E", "EXCH", "F32.FTZ.RN"}) == C::AtomSwap);   // an exchange is an exchange whatever its type
+    VCHECK(relaxed_class(m, {"E", "(9)"}) == C::Never);
+  }
+  VCHECK(relaxed_class("ATOMS", {"POPC", "INC", "32"}) == C::AtomInt);
+  VCHECK(relaxed_class("ATOMS", {"ARRIVE", "64"}) == C::Never);
+  // extra: named one by one
+  for (const char* m : {"IDP", "VABSDIFF", "VABSDIFF4", "VIADDMNMX", "VIMNMX3", "FMNMX3", "F2IP", "FSWZADD", "REDUX", "LDGSTS", "LDGDEPBAR", "LDSM", "MOVM",
+                        "FFMA2", "FMUL2", "FADD2"})
+    VCHECK(relaxed_class(m, {}) == C::Extra);
+  // never: textures, surfaces, what nobody named, what is not an instruction
+  for (const char* m : {"TEX", "TLD", "TLD4", "TXD", "SULD", "SUST", "QMMA", "BMMA", "OMMA", "HGMMA", "JMP", "NANOSLEEP", "BPT", "SYNCS", "STSM", "UTCMMA",
+                        "LDTM", "STTM", "UTMALDG", "VPRINTF", "", "mufu", "Unknown"})
+    VCHECK(relaxed_class(m, {}) == C::Never);
+}
+
+// Every instruction the decoder knows has a class, and the classes of the ones relaxed mode adds are the ones the doc lists: a new instruction in ops.inc is
+// Never until someone names it here and there.
+VTEST(relaxed_whitelist_covers_the_decoder_and_nothing_unnamed) {
+  std::vector<std::string> names;
+#define VGPU_SASS_OP(name) names.push_back(#name);
+#include "vgpu/sass/ops.inc"
+#undef VGPU_SASS_OP
+  std::map<InsnClass, unsigned> n;
+  for (const std::string& m : names) ++n[relaxed_class(m, {})];
+  VCHECK_EQ(n[InsnClass::Mufu], 1u);
+  VCHECK_EQ(n[InsnClass::Half], 6u);
+  VCHECK_EQ(n[InsnClass::Call], 2u);
+  VCHECK_EQ(n[InsnClass::Tensor], 3u);
+  VCHECK_EQ(n[InsnClass::AtomInt], 3u);   // ATOM, ATOMG, ATOMS with no modifier
+  VCHECK_EQ(n[InsnClass::Extra], 16u);
+  VCHECK_EQ(n[InsnClass::FloatRed] + n[InsnClass::AtomFloat] + n[InsnClass::AtomSwap], 0u);
+  VCHECK_EQ(n[InsnClass::Exact] + n[InsnClass::Never] + 31u, static_cast<unsigned>(names.size()));
+  VCHECK(n[InsnClass::Never] >= 30);
+  for (unsigned c = 0; c < kInsnClasses; ++c) VCHECK(std::string(insn_class_name(static_cast<InsnClass>(c))).size() > 3);
+  VCHECK(std::string(insn_class_name(InsnClass::Never)) == "never" && std::string(insn_class_name(InsnClass::Exact)) == "exact");
+}
+
+VTEST(modifier_parts_are_read_inside_joined_modifiers) {
+  VCHECK(mods_have({"E", "ADD", "F32.FTZ.RN"}, "FTZ"));
+  VCHECK(mods_have({"F32.FTZ.RN"}, "RN") && mods_have({"F32.FTZ.RN"}, "F32"));
+  VCHECK(!mods_have({"F32.FTZ.RN"}, "F3") && !mods_have({"F32.FTZ.RN"}, "FTZ.RN") && !mods_have({}, "E") && !mods_have({"", "."}, ""));
+  VCHECK(!mods_have({"CAST"}, "CAS") && !mods_have({"EXCHANGE"}, "EXCH"));
+  VCHECK(mods_float_typed({"F16x2.RN"}) && mods_float_typed({"E", "BF16x8.RN"}) && mods_float_typed({"F64"}) && mods_float_typed({"X", "F32x4.FTZ.RN"}));
+  VCHECK(!mods_float_typed({"E", "ADD", "S32", "64", "FTZ", "RN"}) && !mods_float_typed({}));
+  VCHECK(mods_undecoded({"E", "(9)"}) && mods_undecoded({"X.(3)"}) && !mods_undecoded({"E", "ADD"}) && !mods_undecoded({}));
+}
+
+VTEST(a_call_must_stay_inside_the_kernel) {
+  VCHECK(call_stays_inside(true, true, 0x100, 0x0, 0x400));
+  VCHECK(call_stays_inside(true, true, 0x0, 0x0, 0x400) && call_stays_inside(true, true, 0x400, 0x0, 0x400));   // the first and the last instruction
+  VCHECK(!call_stays_inside(true, true, 0x410, 0x0, 0x400));    // past the end
+  VCHECK(!call_stays_inside(true, true, 0x70, 0x80, 0x400));    // before the start
+  VCHECK(!call_stays_inside(true, true, -16, 0x0, 0x400));
+  VCHECK(!call_stays_inside(false, true, 0x100, 0x0, 0x400));   // CALL.ABS
+  VCHECK(!call_stays_inside(true, false, 0x100, 0x0, 0x400));   // through a register
+}
+
+VTEST(relaxed_admits_by_class_and_switch) {
+  using C = InsnClass;
+  const RelaxedSwitches def;
+  const auto mask = [](std::initializer_list<C> cs) {
+    ClassMask m = 0;
+    for (C c : cs) m |= class_bit(c);
+    return m;
+  };
+  // the defaults: everything but float atomics with a value, swaps and what has no class
+  VCHECK(relaxed_refusal(mask({C::Exact}), def) == RelaxedRefusal::None);
+  VCHECK(relaxed_refusal(0, def) == RelaxedRefusal::None);
+  for (C c : {C::Mufu, C::Half, C::FloatRed, C::Call, C::Extra, C::Tensor, C::AtomInt}) VCHECK(relaxed_refusal(mask({C::Exact, c}), def) == RelaxedRefusal::None);
+  VCHECK(relaxed_refusal(mask({C::Exact, C::Mufu, C::Half, C::FloatRed, C::Call, C::Extra, C::Tensor, C::AtomInt}), def) == RelaxedRefusal::None);
+  VCHECK(relaxed_refusal(mask({C::Exact, C::AtomFloat}), def) == RelaxedRefusal::Atomics);
+  VCHECK(relaxed_refusal(mask({C::Exact, C::AtomSwap}), def) == RelaxedRefusal::Atomics);
+  VCHECK(relaxed_refusal(mask({C::Never}), def) == RelaxedRefusal::Never);
+  // the opt-in
+  RelaxedSwitches at;
+  at.atomics = true;
+  VCHECK(relaxed_refusal(mask({C::Exact, C::AtomFloat, C::AtomSwap, C::AtomInt}), at) == RelaxedRefusal::None);
+  VCHECK(relaxed_refusal(mask({C::AtomSwap, C::Never}), at) == RelaxedRefusal::Never);   // nothing opts into Never
+  // the off list: each name switches its class off, and only its class
+  const struct { const char* name; std::vector<C> off; } rows[] = {
+      {"mufu", {C::Mufu}}, {"tensor", {C::Tensor}}, {"half", {C::Half}}, {"call", {C::Call}}, {"red", {C::FloatRed}}, {"extra", {C::Extra}},
+      {"atomics", {C::AtomInt, C::AtomFloat, C::AtomSwap}}};
+  for (const auto& row : rows) {
+    RelaxedSwitches sw;
+    sw.atomics = true;
+    VCHECK(parse_relaxed_off(row.name, &sw.off));
+    for (unsigned c = 0; c < kInsnClasses; ++c) {
+      const C cls = static_cast<C>(c);
+      const bool is_off = std::find(row.off.begin(), row.off.end(), cls) != row.off.end();
+      const RelaxedRefusal want = cls == C::Never ? RelaxedRefusal::Never : is_off ? RelaxedRefusal::Off : RelaxedRefusal::None;
+      VCHECK(relaxed_refusal(class_bit(cls), sw) == want);
+    }
+  }
+  // the order: no class beats a switched-off class beats the opt-in
+  RelaxedSwitches sw;
+  VCHECK(parse_relaxed_off("mufu", &sw.off));
+  VCHECK(relaxed_refusal(mask({C::Mufu, C::AtomSwap}), sw) == RelaxedRefusal::Off);
+  VCHECK(relaxed_refusal(mask({C::Mufu, C::AtomSwap, C::Never}), sw) == RelaxedRefusal::Never);
+  // the exact class cannot be switched off
+  VCHECK(parse_relaxed_off("mufu,tensor,half,call,atomics,red,extra", &sw.off));
+  VCHECK(relaxed_refusal(mask({C::Exact}), sw) == RelaxedRefusal::None);
+  VCHECK((sw.off & (class_bit(C::Exact) | class_bit(C::Never))) == 0);
+}
+
+VTEST(relaxed_off_list_parses_names_and_refuses_the_rest) {
+  ClassMask off = 99;
+  std::string bad;
+  VCHECK(parse_relaxed_off(nullptr, &off) && off == 0);
+  VCHECK(parse_relaxed_off("", &off) && off == 0);
+  VCHECK(parse_relaxed_off("mufu,call", &off) && off == (class_bit(InsnClass::Mufu) | class_bit(InsnClass::Call)));
+  VCHECK(parse_relaxed_off(",mufu,,", &off) && off == class_bit(InsnClass::Mufu));
+  VCHECK(!parse_relaxed_off("mufu,sfu", &off, &bad) && bad == "sfu");
+  VCHECK(!parse_relaxed_off("MUFU", &off, &bad) && bad == "MUFU");
+  VCHECK(!parse_relaxed_off("mufu call", &off, &bad) && bad == "mufu call");
+  VCHECK(!parse_relaxed_off("exact", &off, &bad) && !parse_relaxed_off("never", &off) && !parse_relaxed_off("all", &off));
+}
+
+// The kernels of the spike again, as relaxed mode sees them (the classes of exact_set_matches_the_measured_kernels above).
+VTEST(relaxed_takes_the_kernels_exact_refused_for_numerics) {
+  const auto classes = [](const std::vector<std::pair<std::string, std::vector<std::string>>>& code) {
+    ClassMask m = 0;
+    for (const auto& [mn, mods] : code) m |= class_bit(relaxed_class(mn, mods));
+    return m;
+  };
+  const RelaxedSwitches def;
+  RelaxedSwitches at;
+  at.atomics = true;
+  // HeCBench silu forward (expf): refused in exact, admitted in relaxed
+  const ClassMask silu = classes({{"FFMA", {}}, {"MUFU", {"EX2"}}, {"MUFU", {"RCP"}}, {"FCHK", {}}, {"FADD", {"FTZ"}}});
+  VCHECK(relaxed_refusal(silu, def) == RelaxedRefusal::None);
+  // HeCBench aop compute_partial_beta (double atomicAdd as a compare-and-swap loop): only with the opt-in
+  const ClassMask aop = classes({{"DADD", {}}, {"ATOMS", {"CAST", "SPIN", "64"}}, {"DFMA", {}}});
+  VCHECK(relaxed_refusal(aop, def) == RelaxedRefusal::Atomics && relaxed_refusal(aop, at) == RelaxedRefusal::None);
+  // HeCBench bh TreeBuildingKernel (ATOMG.E.CAS)
+  const ClassMask bh = classes({{"FSETP", {"GEU", "AND"}}, {"ATOMG", {"E", "CAS", "STRONG", "GPU"}}});
+  VCHECK(relaxed_refusal(bh, def) == RelaxedRefusal::Atomics && relaxed_refusal(bh, at) == RelaxedRefusal::None);
+  // a histogram (integer atomicAdd whose old value is used) and a float reduction: admitted
+  VCHECK(relaxed_refusal(classes({{"LDG", {"E"}}, {"ATOMG", {"E", "ADD", "STRONG", "GPU"}}, {"RED", {"E", "ADD", "F32.FTZ.RN", "STRONG", "GPU"}}}), def) == RelaxedRefusal::None);
+  // a texture fetch: never, whatever is switched on
+  VCHECK(relaxed_refusal(classes({{"TEX", {"SCR", "LL"}}, {"FMUL", {}}}), at) == RelaxedRefusal::Never);
 }
 
 VTEST_MAIN

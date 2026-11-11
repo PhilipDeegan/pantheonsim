@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <initializer_list>
 #include <map>
 #include <optional>
 #include <utility>
@@ -20,18 +21,21 @@
 
 namespace vgpu::hostgpu {
 
-enum class Mode { Off, Exact };
+enum class Mode { Off, Exact, Relaxed };
 
-// "exact" turns the mode on; anything else, empty or null is off. (`approx` is not built: a typo must not turn it on.)
+// "exact" and "relaxed" turn the mode on; anything else, empty or null is off. (`approx` is not a mode: a typo must not turn one on.)
+// Relaxed (docs/perf-design/12-host-gpu-relaxed.md) also sends kernels to the card whose results are the card's own and not the simulator's bits.
 inline Mode mode_from_text(const char* text) {
-  return text && std::string(text) == "exact" ? Mode::Exact : Mode::Off;
+  if (!text) return Mode::Off;
+  const std::string t(text);
+  return t == "exact" ? Mode::Exact : t == "relaxed" ? Mode::Relaxed : Mode::Off;
 }
 
-// A mode value that is neither off nor exact (a typo, or `approx`, which is not built) must be said, never read as off in silence.
+// A mode value that is none of off, exact and relaxed (a typo, or `approx`, which is not a mode) must be said, never read as off in silence.
 inline bool mode_text_is_known(const char* text) {
   if (!text || !*text) return true;
   const std::string t(text);
-  return t == "off" || t == "exact" || t == "0";
+  return t == "off" || t == "exact" || t == "relaxed" || t == "0";
 }
 
 // The switches of diagnostics that only the simulator can give: with any of them on the mode refuses to start (08 section 3), never quietly drops them.
@@ -105,8 +109,9 @@ inline bool exact_opcode_allowed(const std::string& mnemonic, const std::vector<
 // (CALL.REL.NOINC to a subroutine that also uses MUFU.RCP, ending in RET), and the result is the correctly rounded quotient whatever the last bit of the
 // approximation: the PTX ISA requires div.rn.f32 to be IEEE-compliant, so the card and the simulator both give the one correctly rounded answer.
 // Tested here without a card: the refinement over every mantissa of the divisor with the simulator's reciprocal and with it one ulp off either way
-// (tests/unit/test_host_gpu_ref.cpp); on a card, by tools/probes/hostgpu_sfu_exhaustive.cu div (all 2^32 divisors), which is PENDING. Until that run is
-// clean the recognizer is behind VGPU_HOST_GPU_DIV=1 and the default exact set is unchanged.
+// (tests/unit/test_host_gpu_ref.cpp); on a card, by tools/probes/hostgpu_sfu_exhaustive.cu div: 12 dividends against all 2^32 divisors, 0 different on an A10G
+// (docs/perf-design/rounds/11-rounds-sp36-sp41.md "Round sp44", B; other cards were not run). The recognizer is still behind VGPU_HOST_GPU_DIV=1 and the
+// default exact set is unchanged.
 //
 // What the recognizer accepts (division_idiom_only): every MUFU is a plain RCP; each one outside a subroutine has an FCHK of the same divisor register within
 // kIdiomMufuToFchk instructions after it; every CALL goes to a subroutine (from its target to the first RET at or after it) and has an FCHK within
@@ -198,6 +203,137 @@ inline CodeInsn::Kind classify_for_idiom(const std::string& mnemonic, const std:
   for (const char* t : kTouchesOthers)
     if (mnemonic == t) return K::Memory;
   return exact_mnemonic_allowed(mnemonic) ? K::Other : K::Memory;
+}
+
+// ---- relaxed mode: what a kernel's code is made of (docs/perf-design/12-host-gpu-relaxed.md) ------------------------------------------------
+// VGPU_HOST_GPU=relaxed also sends kernels to the card whose result is the card's and not the simulator's bits. Every instruction of a kernel is put in
+// one class, once, and the mode admits a kernel by the classes it holds. It stays a whitelist: a mnemonic that is not named below is Never.
+enum class InsnClass : uint8_t {
+  Exact,       // today's exact set
+  Mufu,        // every MUFU form (the card's approximation is 1 to 2 ulp from the simulator's, sp44)
+  Half,        // packed half arithmetic: HADD2, HMUL2, HFMA2, HSETP2, HSET2, HMNMX2
+  FloatRed,    // a float reduction with no returned value: the sum depends on the order the threads arrive in
+  Call,        // CALL and RET (the runtime also checks that every call stays inside the kernel's own code section)
+  Extra,       // plain compute and memory instructions the exact set never measured: they read and write registers, shared memory and the same global
+               // addresses as LDG and STG, so the card needs nothing that only the simulator holds
+  Tensor,      // HMMA, IMMA, DMMA
+  AtomInt,     // integer atomics that return the old value (ADD, MIN, MAX, AND, OR, XOR, INC, DEC): memory ends the same, the returned values depend on the order
+  AtomFloat,   // float atomics that return a value: opt-in (VGPU_HOST_GPU_ATOMICS=1)
+  AtomSwap,    // CAS, CAST.SPIN, EXCH: opt-in; the card does not agree with itself from run to run on programs built on these (09 doc, M2)
+  Never,       // textures, surfaces, anything not named
+};
+inline constexpr unsigned kInsnClasses = 11;
+inline const char* insn_class_name(InsnClass c) {
+  static const char* const n[kInsnClasses] = {"exact", "mufu", "half", "float-red", "call", "extra", "tensor", "atomic-int", "atomic-float", "atomic-swap", "never"};
+  return n[static_cast<unsigned>(c)];
+}
+
+// The decoder keeps some modifiers joined as nvdisasm prints them ("F32.FTZ.RN", "F16x2.RN"): these look at the dot-separated parts.
+template <class Pred>
+inline bool any_mod_part(const std::vector<std::string>& mods, Pred pred) {
+  for (const std::string& m : mods)
+    for (size_t at = 0; at <= m.size();) {
+      const size_t dot = std::min(m.find('.', at), m.size());
+      if (dot > at && pred(m.substr(at, dot - at))) return true;
+      at = dot + 1;
+    }
+  return false;
+}
+inline bool mods_have(const std::vector<std::string>& mods, const char* part) {
+  return any_mod_part(mods, [&](const std::string& p) { return p == part; });
+}
+// A float operand type: F16x2, F32, F32x4, F64, BF16x2 ...
+inline bool mods_float_typed(const std::vector<std::string>& mods) {
+  return any_mod_part(mods, [](const std::string& p) { return p.rfind("F16", 0) == 0 || p.rfind("F32", 0) == 0 || p.rfind("F64", 0) == 0 || p.rfind("BF16", 0) == 0; });
+}
+// A field the decoder could not name prints as "(9)": an instruction that carries one is not known.
+inline bool mods_undecoded(const std::vector<std::string>& mods) {
+  return any_mod_part(mods, [](const std::string& p) { return p[0] == '('; });
+}
+
+inline InsnClass relaxed_class(const std::string& mnemonic, const std::vector<std::string>& mods) {
+  using C = InsnClass;
+  const auto is_one_of = [&](std::initializer_list<const char*> names) {
+    for (const char* n : names)
+      if (mnemonic == n) return true;
+    return false;
+  };
+  if (mnemonic.empty() || mods_undecoded(mods)) return C::Never;
+  // Reductions and atomics first, by what they do: the exact set's own check of RED does not see the joined float types.
+  if (is_one_of({"RED", "REDG"})) {
+    if (mods_have(mods, "CAS") || mods_have(mods, "CAST") || mods_have(mods, "SPIN") || mods_have(mods, "EXCH")) return C::AtomSwap;
+    if (mods_float_typed(mods)) return C::FloatRed;
+    if (mods_have(mods, "INC") || mods_have(mods, "DEC") || mods_have(mods, "POPC")) return C::AtomInt;
+    return mnemonic == "RED" ? C::Exact : C::Extra;   // (REDG is sm_90's spelling: the exact set never named it)
+  }
+  if (is_one_of({"ATOM", "ATOMG", "ATOMS"})) {
+    if (mods_have(mods, "ARRIVE")) return C::Never;   // sm_80's mbarrier.arrive
+    if (mods_have(mods, "CAS") || mods_have(mods, "CAST") || mods_have(mods, "SPIN") || mods_have(mods, "EXCH")) return C::AtomSwap;
+    return mods_float_typed(mods) ? C::AtomFloat : C::AtomInt;
+  }
+  if (exact_opcode_allowed(mnemonic, mods)) return C::Exact;
+  if (mnemonic == "MUFU") return C::Mufu;
+  if (is_one_of({"HADD2", "HMUL2", "HFMA2", "HSETP2", "HSET2", "HMNMX2"})) return C::Half;
+  if (is_one_of({"CALL", "RET"})) return C::Call;
+  if (is_one_of({"HMMA", "IMMA", "DMMA"})) return C::Tensor;
+  if (is_one_of({"IDP", "VABSDIFF", "VABSDIFF4", "VIADDMNMX", "VIMNMX3", "FMNMX3", "F2IP", "FSWZADD", "REDUX", "LDGSTS", "LDGDEPBAR", "LDSM", "MOVM", "FFMA2",
+                 "FMUL2", "FADD2"}))
+    return C::Extra;
+  return C::Never;
+}
+
+// A call stays inside the kernel when it is relative, to a label, and the label is an address of the kernel's own code section [lo, hi]. A call through a
+// register or to an absolute address (another section, a function pointer) leaves the code this scan has seen.
+inline bool call_stays_inside(bool relative, bool to_label, int64_t target, uint64_t lo, uint64_t hi) {
+  return relative && to_label && target >= 0 && static_cast<uint64_t>(target) >= lo && static_cast<uint64_t>(target) <= hi;
+}
+
+// The classes a kernel holds, as bits, and what the mode's switches make of them.
+using ClassMask = uint32_t;
+inline constexpr ClassMask class_bit(InsnClass c) { return ClassMask{1} << static_cast<unsigned>(c); }
+
+struct RelaxedSwitches {
+  bool atomics = false;     // VGPU_HOST_GPU_ATOMICS=1: float atomics with a returned value, CAS, CAST.SPIN and EXCH
+  ClassMask off = 0;        // VGPU_HOST_GPU_RELAXED_OFF: classes switched off for an experiment
+};
+
+// VGPU_HOST_GPU_RELAXED_OFF=mufu,tensor,half,call,atomics,red,extra (a comma list). False, with the bad name in *bad, for anything else.
+inline bool parse_relaxed_off(const char* text, ClassMask* off, std::string* bad = nullptr) {
+  *off = 0;
+  if (!text) return true;
+  const std::string t(text);
+  for (size_t at = 0; at <= t.size();) {
+    const size_t comma = std::min(t.find(',', at), t.size());
+    const std::string name = t.substr(at, comma - at);
+    at = comma + 1;
+    if (name.empty()) continue;
+    if (name == "mufu") *off |= class_bit(InsnClass::Mufu);
+    else if (name == "tensor") *off |= class_bit(InsnClass::Tensor);
+    else if (name == "half") *off |= class_bit(InsnClass::Half);
+    else if (name == "call") *off |= class_bit(InsnClass::Call);
+    else if (name == "atomics") *off |= class_bit(InsnClass::AtomInt) | class_bit(InsnClass::AtomFloat) | class_bit(InsnClass::AtomSwap);
+    else if (name == "red") *off |= class_bit(InsnClass::FloatRed);
+    else if (name == "extra") *off |= class_bit(InsnClass::Extra);
+    else {
+      if (bad) *bad = name;
+      return false;
+    }
+  }
+  return true;
+}
+
+// Why relaxed mode keeps a kernel in the simulator, by the classes of its code. The first that applies, in this order.
+enum class RelaxedRefusal : uint8_t {
+  None,      // admitted
+  Never,     // an instruction outside every class
+  Off,       // a class switched off with VGPU_HOST_GPU_RELAXED_OFF
+  Atomics,   // a float atomic with a returned value, a CAS or an EXCH, without VGPU_HOST_GPU_ATOMICS=1
+};
+inline RelaxedRefusal relaxed_refusal(ClassMask classes, const RelaxedSwitches& sw) {
+  if (classes & class_bit(InsnClass::Never)) return RelaxedRefusal::Never;
+  if (classes & sw.off) return RelaxedRefusal::Off;
+  if (!sw.atomics && (classes & (class_bit(InsnClass::AtomFloat) | class_bit(InsnClass::AtomSwap)))) return RelaxedRefusal::Atomics;
+  return RelaxedRefusal::None;
 }
 
 // ---- residency (the design for a card copy that outlives a launch) ---------------------------------------------------------

@@ -32,7 +32,12 @@ int cuDeviceGetAttribute(int* v, int attr, int d) {
 }
 int cuDevicePrimaryCtxRetain(void** c, int d) { (void)d; note("cuDevicePrimaryCtxRetain"); *c = (void*)0x1000; return 0; }
 int cuCtxSetCurrent(void* c) { (void)c; return 0; }
-int cuCtxSynchronize(void) { return 0; }
+/* STUB_SYNC_MS: the wait for the kernel takes this long (a kernel that does not come back, for the mode's VGPU_HOST_GPU_TIMEOUT). */
+int cuCtxSynchronize(void) {
+  const int ms = env_int("STUB_SYNC_MS", 0);
+  if (ms > 0) { struct timespec t = {ms / 1000, (long)(ms % 1000) * 1000000L}; nanosleep(&t, 0); }
+  return 0;
+}
 int cuMemAddressReserve(u64* p, size_t size, size_t align, u64 addr, u64 flags) { (void)size; (void)align; (void)flags; note("cuMemAddressReserve"); *p = addr; return 0; }
 int cuMemCreate(u64* h, size_t size, const void* prop, u64 flags) { (void)size; (void)prop; (void)flags; *h = 1; return 0; }
 int cuMemMap(u64 p, size_t size, size_t off, u64 h, u64 flags) { (void)p; (void)size; (void)off; (void)h; (void)flags; return 0; }

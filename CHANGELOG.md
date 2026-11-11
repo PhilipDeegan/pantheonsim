@@ -7,6 +7,17 @@ release says what runs and what it produces, never how fast a real GPU would run
 
 ## Unreleased
 
+- Host-GPU mode (experimental, opt-in): `VGPU_HOST_GPU=relaxed` also runs on the machine's real GPU the kernels whose result is the
+  card's own and not the simulator's bits: the approximate functions (`MUFU`), packed half arithmetic, float reductions, calls inside the
+  kernel, tensor-core instructions and integer atomics that return a value; float atomics with a returned value, compare-and-swap and
+  exchange only with `VGPU_HOST_GPU_ATOMICS=1`; textures and unnamed instructions never. `VGPU_HOST_GPU_RELAXED_OFF` switches classes
+  off. With `VGPU_HOST_GPU_VERIFY` the card's memory is compared with the simulator's by tolerance (`VGPU_HOST_GPU_ATOL`,
+  `VGPU_HOST_GPU_RTOL`, `VGPU_HOST_GPU_TOL_TYPE`) instead of byte for byte, and the exit summary has lines for scripts (`host_gpu_relaxed:`, `host_gpu_refusals:`,
+  `host_gpu_outside:`). A launch that does not come back from the card ends the process after `VGPU_HOST_GPU_TIMEOUT` seconds (600 in
+  relaxed mode). `exact` mode is unchanged, except that a kernel refused for its module is no longer reported as "not in the exact set"
+  from its second launch on. Not yet run on a card: [design and limits](docs/perf-design/12-host-gpu-relaxed.md); the benchmark harness is
+  `tools/bench/hostgpu/run.py`, the card probes `tools/probes/hostgpu_relaxed_card_probes.sh`. `docs/cli.md` now lists every
+  `VGPU_HOST_GPU_*` variable (pantheonsim #587).
 - CI: a heavy job (SASS, ollama, ollama-amd, ASan, TSan) takes a reservation before it samples the memory, not after. `ci/jobs.sh --check`
   now takes a share (the profile's minimum) in a ledger under `/tmp/pantheonsim-ci-reserve`, which the pool's containers bind-mount, waits
   while the shares leave no room (capacity 5 GiB: one heavy job per host, `CI_RESERVE_CAPACITY_GIB` raises it), lets the machine settle

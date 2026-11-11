@@ -1411,6 +1411,8 @@ vgpu_unit_test(test_yamlish)
 vgpu_unit_test(test_check_compare)
 vgpu_unit_test(test_host_gpu_logic)
 vgpu_unit_test(test_host_gpu_ref)
+# Relaxed host-GPU mode's compare by tolerance (include/vgpu/host_gpu_tol.hpp): header-only, no card.
+vgpu_unit_test(test_host_gpu_tol)
 vgpu_unit_test(test_card_gate)
 vgpu_unit_test(test_host_gpu_track)
 target_include_directories(test_check_compare PRIVATE src/cli)
@@ -3984,6 +3986,15 @@ set_tests_properties(e2e_host_gpu_stub PROPERTIES
   ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
   SKIP_REGULAR_EXPRESSION "^SKIP:"
   TIMEOUT 600)
+
+# The host-GPU benchmark harness (tools/bench/hostgpu/run.py, docs/perf-design/12-host-gpu-relaxed.md): its self-test parses canned summary lines, classes
+# canned outputs, builds the table and kills a child that hangs. No card, no simulator, no nvcc.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME hostgpu_bench_selftest
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/bench/hostgpu/run.py --dry-run)
+  set_tests_properties(hostgpu_bench_selftest PROPERTIES TIMEOUT 120)
+endif()
 
 # Tier 2 (src/sass/jit.hpp, VGPU_JIT=1) against the tier, on the same programs: results and every counter, with the JIT forced on at once, one
 # and four host threads, a warm cache, the faults of sass_tier_steps, and every way the JIT can fail (the output must not change).

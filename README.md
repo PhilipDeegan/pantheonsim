@@ -69,7 +69,7 @@ All settings:
 | `counters` | `true` or `false` | `false` | Print exact per-launch performance counters |
 | `quiet` | `true` or `false` | `false` | Silence every simulator message on stderr |
 | `trace` | `true` or `false` | `false` | Log every runtime and driver entry point |
-| `host_gpu` | `off` or `exact` | `off` | Experimental: run bit-exact kernels on this machine's real NVIDIA GPU (the simulated model); the rest stays simulated |
+| `host_gpu` | `off`, `exact` or `relaxed` | `off` | Experimental: run bit-exact kernels (`exact`), or also kernels whose result is the card's own (`relaxed`), on this machine's real NVIDIA GPU (the simulated model); the rest stays simulated |
 | `host_gpu_log` | `true` or `false` | `false` | Print each host_gpu decision with its numbers |
 
 Each setting is described in [docs/config.md](docs/config.md). It also runs [in a browser](https://pantheonsim.com/play/), [in CI](docs/github-action.md) and [in Docker](docs/docker.md).

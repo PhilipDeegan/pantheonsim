@@ -1,5 +1,7 @@
 // Host-GPU mode, `exact` (docs/perf-design/09-host-gpu-spike.md): a launch whose kernel passes the eligibility scan and whose
 // size rule says the card path wins runs on the machine's real GPU, on the simulator's own device memory.
+// `relaxed` (docs/perf-design/12-host-gpu-relaxed.md) is the same machinery with a wider eligibility scan (kernels whose result is the card's, not the
+// simulator's bits) and a verify that compares by tolerance; every safety check, the size rule and the residency protocol are shared.
 //
 // How, in this first form (write-through, no state between launches): the simulator's device memory stays the truth. For a launch
 // every live allocation is copied to the card at the same virtual address (the driver's virtual-memory calls reserve the
@@ -10,6 +12,7 @@
 #include "vgpu/host_gpu_rt.hpp"
 
 #include <dlfcn.h>
+#include <unistd.h>
 
 #include <chrono>
 #include <condition_variable>
@@ -150,12 +153,76 @@ struct Runtime::Impl : CardGate {
   TrafficTable traffic;
   std::set<std::string> banned;   // kernels whose offloaded launch took longer than the simulator was expected to
   std::map<const sass::Module*, CUmodule> modules;
+  // Why a launch stays in the simulator before the size rule is asked: a safety check (the launch's shape, the module, memory the card does not hold),
+  // or the kernel's code.
+  enum class Refused : uint8_t { No, Safety, Code };
   struct Verdict {
     bool ok = false;
     uint64_t instrs = 0;
     bool runnable = false;   // everything but the instruction scan passed: the card could run it
     bool back_edge = false;  // the code has a loop (a branch to itself or an earlier instruction)
+    Refused kind = Refused::No;
+    RelaxedRefusal rr = RelaxedRefusal::None;   // Code: which class of instruction (in exact mode: what relaxed mode would say with its defaults)
+    const char* why = "";                       // the reason given on a later launch of the same kernel
   };
+  Mode mode = Mode::Exact;
+  RelaxedSwitches sw;      // relaxed mode's switches; the defaults in exact mode (where they only class the refusals for the summary)
+  Tolerance tol;           // relaxed mode's verify (VGPU_HOST_GPU_ATOL, VGPU_HOST_GPU_RTOL)
+  struct KernelTol {
+    TolReport rep;
+    unsigned said = 0;     // launches outside tolerance already reported without VGPU_HOST_GPU_LOG
+  };
+  std::map<std::string, KernelTol> tol_by_kernel;
+
+  // VGPU_HOST_GPU_TIMEOUT (seconds; relaxed mode: 600 unless set, exact mode: none unless set). cuCtxSynchronize has no deadline, a kernel on the card
+  // cannot be cancelled, and with a kernel still running the card's memory cannot be read back, so there is nothing to fall back to: when a launch has
+  // been on the card for longer than the limit the process says so and ends, instead of hanging without a word. Exact mode had no such launch to fear
+  // beyond the program's own (the card computes the simulator's bits, so it loops exactly when the simulator would); in relaxed mode a loop that waits
+  // on a value the card computes differently, or on a lock another thread never gives back, is the card's to run.
+  struct Watchdog {
+    std::mutex mu;
+    std::condition_variable cv;
+    double limit_s = 0;
+    bool started = false, armed = false;
+    std::chrono::steady_clock::time_point deadline{};
+    std::string kernel;
+    void arm(const std::string& k) {
+      if (limit_s <= 0) return;
+      std::lock_guard<std::mutex> g(mu);
+      kernel = k;
+      deadline = std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(limit_s));
+      armed = true;
+      if (!started) {
+        started = true;
+        std::thread([this] { run(); }).detach();
+      }
+      cv.notify_all();
+    }
+    void disarm() {
+      if (limit_s <= 0) return;
+      std::lock_guard<std::mutex> g(mu);
+      armed = false;
+      cv.notify_all();
+    }
+    void run() {
+      std::unique_lock<std::mutex> lk(mu);
+      for (;;) {
+        if (!armed) {
+          cv.wait(lk);
+          continue;
+        }
+        const auto until = deadline;
+        cv.wait_until(lk, until);
+        if (armed && deadline == until && std::chrono::steady_clock::now() >= until) {
+          std::fprintf(stderr,
+                       "host_gpu: %s has been on the card for more than %g s (VGPU_HOST_GPU_TIMEOUT): a kernel on the card cannot be cancelled and its memory cannot be read back; the process ends\n",
+                       kernel.c_str(), limit_s);
+          std::fflush(nullptr);
+          _exit(124);
+        }
+      }
+    }
+  } watchdog;
   std::map<std::pair<const sass::Module*, std::string>, Verdict> eligible;
   GateLock mu;   // shared: the gate's accesses that change nothing (before_access); exclusive: everything else
   uint64_t max_bytes = 2ull << 30;
@@ -392,8 +459,9 @@ struct Runtime::Impl : CardGate {
     return true;
   }
 
-  // VGPU_HOST_GPU_DIV=1: kernels whose only outside-the-set instructions are the IEEE division idiom (host_gpu.hpp division_idiom_only) are in the set. Off until
-  // the card's exhaustive division check (tools/probes/hostgpu_sfu_exhaustive.cu div) has run clean.
+  // VGPU_HOST_GPU_DIV=1: kernels whose only outside-the-set instructions are the IEEE division idiom (host_gpu.hpp division_idiom_only) are in the set. The
+  // card's exhaustive division check (tools/probes/hostgpu_sfu_exhaustive.cu div) ran clean on an A10G (Round sp44); it stays a switch, off by default, because
+  // no other card was run.
   bool div_idiom = false;
 
   static std::vector<CodeInsn> idiom_summary(const sass::Code& code) {
@@ -415,56 +483,97 @@ struct Runtime::Impl : CardGate {
     return out;
   }
 
-  bool kernel_eligible(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, const std::vector<std::vector<uint8_t>>& args,
-                       MemoryManager& mem, const char** why, uint64_t* instrs, bool* runnable, bool* back_edge) {
-    *runnable = false;
-    *back_edge = false;
-    if (!fn.sass || fn.sass->image.empty()) { *why = "not a SASS module"; return false; }
-    if (cfg.cooperative || cfg.cluster != std::array<uint32_t, 3>{0, 0, 0} || fn.req_cluster != std::array<uint32_t, 3>{0, 0, 0}) { *why = "cooperative or cluster launch"; return false; }
-    if (cfg.textures) { *why = "texture objects"; return false; }
-    if (cfg.conditionals) { *why = "inside a graph with conditionals"; return false; }
-    if (cfg.warp_size && cfg.warp_size != 32) { *why = "warp size"; return false; }
+  struct Decision {
+    bool ok = false;
+    const char* why = "";
+    Refused kind = Refused::No;
+    RelaxedRefusal rr = RelaxedRefusal::None;
+    uint64_t instrs = 0;
+    bool runnable = false, back_edge = false;
+  };
+
+  Decision kernel_eligible(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, const std::vector<std::vector<uint8_t>>& args, MemoryManager& mem) {
+    Decision d;
+    const auto unsafe = [&](const char* why) {
+      d.why = why;
+      d.kind = Refused::Safety;
+      return d;
+    };
+    if (!fn.sass || fn.sass->image.empty()) return unsafe("not a SASS module");
+    if (cfg.cooperative || cfg.cluster != std::array<uint32_t, 3>{0, 0, 0} || fn.req_cluster != std::array<uint32_t, 3>{0, 0, 0}) return unsafe("cooperative or cluster launch");
+    if (cfg.textures) return unsafe("texture objects");
+    if (cfg.conditionals) return unsafe("inside a graph with conditionals");
+    if (cfg.warp_size && cfg.warp_size != 32) return unsafe("warp size");
     for (const auto& a : args)
       for (size_t i = 0; i + 8 <= a.size(); i += 8) {
         uint64_t v;
         std::memcpy(&v, &a[i], 8);
-        if (v && mem.is_host_mapped(v)) { *why = "argument points into mapped host memory"; return false; }
+        if (v && mem.is_host_mapped(v)) return unsafe("argument points into mapped host memory");
       }
     // Device memory that is not in the allocation table (VMM mappings, IPC, the kernel heap) is not on the card: a pointer to it, from an argument or from
     // memory, would read what the card never got. Not cached: a mapping can appear between two launches of one kernel.
-    if (const char* blocker = mem.card_blocker()) { *why = blocker; return false; }
+    if (const char* blocker = mem.card_blocker()) return unsafe(blocker);
     const sass::Module& m = *fn.sass;
     const auto key = std::make_pair(&m, fn.name);
-    if (const auto it = eligible.find(key); it != eligible.end()) {
-      if (!it->second.ok) *why = "kernel code not in the exact set (cached)";
-      *instrs = it->second.instrs;
-      *runnable = it->second.runnable;
-      *back_edge = it->second.back_edge;
-      return it->second.ok;
-    }
+    const auto decision_of = [&](const Verdict& v) {
+      d.ok = v.ok;
+      d.why = v.why;
+      d.kind = v.kind;
+      d.rr = v.rr;
+      d.instrs = v.instrs;
+      d.runnable = v.runnable;
+      d.back_edge = v.back_edge;
+      return d;
+    };
+    if (const auto it = eligible.find(key); it != eligible.end()) return decision_of(it->second);
+    const bool relaxed = mode == Mode::Relaxed;
+    const bool say = logging() && !relaxed;   // exact mode's log lines, as they always were; relaxed mode says its own below
+    Verdict v;
     bool ok = true;
-    uint64_t n_instrs = 0;
+    const char* why = "";
     std::vector<std::pair<uint64_t, uint64_t>> branches;
-    if (!m.symbol_va.empty() || !m.cubin.externs.empty() || m.device_launches) { ok = false; *why = "module variables, device calls or device-side launches"; }
+    if (!m.symbol_va.empty() || !m.cubin.externs.empty() || m.device_launches) { ok = false; why = "module variables, device calls or device-side launches"; }
     const auto ci = m.code_index.find(".text." + fn.name);
-    if (ok && ci == m.code_index.end()) { ok = false; *why = "no code section"; }
+    if (ok && ci == m.code_index.end()) { ok = false; why = "no code section"; }
     const bool runnable_here = ok;
+    if (!ok) {
+      v.kind = Refused::Safety;
+      v.why = why;   // (before the reason was kept, a later launch of such a kernel was said, and counted, as "not in the exact set")
+    }
+    ClassMask classes = 0;
+    std::string first_never, first_gated;   // the text of the first instruction of no class, and of the first one a switch refuses
     if (ok) {
       const sass::Code& code = m.code[ci->second];
-      n_instrs = code.count;
-      bool idiom_checked = false, idiom_ok = false;
-      for (size_t i = 0; i < code.count && ok; ++i) {
+      v.instrs = code.count;
+      // The classes of the code (vgpu/host_gpu.hpp relaxed_class) and its branches. Nothing is printed here and exact mode decides nothing by it.
+      const uint64_t code_lo = code.count ? code.instr(0).pc : 0, code_hi = code.count ? code.instr(code.count - 1).pc : 0;
+      for (size_t i = 0; i < code.count; ++i) {
         const sass::Instr& ins = code.instr(i);
         if (ins.op == sass::Op::BRA)
           for (const auto& o : ins.src)
             if (o.kind == sass::Kind::Label) branches.emplace_back(ins.pc, static_cast<uint64_t>(o.imm));
+        InsnClass c = relaxed_class(ins.mnemonic, ins.mods);
+        if (ins.op == sass::Op::CALL && c == InsnClass::Call) {
+          // The scan has seen this section only: a call that leaves it (another section, a register, an absolute address) runs code nobody classed.
+          const bool label = !ins.src.empty() && ins.src[0].kind == sass::Kind::Label;
+          if (!call_stays_inside(mods_have(ins.mods, "REL"), label, label ? ins.src[0].imm : -1, code_lo, code_hi)) c = InsnClass::Never;
+        }
+        classes |= class_bit(c);
+        if (c == InsnClass::Never && first_never.empty()) first_never = sass::to_text(ins);
+        const ClassMask gated = sw.off | (sw.atomics ? 0 : class_bit(InsnClass::AtomFloat) | class_bit(InsnClass::AtomSwap));
+        if ((class_bit(c) & gated) && first_gated.empty()) first_gated = sass::to_text(ins);
+      }
+      // The exact set's scan, unchanged.
+      bool idiom_checked = false, idiom_ok = false;
+      for (size_t i = 0; i < code.count && ok; ++i) {
+        const sass::Instr& ins = code.instr(i);
         if (!exact_opcode_allowed(ins.mnemonic, ins.mods)) {
           if (div_idiom && (ins.op == sass::Op::MUFU || ins.op == sass::Op::CALL || ins.op == sass::Op::RET)) {
             if (!idiom_checked) {
               idiom_checked = true;
               const char* idiom_why = "";
               idiom_ok = division_idiom_only(idiom_summary(code), &idiom_why);
-              if (!idiom_ok && logging()) {
+              if (!idiom_ok && say) {
                 std::fprintf(stderr, "host_gpu: %s: not the division idiom: %s\n", fn.name.c_str(), idiom_why);
                 for (const CodeInsn& c : idiom_summary(code))
                   if (c.kind != CodeInsn::Kind::Other) std::fprintf(stderr, "host_gpu:   pc 0x%llx kind %d src0 %d src1 %d target %lld\n", static_cast<unsigned long long>(c.pc), static_cast<int>(c.kind), c.src0, c.src1, static_cast<long long>(c.target));
@@ -473,12 +582,12 @@ struct Runtime::Impl : CardGate {
             if (idiom_ok) continue;
           }
           ok = false;
-          *why = "instruction outside the exact set";
-          if (logging()) std::fprintf(stderr, "host_gpu: %s refused: %s\n", fn.name.c_str(), sass::to_text(ins).c_str());
+          why = "instruction outside the exact set";
+          if (say) std::fprintf(stderr, "host_gpu: %s refused: %s\n", fn.name.c_str(), sass::to_text(ins).c_str());
         }
       }
     }
-    if (!ok && runnable_here && logging()) {   // what the refusal is made of: every MUFU form of the kernel, and whether it holds a call (the division and sqrt slow paths)
+    if (!ok && runnable_here && say) {   // what the refusal is made of: every MUFU form of the kernel, and whether it holds a call (the division and sqrt slow paths)
       std::map<std::string, unsigned> sfu;
       unsigned calls = 0, fchk = 0;
       const sass::Code& code = m.code[ci->second];
@@ -498,11 +607,38 @@ struct Runtime::Impl : CardGate {
       if (logging_code() && !sfu.empty())
         for (size_t i = 0; i < code.count; ++i) std::fprintf(stderr, "host_gpu:   %s: %s\n", fn.name.c_str(), sass::to_text(code.instr(i)).c_str());
     }
-    eligible[key] = {ok, n_instrs, runnable_here, has_back_edge(branches)};
-    *instrs = n_instrs;
-    *runnable = runnable_here;
-    *back_edge = eligible[key].back_edge;
-    return ok;
+    if (runnable_here) {
+      const bool exact_ok = ok;
+      v.rr = exact_ok ? RelaxedRefusal::None : relaxed_refusal(classes, sw);
+      if (relaxed) ok = v.rr == RelaxedRefusal::None;   // (a kernel of the exact set, the division idiom included, is admitted whatever is switched off)
+      if (!ok) {
+        v.kind = Refused::Code;
+        static const char* const kRelaxedWhy[] = {"", "an instruction of no relaxed class", "a class switched off with VGPU_HOST_GPU_RELAXED_OFF",
+                                                  "an atomic that needs VGPU_HOST_GPU_ATOMICS=1"};
+        why = relaxed ? kRelaxedWhy[static_cast<unsigned>(v.rr)] : why;
+        v.why = relaxed ? why : "kernel code not in the exact set (cached)";
+      }
+      if (relaxed) {
+        // One line per kernel, for the benchmark to list what relaxed mode still cannot send: said like the summary (not under VGPU_QUIET alone).
+        static const char* const kRefusalName[] = {"", "never", "off", "atomics"};
+        if (!ok && (!quiet() || logging()))
+          std::fprintf(stderr, "host_gpu_refused: kernel=%s class=%s insn=%s\n", fn.name.c_str(), kRefusalName[static_cast<unsigned>(v.rr)],
+                       (v.rr == RelaxedRefusal::Never ? first_never : first_gated).c_str());
+        if (logging()) {
+          std::string held;
+          for (unsigned c = 0; c < kInsnClasses; ++c)
+            if (classes & (ClassMask{1} << c)) held += std::string(held.empty() ? "" : " ") + insn_class_name(static_cast<InsnClass>(c));
+          std::fprintf(stderr, "host_gpu: %s: classes: %s; %s\n", fn.name.c_str(), held.c_str(), ok ? (exact_ok ? "admitted (exact set)" : "admitted") : why);
+        }
+      }
+    }
+    v.ok = ok;
+    v.runnable = runnable_here;
+    v.back_edge = has_back_edge(branches);
+    eligible[key] = v;
+    decision_of(v);
+    d.why = why;   // the first launch says the reason in full
+    return d;
   }
 
   CUfunction function_for(const ptx::EntryFn& fn) {
@@ -531,18 +667,41 @@ void print_summary(Runtime::Impl* im) {
   // VGPU_QUIET silences the prose, not a report that was asked for: VGPU_HOST_GPU_VERIFY and VGPU_HOST_GPU_LOG each exist to be read at the end of the run.
   if (quiet() && !im->verify && !logging()) return;
   const Stats& s = im->stats;
-  std::fprintf(stderr,
-               "host_gpu: %llu launches ran on the card, %llu in the simulator (%llu kernels not in the exact set, %llu too small, %llu unsupported launch shapes, %llu failed on the card)\n",
-               static_cast<unsigned long long>(s.offloaded), static_cast<unsigned long long>(s.simulated), static_cast<unsigned long long>(s.refused_kernel),
-               static_cast<unsigned long long>(s.refused_size), static_cast<unsigned long long>(s.refused_launch), static_cast<unsigned long long>(s.failed));
+  const bool relaxed = im->mode == Mode::Relaxed;
+  const auto ull = [](uint64_t v) { return static_cast<unsigned long long>(v); };
+  if (relaxed)
+    std::fprintf(stderr,
+                 "host_gpu: %llu launches ran on the card, %llu in the simulator (%llu kernels not admitted by relaxed mode, %llu too small, %llu unsupported launch shapes, %llu failed on the card)\n",
+                 ull(s.offloaded), ull(s.simulated), ull(s.refused_kernel), ull(s.refused_size), ull(s.refused_launch), ull(s.failed));
+  else
+    std::fprintf(stderr,
+                 "host_gpu: %llu launches ran on the card, %llu in the simulator (%llu kernels not in the exact set, %llu too small, %llu unsupported launch shapes, %llu failed on the card)\n",
+                 ull(s.offloaded), ull(s.simulated), ull(s.refused_kernel), ull(s.refused_size), ull(s.refused_launch), ull(s.failed));
   std::fprintf(stderr, "host_gpu: %.1f MiB went to the card, %.1f MiB came back\n", s.pushed_bytes / 1048576.0, s.pulled_bytes / 1048576.0);
   if (im->verify)   // (the second line is for scripts: the card CI parses it, not the prose above)
-    std::fprintf(stderr, "host_gpu_verify: in_set_identical=%llu in_set_different=%llu other_identical=%llu other_different=%llu\n", static_cast<unsigned long long>(s.same_exact_set),
-                 static_cast<unsigned long long>(s.differ_exact_set), static_cast<unsigned long long>(s.same_other), static_cast<unsigned long long>(s.differ_other));
-  if (im->verify)
+    std::fprintf(stderr, "host_gpu_verify: in_set_identical=%llu in_set_different=%llu other_identical=%llu other_different=%llu\n", ull(s.same_exact_set),
+                 ull(s.differ_exact_set), ull(s.same_other), ull(s.differ_other));
+  if (im->verify && !relaxed)
     std::fprintf(stderr, "host_gpu: verify: kernels in the exact set: %llu identical, %llu different; other kernels: %llu identical, %llu different\n",
-                 static_cast<unsigned long long>(s.same_exact_set), static_cast<unsigned long long>(s.differ_exact_set), static_cast<unsigned long long>(s.same_other),
-                 static_cast<unsigned long long>(s.differ_other));
+                 ull(s.same_exact_set), ull(s.differ_exact_set), ull(s.same_other), ull(s.differ_other));
+  // The two lines for scripts (tools/bench/hostgpu/run.py): always in relaxed mode; in exact mode only with VGPU_HOST_GPU_LOG, so that exact mode's
+  // summary is what it was. launches_card counts every launch that ran on the card, the ones a verify run repeats in the simulator included.
+  if (relaxed || logging()) {
+    uint64_t kernels_outside = 0;
+    for (const auto& [k, kt] : im->tol_by_kernel) kernels_outside += kt.rep.outside > 0;
+    std::fprintf(stderr,
+                 "host_gpu_relaxed: mode=%s launches_card=%llu launches_sim=%llu card_s=%.6f sim_s=%.6f words_compared=%llu words_different=%llu words_outside=%llu words_subnormal=%llu kernels_outside=%llu max_abs=%.9g max_rel=%.9g\n",
+                 relaxed ? "relaxed" : "exact", ull(s.card_runs), ull(s.simulated), s.card_seconds, s.sim_seconds, ull(s.tol.words), ull(s.tol.different), ull(s.tol.outside),
+                 ull(s.tol.subnormal), ull(kernels_outside), s.tol.max_abs, s.tol.max_rel);
+    std::fprintf(stderr, "host_gpu_refusals: refused_never=%llu refused_atomics=%llu refused_off=%llu refused_exact=%llu refused_safety=%llu too_small=%llu failed=%llu\n",
+                 ull(s.refused_never), ull(s.refused_atomics), ull(s.refused_off), ull(s.refused_exact), ull(s.refused_launch), ull(s.refused_size), ull(s.failed));
+    if (relaxed && im->verify)
+      for (const auto& [k, kt] : im->tol_by_kernel)
+        if (kt.rep.outside)
+          std::fprintf(stderr, "host_gpu_outside: kernel=%s words_compared=%llu words_different=%llu words_outside=%llu max_abs=%.9g max_rel=%.9g first=0x%llx:card=0x%08x:sim=0x%08x\n",
+                       k.c_str(), ull(kt.rep.words), ull(kt.rep.different), ull(kt.rep.outside), kt.rep.max_abs, kt.rep.max_rel, ull(kt.rep.first_addr), kt.rep.first_card,
+                       kt.rep.first_sim);
+  }
 }
 Runtime::Impl* g_summary_impl = nullptr;
 }  // namespace
@@ -552,8 +711,9 @@ Runtime* Runtime::for_device(const DeviceProfile& profile, int ordinal) {
   static Runtime* rt = nullptr;
   std::call_once(once, [&] {
     const char* mode_text = std::getenv("VGPU_HOST_GPU");
-    if (!mode_text_is_known(mode_text)) std::fprintf(stderr, "host_gpu: VGPU_HOST_GPU=%s is not a mode (off or exact); mode off\n", mode_text);
-    if (mode_from_text(mode_text) != Mode::Exact) return;
+    if (!mode_text_is_known(mode_text)) std::fprintf(stderr, "host_gpu: VGPU_HOST_GPU=%s is not a mode (off, exact or relaxed); mode off\n", mode_text);
+    const Mode mode = mode_from_text(mode_text);
+    if (mode == Mode::Off) return;
     // Said even under VGPU_QUIET: someone who asked for the mode and got none must be told why.
     for (const char* v : kIncompatibleVars)
       if (diagnostic_switched_on(v, std::getenv(v))) {
@@ -564,7 +724,38 @@ Runtime* Runtime::for_device(const DeviceProfile& profile, int ordinal) {
       if (!quiet()) std::fprintf(stderr, "host_gpu: only NVIDIA devices; mode off\n");
       return;
     }
+    // Relaxed mode's own switches. A value that cannot be read turns the mode off with a message (said even under VGPU_QUIET): someone who asked for a
+    // tolerance or for a class to be off must not get a run under another.
+    RelaxedSwitches sw;
+    Tolerance tol;
+    double timeout_s = mode == Mode::Relaxed ? 600 : 0;
+    if (mode == Mode::Relaxed) {
+      if (const char* v = std::getenv("VGPU_HOST_GPU_ATOMICS"); v && *v && *v != '0') sw.atomics = true;
+      std::string bad;
+      if (!parse_relaxed_off(std::getenv("VGPU_HOST_GPU_RELAXED_OFF"), &sw.off, &bad)) {
+        std::fprintf(stderr, "host_gpu: VGPU_HOST_GPU_RELAXED_OFF: %s is not a class (mufu, tensor, half, call, atomics, red, extra); mode off\n", bad.c_str());
+        return;
+      }
+      const std::pair<const char*, double*> tolerances[] = {{"VGPU_HOST_GPU_ATOL", &tol.atol}, {"VGPU_HOST_GPU_RTOL", &tol.rtol}};
+      for (const auto& [name, to] : tolerances)
+        if (const char* v = std::getenv(name); v && *v && !parse_tolerance(v, to)) {
+          std::fprintf(stderr, "host_gpu: %s=%s is not a number that is zero or more; mode off\n", name, v);
+          return;
+        }
+      if (const char* v = std::getenv("VGPU_HOST_GPU_TOL_TYPE"); v && *v && !parse_reading(v, &tol.reading)) {
+        std::fprintf(stderr, "host_gpu: VGPU_HOST_GPU_TOL_TYPE=%s is not auto, f32, f64 or f16; mode off\n", v);
+        return;
+      }
+    }
+    if (const char* v = std::getenv("VGPU_HOST_GPU_TIMEOUT"); v && *v && !parse_tolerance(v, &timeout_s)) {   // (the same form: seconds, zero or more; 0 is no limit)
+      std::fprintf(stderr, "host_gpu: VGPU_HOST_GPU_TIMEOUT=%s is not a number of seconds that is zero or more; mode off\n", v);
+      return;
+    }
     auto* r = new Runtime;
+    r->impl_->mode = mode;
+    r->impl_->sw = sw;
+    r->impl_->tol = tol;
+    r->impl_->watchdog.limit_s = timeout_s;
     // The driver is not started here: see Impl::begin_start. The switches are read now so that they do not depend on whether it came up.
     r->impl_->configure_start(profile, kDeviceVaBase);
     if (const char* v = std::getenv("VGPU_HOST_GPU_VERIFY"); v && *v && *v != '0') r->impl_->verify = std::string(v) == "all" ? 2 : 1;
@@ -604,6 +795,7 @@ void Runtime::before_simulated(MemoryManager& mem) {
 void Runtime::note_simulated(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, double sim_seconds, const MemoryManager* mem,
                              const std::vector<std::vector<uint8_t>>* args) {
   std::lock_guard<GateLock> g(impl_->mu);
+  impl_->stats.sim_seconds += sim_seconds;
   if (impl_->start_failed) return;   // the driver could not be used: nothing to learn for
   InternalScope internal;
   if (g_trace_file) {
@@ -625,23 +817,48 @@ void Runtime::note_simulated(const ptx::EntryFn& fn, const exec::LaunchConfig& c
   }
   Impl::Pending& p = impl_->pending;
   if (p.active && mem && p.kernel == fn.name) {
+    const bool relaxed = impl_->mode == Mode::Relaxed;
     bool same = true;
     uint64_t bad_chunks = 0;
+    TolReport rep;   // relaxed mode: the differing chunks word by word (vgpu/host_gpu_tol.hpp); equal chunks only add to the count of words
     std::vector<uint8_t> sim_bytes;
     for (size_t i = 0; i < p.ranges.size(); ++i) {
       sim_bytes.resize(p.ranges[i].second);
       mem->read(p.ranges[i].first, sim_bytes.data(), p.ranges[i].second);
-      for (uint64_t c = 0; c < sim_bytes.size(); c += kChunkSize)
-        if (std::memcmp(sim_bytes.data() + c, p.card[i].data() + c, std::min<uint64_t>(kChunkSize, sim_bytes.size() - c)) != 0) {
+      for (uint64_t c = 0; c < sim_bytes.size(); c += kChunkSize) {
+        const uint64_t n = std::min<uint64_t>(kChunkSize, sim_bytes.size() - c);
+        if (std::memcmp(sim_bytes.data() + c, p.card[i].data() + c, n) != 0) {
           same = false;
           ++bad_chunks;
+          if (relaxed) compare_words(p.card[i].data() + c, sim_bytes.data() + c, p.ranges[i].first + c, n, impl_->tol, rep);
+        } else if (relaxed) {
+          rep.words += tol_word_count(p.ranges[i].first + c, n);
         }
+      }
     }
     Stats& st = impl_->stats;
     ++(p.in_exact_set ? (same ? st.same_exact_set : st.differ_exact_set) : (same ? st.same_other : st.differ_other));
-    if (logging() || (!same && p.in_exact_set))
+    if (relaxed) {
+      st.tol.add(rep);
+      Impl::KernelTol& kt = impl_->tol_by_kernel[fn.name];
+      kt.rep.add(rep);
+      // Every launch with VGPU_HOST_GPU_LOG; without it, the first three launches of a kernel that have a word outside tolerance.
+      constexpr unsigned kSaidWithoutLog = 3;
+      const bool say_outside = rep.outside && kt.said < kSaidWithoutLog;
+      if (say_outside) ++kt.said;
+      if (logging() || say_outside) {
+        char first[96] = "";
+        if (rep.has_first)
+          std::snprintf(first, sizeof first, ", first outside at 0x%llx: card 0x%08x sim 0x%08x", static_cast<unsigned long long>(rep.first_addr), rep.first_card, rep.first_sim);
+        std::fprintf(stderr, "host_gpu: verify %s (%s): %llu words compared, %llu different, %llu outside tolerance, %llu zero or denormal on both sides; largest difference %.9g, relative %.9g%s%s\n",
+                     fn.name.c_str(), p.in_exact_set ? "admitted" : "not admitted", static_cast<unsigned long long>(rep.words), static_cast<unsigned long long>(rep.different),
+                     static_cast<unsigned long long>(rep.outside), static_cast<unsigned long long>(rep.subnormal), rep.max_abs, rep.max_rel, first,
+                     say_outside && !logging() && kt.said == kSaidWithoutLog ? " (later launches of this kernel are not listed; VGPU_HOST_GPU_LOG=1 lists all)" : "");
+      }
+    } else if (logging() || (!same && p.in_exact_set)) {
       std::fprintf(stderr, "host_gpu: verify %s (%s): %s%s\n", fn.name.c_str(), p.in_exact_set ? "in the exact set" : "outside the exact set",
                    same ? "identical" : "DIFFERENT, 64 KiB chunks: ", same ? "" : std::to_string(bad_chunks).c_str());
+    }
     p = {};
   }
   impl_->sim_times.record(fn.name, uint64_t{cfg.grid[0]} * cfg.grid[1] * cfg.grid[2], sim_seconds);
@@ -656,15 +873,21 @@ bool Runtime::try_launch(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, 
   im.last = {};
   if (im.dead) return false;
   im.pending = {};
-  const char* why = "";
-  uint64_t static_instrs = 0;
-  bool runnable = false, back_edge = false;
-  const bool in_exact_set = im.kernel_eligible(fn, cfg, args, mem, &why, &static_instrs, &runnable, &back_edge);
+  const Impl::Decision dec = im.kernel_eligible(fn, cfg, args, mem);
+  const char* const why = dec.why;
+  const uint64_t static_instrs = dec.instrs;
+  const bool runnable = dec.runnable, back_edge = dec.back_edge;
+  const bool in_exact_set = dec.ok;   // (in relaxed mode: admitted by its classes)
   im.last.in_set = in_exact_set;
   const uint64_t blocks = uint64_t{cfg.grid[0]} * cfg.grid[1] * cfg.grid[2];
   // (The driver is not started here, whatever the kernel: only a launch that has been decided to go to the card starts it, below, at await_start.)
   if (!in_exact_set && !(im.verify == 2 && runnable)) {
-    ++(std::string(why).find("exact set") != std::string::npos ? im.stats.refused_kernel : im.stats.refused_launch);
+    if (dec.kind == Impl::Refused::Code) {
+      ++im.stats.refused_kernel;
+      ++(dec.rr == RelaxedRefusal::Never ? im.stats.refused_never : dec.rr == RelaxedRefusal::Off ? im.stats.refused_off : dec.rr == RelaxedRefusal::Atomics ? im.stats.refused_atomics : im.stats.refused_exact);
+    } else {
+      ++im.stats.refused_launch;
+    }
     ++im.stats.simulated;
     if (logging()) std::fprintf(stderr, "host_gpu: %s stays in the simulator: %s\n", fn.name.c_str(), why);
     return false;
@@ -779,9 +1002,11 @@ bool Runtime::try_launch(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, 
   std::vector<std::vector<uint8_t>> keep = args;
   for (auto& a : keep) params.push_back(a.data());
   const auto k0 = std::chrono::steady_clock::now();
+  im.watchdog.arm(fn.name);
   CUresult r = im.api.cuLaunchKernel(f, cfg.grid[0], cfg.grid[1], cfg.grid[2], cfg.block[0], cfg.block[1], cfg.block[2], cfg.shared_bytes, nullptr,
                                      params.data(), nullptr);
   if (!r) r = im.api.cuCtxSynchronize();
+  im.watchdog.disarm();
   const double kernel_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - k0).count();
   if (r) {   // a failed kernel poisons the context (an illegal address): the mode ends, the simulator takes this launch
     im.dead = true;
@@ -795,6 +1020,13 @@ bool Runtime::try_launch(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, 
     return false;
   }
   im.last.card_s = kernel_s;
+  ++im.stats.card_runs;
+  // (the seconds of the card path, for the machine-readable summary: whatever way this function is left from here on)
+  struct CardTime {
+    Stats& st;
+    std::chrono::steady_clock::time_point from;
+    ~CardTime() { st.card_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - from).count(); }
+  } card_time{im.stats, t0};
   if (im.resident) {   // the kernel may have written any live chunk: every one is the card's now
     std::vector<uint64_t> newly;
     for (auto& [b, a] : im.res) {

@@ -18,6 +18,17 @@
 #      time already spent can, so the driver starts at the first launch that has an estimate;
 #   9. VGPU_QUIET=1 silences the end-of-run summary only when nobody asked for it: with VGPU_HOST_GPU_VERIFY or VGPU_HOST_GPU_LOG set the summary lines
 #      ("host_gpu: N launches ran on the card", "host_gpu_verify: in_set_identical=...") still reach stderr, and with neither set nothing is printed.
+# Relaxed mode (VGPU_HOST_GPU=relaxed, docs/perf-design/12-host-gpu-relaxed.md), with the same stand-in driver:
+#  10. the kernels exact mode keeps for their numerics (expf, a bare rcp.approx, a division beside an expf) reach the card path in relaxed mode, and the
+#      output is unchanged (the stand-in refuses the module, so the simulator runs them);
+#  11. relaxed mode prints the two lines for scripts (host_gpu_relaxed:, host_gpu_refusals:); exact mode prints them only with VGPU_HOST_GPU_LOG;
+#  12. a float atomic with a returned value and a compare-and-swap stay in the simulator (one host_gpu_refused line, class=atomics) unless
+#      VGPU_HOST_GPU_ATOMICS=1; an integer atomic is admitted, and VGPU_HOST_GPU_RELAXED_OFF=atomics / =mufu keep their classes out (class=off);
+#  13. a tolerance, an off-list or a mode that cannot be read turns the mode off with a message, and nothing reaches the driver;
+#  14. VGPU_HOST_GPU_VERIFY=1 in relaxed mode compares by tolerance: with a stand-in card that computes nothing (STUB_CARD_OK=1) the compare reports words
+#      outside tolerance, per kernel and in the summary, lists at most three launches of a kernel without VGPU_HOST_GPU_LOG, and the program's output is the
+#      simulator's;
+#  15. a launch that does not come back from the card (STUB_SYNC_MS) ends the process with status 124 and a message after VGPU_HOST_GPU_TIMEOUT seconds.
 set -uo pipefail
 root="$(cd "$(dirname "$0")/../../.." && pwd)"
 . "$root/tests/shim_guard.sh"
@@ -126,5 +137,103 @@ run q_ver big VGPU_QUIET=1 VGPU_HOST_GPU=exact VGPU_HOST_GPU_VERIFY=1 STUB_CARD_
 grep -Eq '^host_gpu_verify: in_set_identical=[0-9]+ in_set_different=[0-9]+ other_identical=[0-9]+ other_different=[0-9]+$' "$work/q_ver.err" || { echo "FAIL: VGPU_QUIET=1 with VGPU_HOST_GPU_VERIFY=1 printed no host_gpu_verify summary line"; fails=1; }
 grep -Eq '^host_gpu: [0-9]+ launches ran on the card' "$work/q_ver.err" || { echo "FAIL: VGPU_QUIET=1 with VGPU_HOST_GPU_VERIFY=1 printed no 'launches ran on the card' line"; fails=1; }
 diff -q "$work/off_big.out" "$work/q_ver.out" > /dev/null || { echo "FAIL: verify under VGPU_QUIET changes the output"; fails=1; }
+# ---- relaxed mode ----
+reach=(VGPU_HOST_GPU_NO_FIRST_LAUNCH=1 VGPU_HOST_GPU_START_COST=0)
+for arg in iatom fatom cas; do
+  env VGPU_GPU="$profile" VGPU_THREADS=4 LD_LIBRARY_PATH="$shim" "$work/prog" "$arg" > "$work/off_$arg.out" 2> "$work/off_$arg.err" || { echo "FAIL: the $arg run with the mode off failed"; tail -5 "$work/off_$arg.err"; exit 1; }
+done
+# 10. what exact keeps for its numerics goes to the card in relaxed.
+for arg in mufu rcp divexp; do
+  run "rel_$arg" "$arg" VGPU_HOST_GPU=relaxed "${reach[@]}" || { echo "FAIL: the relaxed $arg run failed"; tail -5 "$work/rel_$arg.err"; fails=1; }
+  grep -q '^cuModuleLoadData$' "$work/rel_$arg.log" || { echo "FAIL: $arg did not reach the card path in relaxed mode: $(calls "rel_$arg"); $(grep -m2 'host_gpu' "$work/rel_$arg.err")"; fails=1; }
+  diff -q "$work/off_$arg.out" "$work/rel_$arg.out" > /dev/null || { echo "FAIL: relaxed mode with a card that refuses the module changes the output of $arg"; fails=1; }
+  grep -q '^host_gpu_refused:' "$work/rel_$arg.err" && { echo "FAIL: relaxed mode refused a kernel of $arg: $(grep -m1 '^host_gpu_refused:' "$work/rel_$arg.err")"; fails=1; }
+done
+run ex_mufu mufu VGPU_HOST_GPU=exact "${reach[@]}" || { echo "FAIL: the exact mufu run failed"; fails=1; }
+[[ ! -s "$work/ex_mufu.log" ]] || { echo "FAIL: exact mode sent the expf kernel to the card: $(calls ex_mufu)"; fails=1; }
+# 11. the lines for scripts.
+rl='^host_gpu_relaxed: mode=relaxed launches_card=[0-9]+ launches_sim=[0-9]+ card_s=[0-9.]+ sim_s=[0-9.]+ words_compared=[0-9]+ words_different=[0-9]+ words_outside=[0-9]+ words_subnormal=[0-9]+ kernels_outside=[0-9]+ max_abs=[^ ]+ max_rel=[^ ]+$'
+fl='^host_gpu_refusals: refused_never=[0-9]+ refused_atomics=[0-9]+ refused_off=[0-9]+ refused_exact=[0-9]+ refused_safety=[0-9]+ too_small=[0-9]+ failed=[0-9]+$'
+grep -Eq "$rl" "$work/rel_mufu.err" || { echo "FAIL: relaxed mode printed no host_gpu_relaxed line: $(grep '^host_gpu_relaxed' "$work/rel_mufu.err")"; fails=1; }
+grep -Eq "$fl" "$work/rel_mufu.err" || { echo "FAIL: relaxed mode printed no host_gpu_refusals line: $(grep '^host_gpu_refusals' "$work/rel_mufu.err")"; fails=1; }
+grep -Eq '^host_gpu: [0-9]+ launches ran on the card, [0-9]+ in the simulator \([0-9]+ kernels not admitted by relaxed mode' "$work/rel_mufu.err" || { echo "FAIL: relaxed mode's summary line is missing"; fails=1; }
+grep -q '^host_gpu_relaxed:\|^host_gpu_refusals:\|^host_gpu_refused:' "$work/on_big.err" "$work/ex_mufu.err" && { echo "FAIL: exact mode without VGPU_HOST_GPU_LOG printed relaxed mode's lines"; fails=1; }
+grep -Eq '^host_gpu: [0-9]+ launches ran on the card, [0-9]+ in the simulator \([0-9]+ kernels not in the exact set, [0-9]+ too small, [0-9]+ unsupported launch shapes, [0-9]+ failed on the card\)$' "$work/ex_mufu.err" || { echo "FAIL: exact mode's summary line changed: $(grep 'launches ran' "$work/ex_mufu.err")"; fails=1; }
+grep -Eq '^host_gpu_relaxed: mode=exact ' "$work/q_log.err" || { echo "FAIL: exact mode with VGPU_HOST_GPU_LOG=1 printed no host_gpu_relaxed line"; fails=1; }
+run exl_mufu mufu VGPU_HOST_GPU=exact VGPU_HOST_GPU_LOG=1 "${reach[@]}" || { echo "FAIL: the exact mufu run with the log failed"; fails=1; }
+rx="$(sed -n 's/^host_gpu_refusals: .* refused_exact=\([0-9]*\) .*/\1/p' "$work/exl_mufu.err" | tail -1)"
+(( ${rx:-0} >= 1 )) || { echo "FAIL: exact mode did not count the expf launches as ones relaxed mode would take: $(grep '^host_gpu_refusals' "$work/exl_mufu.err")"; fails=1; }
+# 12. atomics: the opt-in and the off list.
+for arg in fatom cas; do
+  run "rel_$arg" "$arg" VGPU_HOST_GPU=relaxed "${reach[@]}" || { echo "FAIL: the relaxed $arg run failed"; tail -5 "$work/rel_$arg.err"; fails=1; }
+  [[ ! -s "$work/rel_$arg.log" ]] || { echo "FAIL: $arg reached the driver without VGPU_HOST_GPU_ATOMICS: $(calls "rel_$arg")"; fails=1; }
+  n="$(grep -c '^host_gpu_refused: kernel=[^ ]* class=atomics insn=.' "$work/rel_$arg.err")"
+  (( n == 1 )) || { echo "FAIL: $arg: expected one host_gpu_refused line with class=atomics, got $n: $(grep -m2 '^host_gpu_refused' "$work/rel_$arg.err")"; fails=1; }
+  ra="$(sed -n 's/^host_gpu_refusals: .* refused_atomics=\([0-9]*\) .*/\1/p' "$work/rel_$arg.err" | tail -1)"
+  (( ${ra:-0} == 4 )) || { echo "FAIL: $arg: refused_atomics is ${ra:-missing}, not the 4 launches"; fails=1; }
+  diff -q "$work/off_$arg.out" "$work/rel_$arg.out" > /dev/null || { echo "FAIL: relaxed mode changes the output of $arg"; fails=1; }
+  run "rela_$arg" "$arg" VGPU_HOST_GPU=relaxed VGPU_HOST_GPU_ATOMICS=1 "${reach[@]}" || { echo "FAIL: the relaxed $arg run with atomics failed"; fails=1; }
+  grep -q '^cuModuleLoadData$' "$work/rela_$arg.log" || { echo "FAIL: $arg did not reach the card path with VGPU_HOST_GPU_ATOMICS=1: $(calls "rela_$arg")"; fails=1; }
+  diff -q "$work/off_$arg.out" "$work/rela_$arg.out" > /dev/null || { echo "FAIL: VGPU_HOST_GPU_ATOMICS=1 changes the output of $arg"; fails=1; }
+done
+run rel_iatom iatom VGPU_HOST_GPU=relaxed "${reach[@]}" || { echo "FAIL: the relaxed iatom run failed"; fails=1; }
+grep -q '^cuModuleLoadData$' "$work/rel_iatom.log" || { echo "FAIL: an integer atomic did not reach the card path in relaxed mode: $(calls rel_iatom); $(grep -m1 '^host_gpu_refused' "$work/rel_iatom.err")"; fails=1; }
+diff -q "$work/off_iatom.out" "$work/rel_iatom.out" > /dev/null || { echo "FAIL: relaxed mode changes the output of iatom"; fails=1; }
+for pair in iatom:atomics mufu:mufu; do
+  arg="${pair%%:*}"; cls="${pair##*:}"
+  run "cls_$cls" "$arg" VGPU_HOST_GPU=relaxed VGPU_HOST_GPU_RELAXED_OFF="call,$cls" "${reach[@]}" || { echo "FAIL: the run with VGPU_HOST_GPU_RELAXED_OFF=$cls failed"; fails=1; }
+  [[ ! -s "$work/cls_$cls.log" ]] || { echo "FAIL: $arg reached the driver with its class switched off: $(calls "cls_$cls")"; fails=1; }
+  grep -q '^host_gpu_refused: kernel=[^ ]* class=off insn=.' "$work/cls_$cls.err" || { echo "FAIL: no host_gpu_refused line with class=off for $arg"; fails=1; }
+  diff -q "$work/off_$arg.out" "$work/cls_$cls.out" > /dev/null || { echo "FAIL: VGPU_HOST_GPU_RELAXED_OFF=$cls changes the output of $arg"; fails=1; }
+done
+# 13. values that cannot be read: the mode is off, said once, and the driver is never touched.
+bad() {   # <tag> <the message's text> [env...]
+  local tag=$1 text=$2
+  shift 2
+  run "$tag" mufu VGPU_QUIET=1 "${reach[@]}" "$@" || { echo "FAIL: the $tag run failed"; fails=1; }
+  [[ ! -s "$work/$tag.log" ]] || { echo "FAIL: $tag: the driver was reached: $(calls "$tag")"; fails=1; }
+  local n
+  n="$(grep -c "$text" "$work/$tag.err")"
+  (( n == 1 )) || { echo "FAIL: $tag: expected one line with '$text', got $n: $(grep -m2 host_gpu "$work/$tag.err")"; fails=1; }
+  grep -q 'mode off$' "$work/$tag.err" || { echo "FAIL: $tag: no 'mode off'"; fails=1; }
+  diff -q "$work/off_mufu.out" "$work/$tag.out" > /dev/null || { echo "FAIL: $tag changes the output"; fails=1; }
+}
+bad bad_atol 'VGPU_HOST_GPU_ATOL=-1e-6 is not a number' VGPU_HOST_GPU=relaxed VGPU_HOST_GPU_ATOL=-1e-6
+bad bad_rtol 'VGPU_HOST_GPU_RTOL=1e-5x is not a number' VGPU_HOST_GPU=relaxed VGPU_HOST_GPU_RTOL=1e-5x
+bad bad_off 'VGPU_HOST_GPU_RELAXED_OFF: sfu is not a class' VGPU_HOST_GPU=relaxed VGPU_HOST_GPU_RELAXED_OFF=mufu,sfu
+bad bad_time 'VGPU_HOST_GPU_TIMEOUT=soon is not a number' VGPU_HOST_GPU=relaxed VGPU_HOST_GPU_TIMEOUT=soon
+bad bad_type 'VGPU_HOST_GPU_TOL_TYPE=half is not auto, f32, f64 or f16' VGPU_HOST_GPU=relaxed VGPU_HOST_GPU_TOL_TYPE=half
+bad bad_mode 'VGPU_HOST_GPU=approx is not a mode (off, exact or relaxed)' VGPU_HOST_GPU=approx
+# (exact mode does not read relaxed mode's tolerances: a bad one there is nobody's)
+run ex_atol big VGPU_HOST_GPU=exact VGPU_HOST_GPU_ATOL=-1 "${reach[@]}" || { echo "FAIL: the exact run with a relaxed-only variable failed"; fails=1; }
+grep -q '^cuModuleLoadData$' "$work/ex_atol.log" || { echo "FAIL: exact mode was switched off by VGPU_HOST_GPU_ATOL"; fails=1; }
+# 14. verify by tolerance, against a card that computes nothing.
+run rel_ver mufu VGPU_QUIET=1 VGPU_HOST_GPU=relaxed VGPU_HOST_GPU_VERIFY=1 STUB_CARD_OK=1 "${reach[@]}" || { echo "FAIL: the relaxed verify run failed"; tail -5 "$work/rel_ver.err"; fails=1; }
+diff -q "$work/off_mufu.out" "$work/rel_ver.out" > /dev/null || { echo "FAIL: relaxed verify changes the output (the simulator's result is the program's)"; fails=1; }
+line="$(grep '^host_gpu_relaxed:' "$work/rel_ver.err" | tail -1)"
+field() { echo "$line" | sed -n "s/.* $1=\([^ ]*\).*/\1/p"; }
+wc_="$(field words_compared)"; wd="$(field words_different)"; wo="$(field words_outside)"; ko="$(field kernels_outside)"; lc="$(field launches_card)"
+(( ${lc:-0} == 4 && ${wc_:-0} >= 4 * 262144 )) || { echo "FAIL: relaxed verify compared ${wc_:-no} words over ${lc:-no} card launches: $line"; fails=1; }
+(( ${wo:-0} > 0 && ${wd:-0} >= ${wo:-0} && ${ko:-0} == 1 )) || { echo "FAIL: a card that computed nothing was not reported outside tolerance: $line"; fails=1; }
+n="$(grep -c '^host_gpu: verify .* outside tolerance' "$work/rel_ver.err")"
+(( n == 3 )) || { echo "FAIL: expected the first three launches outside tolerance to be listed without the log, got $n"; fails=1; }
+grep -Eq '^host_gpu: verify .*: [0-9]+ words compared, [0-9]+ different, [1-9][0-9]* outside tolerance, .* first outside at 0x[0-9a-f]+: card 0x[0-9a-f]{8} sim 0x[0-9a-f]{8}' "$work/rel_ver.err" || { echo "FAIL: the per-launch report has no first address: $(grep -m1 '^host_gpu: verify' "$work/rel_ver.err")"; fails=1; }
+grep -Eq '^host_gpu_outside: kernel=[^ ]+ words_compared=[0-9]+ words_different=[0-9]+ words_outside=[1-9][0-9]* max_abs=[^ ]+ max_rel=[^ ]+ first=0x[0-9a-f]+:card=0x[0-9a-f]{8}:sim=0x[0-9a-f]{8}$' "$work/rel_ver.err" || { echo "FAIL: no host_gpu_outside line"; fails=1; }
+grep -Eq '^host_gpu_verify: in_set_identical=0 in_set_different=4 other_identical=0 other_different=0$' "$work/rel_ver.err" || { echo "FAIL: relaxed verify's host_gpu_verify line: $(grep '^host_gpu_verify' "$work/rel_ver.err")"; fails=1; }
+# ... and exact mode's verify of a kernel of its set is what it was: the stand-in's empty card differs, in 64 KiB chunks, with no tolerance report.
+run ex_ver big VGPU_HOST_GPU=exact VGPU_HOST_GPU_VERIFY=1 STUB_CARD_OK=1 "${reach[@]}" || { echo "FAIL: the exact verify run failed"; fails=1; }
+grep -Eq '^host_gpu: verify [^ ]+ \(in the exact set\): DIFFERENT, 64 KiB chunks: [0-9]+$' "$work/ex_ver.err" || { echo "FAIL: exact verify's per-launch line changed: $(grep -m1 '^host_gpu: verify' "$work/ex_ver.err")"; fails=1; }
+grep -q 'outside tolerance\|^host_gpu_relaxed:\|^host_gpu_outside:' "$work/ex_ver.err" && { echo "FAIL: exact verify printed relaxed mode's report"; fails=1; }
+# 15. a kernel that does not come back.
+t0=$SECONDS
+run hang mufu VGPU_HOST_GPU=relaxed VGPU_HOST_GPU_TIMEOUT=1 STUB_CARD_OK=1 STUB_SYNC_MS=20000 "${reach[@]}"
+rc=$?
+(( rc == 124 )) || { echo "FAIL: a launch that hung on the card ended with status $rc, not 124"; tail -3 "$work/hang.err"; fails=1; }
+(( SECONDS - t0 < 15 )) || { echo "FAIL: the hung launch was waited for ($(( SECONDS - t0 )) s)"; fails=1; }
+grep -q 'has been on the card for more than 1 s (VGPU_HOST_GPU_TIMEOUT)' "$work/hang.err" || { echo "FAIL: no message for the hung launch"; fails=1; }
+# (a verify run, so that the launches do reach the stand-in's wait and the output is still the simulator's)
+run nohang mufu VGPU_HOST_GPU=relaxed VGPU_HOST_GPU_VERIFY=1 VGPU_HOST_GPU_TIMEOUT=30 STUB_CARD_OK=1 STUB_SYNC_MS=50 "${reach[@]}" || { echo "FAIL: a launch inside its time limit ended the process"; tail -3 "$work/nohang.err"; fails=1; }
+grep -q '^cuLaunchKernel$' "$work/nohang.log" || { echo "FAIL: the run inside the time limit launched nothing on the stand-in card"; fails=1; }
+diff -q "$work/off_mufu.out" "$work/nohang.out" > /dev/null || { echo "FAIL: the time limit changes the output"; fails=1; }
 (( fails == 0 )) && { echo "PASS: first launch $first ms against a driver start of $init_ms ms; driver calls in the big run: $(calls on_big)"; exit 0; }
 exit 1

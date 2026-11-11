@@ -1395,3 +1395,40 @@ The A/B compares the normalised output of every run of every side: equal on all 
 * The mutants of BSYNC and of the row copy were run on the build before the loop rule (`mutants.log`, whose columns the script cut to a fixed width); the generator's text for them did not change afterwards. After the fix of part 0 (which changes generated text only with residence) `test_jit_resid` was run again in full (7 tests pass, `matrix.log`), the rule's mutants, the counts, SYR2K's and SYRK's timing and the same-bits runs are of that final build, and the SASS-level legs were not run again. `tests.log` is of the build before BSYNC became an opt-in: the linking legs of the other three run-loop tests (store gate, ALU runs, dispatch counts) were not run again on the final build, where their environment (`VGPU_JIT_LINK_BSYNC=1`) means what the default meant before.
 * Deviations from the round's rules: one hold of the machine lock ran 26 minutes (a build and sixteen test legs; the limit was about 20) and two others about 20; `cmake` was configured once outside the lock (2 s); a disassembly was written to `/tmp` and removed in the same command.
 * Cleanup: the scratch tree of the round on server3 (`~/.cache/sp53`) was removed by exact path.
+
+## Round sp59 (relaxed host-GPU mode): card measurements to follow
+
+Branch `hostgpu-relaxed`, built and tested on base `origin/main` 5f880163. `VGPU_HOST_GPU=relaxed` ([design](../12-host-gpu-relaxed.md), pantheonsim #587)
+was built and unit tested on server3, which has no card and no nvcc. This section is a stub: the tables are to be filled from the card runs.
+
+### What ran without a card (server3, GCC 13.3, `Release`, `-Werror`, no LTO; every build and run under the machine lock, `-j3`, `nice 19`)
+
+* The build is clean (0 warnings); `host_gpu.cpp` and `config.cpp` also compile alone with `-Wall -Wextra -Werror -Wformat-security`.
+* `ctest -R 'host_gpu|card_gate|hostgpu'`: 8 tests, 6 pass (`test_host_gpu_logic` 62 cases, `test_host_gpu_ref` 7, `test_host_gpu_tol` 15,
+  `test_host_gpu_track` 17, `test_card_gate` 10, `hostgpu_bench_selftest`), 2 skip (`e2e_host_gpu`: no card; `e2e_host_gpu_stub`: no nvcc). The relaxed steps
+  10 to 15 of the stand-in-driver test have therefore never run: CI is their first run.
+* Mutants, each a copy of one file with one change, built outside the tree: 91 of 91 killed (41 of the compare by tolerance, 34 of the classes and
+  switches, 4 of exact mode's reduction check, 12 of the harness). None of `host_gpu.cpp`: what could kill them is the stand-in-driver test.
+* No driver on the machine: PolyBench 2DCONV, ATAX and GESUMMV, each with the mode off, `exact`, `exact` with the log, `relaxed` (with and without
+  `VGPU_HOST_GPU_START_COST=0`), `relaxed` with verify, `VGPU_HOST_GPU=approx` and a bad `VGPU_HOST_GPU_ATOL`. The program's output is the mode-off
+  output in all 27 runs; the mode says `cannot load the real driver ...; mode off` where a launch was sent, the summary with 0 launches on the card
+  where none was, and `not a mode` / `not a number` for the last two. The stderr of the `exact` runs equals, line for line, that of an earlier build of
+  main (another round's baseline tree on the same machine), apart from the two lines for scripts that `VGPU_HOST_GPU_LOG` now adds.
+
+### To measure on a card (commands in the design doc, section 5)
+
+| item | command | result |
+|---|---|---|
+| e2e and card CI with the relaxed checks | `tools/card-ci/run-card-ci.sh` | |
+| `sin`, `cos`, `tanh` over all 2^32 patterns: differ, share, largest distance | `tools/probes/hostgpu_relaxed_card_probes.sh sfu <out>` | |
+| atomics: which kinds the card repeats | `tools/probes/hostgpu_relaxed_card_probes.sh atomics <out>` | |
+| tensor instructions under verify, rtol 1e-5 and 2e-3 | `tools/probes/hostgpu_relaxed_card_probes.sh tensor <out> <build>` | |
+| the three corpora: sim, exact, relaxed, verify | `tools/bench/hostgpu/run.py --forms sim,exact,relaxed,verify ...` | |
+
+### Results
+
+(to follow)
+
+### Caveats
+
+(to follow)
