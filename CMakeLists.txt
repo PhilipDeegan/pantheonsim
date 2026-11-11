@@ -4239,6 +4239,10 @@ set_tests_properties(lint_cudnn_header_fetch PROPERTIES TIMEOUT 300)
 # job that cannot fit; synthetic meminfo and cgroup files stand in for the machine.
 add_test(NAME lint_ci_jobs COMMAND ${CMAKE_SOURCE_DIR}/tests/lint/check_ci_jobs.sh)
 set_tests_properties(lint_ci_jobs PROPERTIES TIMEOUT 120)
+# The memory reservation is released by every job that takes it (and its ledger mounted into the
+# pool's containers), and the setup action saves its build cache right after the build.
+add_test(NAME lint_ci_reservation
+         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/lint/check_ci_reservation.py)
 
 # The merge-conflict guards (ci/pr-guard.sh at the start of a heavy job,
 # ci/cancel-conflicting-prs.sh after main moves) against a fake gh and curl.

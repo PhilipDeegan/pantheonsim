@@ -224,7 +224,10 @@ jobs:
       # another job may hold most of it. Fail here, alone, if this one cannot
       # fit, rather than take the machine down part-way (the minimums are in
       # ci/jobs.sh).
+      # A GitHub-hosted runner is this job's alone, so there is no ledger to share (CI_RESERVE=0).
       - name: Check the memory
+        env:
+          CI_RESERVE: '0'
         run: ci/jobs.sh --check sass
 
       - name: Is there a SASS path?
