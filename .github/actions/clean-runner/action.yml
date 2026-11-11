@@ -37,4 +37,4 @@ runs:
         fi
         after=$(free_kb)
         echo "Runner disk: $((before / 1024)) MB free before the clean-up, $((after / 1024)) MB after."
-        echo "Runner disk: $((before / 1024)) MB free before the clean-up, $((after / 1024)) MB after." >> "$GITHUB_STEP_SUMMARY"
+        echo "Runner disk: $((before / 1024)) MB free before the clean-up, $((after / 1024)) MB after." >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true  # the runner's file is gone after a kill

@@ -19,6 +19,17 @@ release says what runs and what it produces, never how fast a real GPU would run
   `v_pk_add_f32 v[2:3], v[2:3], 0 neg_lo:[1,1] neg_hi:[1,1]`, a float negate, stopped with "takes the second part of a constant" and left
   mwa_hyperbeam's single-precision `fee_kernel` output at zero (pantheonsim #580). A nonzero constant's second half stays refused.
 
+- CI: a heavy job (SASS, ollama, ollama-amd, ASan, TSan) takes a reservation before it samples the memory, not after. `ci/jobs.sh --check`
+  now takes a share (the profile's minimum) in a ledger under `/tmp/pantheonsim-ci-reserve`, which the pool's containers bind-mount, waits
+  while the shares leave no room (capacity 5 GiB: one heavy job per host, `CI_RESERVE_CAPACITY_GIB` raises it), lets the machine settle
+  5 s and only then samples. A new last step, `ci/jobs.sh --release` (`if: always()`), gives the share back; one a killed runner never
+  released expires after 4 hours. Before, two jobs on the two runners of one host both passed on the same free memory and the host's
+  out-of-memory killer took them down (pantheonsim #575, #576). The ollama downloads retry once when the archive arrives partial, and
+  the clean-up step no longer fails on a step-summary file the runner has already removed. The test is `lint_ci_jobs` (the ledger) and
+  `lint_ci_reservation` (every job releases and mounts it).
+- Setup action: the build cache is saved by an `actions/cache/save` step right after the build (on a miss only) instead of by
+  `actions/cache`'s post step, which runs only when the whole job succeeds; a caller whose tests failed no longer throws the build away
+  and rebuilds it for about 15 minutes next run (pantheonsim #582).
 - PTX: `ld.weak` and `st.weak` are accepted (the explicit spelling of the default memory semantics, PTX ISA 6.0 and later). They
   stopped GiMMiK 4.0's matrix-multiply kernels, and so PyFR's CUDA backend, at module load (pantheonsim #554).
 - NVRTC (the built-in compiler, used when no toolkit is visible): `--ftz=`, `--prec-div=` and `--prec-sqrt=` are accepted beside
