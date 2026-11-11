@@ -186,6 +186,8 @@ struct Env {
   MemoryManager mem{1 << 24};
   DeviceProfile prof = load_gpu("nvidia/a10");   // sm_86
   uint64_t max_steps = 0;   // a warp's instruction budget for the launches (0: the default)
+  bool same_buffer = false;   // every run uses the buffer of the first (else each has one of its own)
+  uint64_t held = 0;
   std::shared_ptr<sass::Module> load(const std::vector<Insn>& code) {
     for (size_t i = 0; i < code.size(); ++i) {
       const sass::Instr ins = sass::decode(code[i].w, 16 * i, 86);
@@ -197,7 +199,7 @@ struct Env {
   }
   // One launch of `blocks` blocks of 64 threads over a buffer whose words start as 3 * index + 7.
   Result run(sass::Module& m, uint32_t blocks) {
-    const uint64_t buf = mem.alloc(uint64_t{kWords} * 4);
+    const uint64_t buf = same_buffer && held ? held : mem.alloc(uint64_t{kWords} * 4);
     std::vector<uint32_t> init(kWords);
     for (uint32_t i = 0; i < kWords; ++i) init[i] = 3 * i + 7;
     mem.write(buf, init.data(), uint64_t{kWords} * 4);
@@ -224,7 +226,8 @@ struct Env {
                 after.scouted - before.scouted};
     r.words.resize(kWords);
     mem.read(buf, r.words.data(), uint64_t{kWords} * 4);
-    mem.free(buf);
+    if (same_buffer) held = buf;
+    else mem.free(buf);
     return r;
   }
 };
@@ -1084,6 +1087,18 @@ VTEST(a_grid_of_a_few_blocks_is_noted_by_word_from_the_start) {
   same_counters(unscouted.stats, ref300.stats, "in place, no scout");
   VCHECK_EQ(unscouted.counts.scouted, uint64_t{0});
   VCHECK_EQ(unscouted.counts.again, static_cast<uint64_t>(pages_on()));
+  // What the scout learned is the kernel's: a second launch on the same buffer notes it by word from the start (no scout, and no
+  // trial thrown away).
+  Env same;
+  same.same_buffer = true;
+  const auto m = same.load(in_place());
+  const Result first = same.run(*m, 300), second = same.run(*m, 300);
+  VCHECK_EQ(first.buf, second.buf);
+  VCHECK_EQ(first.counts.scouted, static_cast<uint64_t>(pages_on()));
+  VCHECK_EQ(first.counts.again, uint64_t{0});
+  VCHECK_EQ(second.counts.scouted, uint64_t{0});
+  VCHECK_EQ(second.counts.again, uint64_t{0});
+  VCHECK_EQ(second.counts.committed, uint64_t{1});
 }
 
 VTEST(a_chain_stopped_by_a_coarse_note_is_tried_by_word_and_then_run_in_order) {
@@ -1502,10 +1517,11 @@ VTEST(a_line_written_out_to_words_while_its_block_writes_in_it_loses_no_mark) {
   Paged d(3);
   const uint64_t line = d.p + 1024;
   std::atomic<int> go{0};
-  for (int round = 0; round < 800; ++round) {
+  for (int round = 0; round < 3000; ++round) {
     d.mem.spec_begin(2, &by_word_plan());
     go.store(0);
     std::atomic<bool> a_stopped{false}, b_stopped{false};
+    std::atomic<int> a_done{0}, a_at{0};   // A's words written so far; and how many that was when B's first write returned
     const bool reads = round % 4 == 3;   // every fourth round A reads its words first (the record holds read and written bits)
     const auto body = [&](unsigned worker, std::atomic<bool>& stopped) {
       d.mem.spec_enter(worker);
@@ -1518,6 +1534,8 @@ VTEST(a_line_written_out_to_words_while_its_block_writes_in_it_loses_no_mark) {
           uint32_t was;
           if (reads && worker == 0) d.mem.read(line + 4 * w, &was, 4);
           d.mem.write(line + 4 * w, &v, 4);
+          if (worker == 0) a_done.fetch_add(1, std::memory_order_relaxed);
+          else if (w == 1) a_at.store(a_done.load(std::memory_order_relaxed), std::memory_order_relaxed);
         }
         // (and the next line, which the other thread never comes to: a record to the end)
         if (worker == 0) d.mem.write(line + 64, &v, 4);
@@ -1532,10 +1550,13 @@ VTEST(a_line_written_out_to_words_while_its_block_writes_in_it_loses_no_mark) {
     b.join();
     VCHECK(!a_stopped.load());
     VCHECK(!b_stopped.load());
-    // A third block at word `round % 16`: a read of it is stopped (it is A's or B's, written).
+    // A third block reads one word, and is stopped: it is A's or B's, written. The word is the one a lost mark is likeliest at:
+    // the word A was at when B came to the line (B's first write returned), or B's first word, by turns; every eighth round any word.
+    const uint64_t a_word = 2 * static_cast<uint64_t>(std::min(a_at.load(), 7));
+    const uint64_t probe = round % 8 == 7 ? static_cast<uint64_t>(round / 8 % 16) : round % 2 ? 1 : a_word;
     d.mem.spec_enter(0);
     d.mem.spec_block(2);
-    VCHECK(d.rd(line + 4 * static_cast<uint64_t>(round % 16), 4));
+    if (!d.rd(line + 4 * probe, 4)) throw vtest::Failure("round " + std::to_string(round) + ": the mark of word " + std::to_string(probe) + " was lost");
     d.mem.spec_leave();
     const MemoryManager::SpecOutcome out = d.mem.spec_end();
     VCHECK(!out.committed);

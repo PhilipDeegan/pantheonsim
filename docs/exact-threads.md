@@ -355,3 +355,19 @@ looked at every time; two words taken at once only when both are free, at even a
 interleavings of four blocks on two workers against a model of the four word states (by word: stopped at exactly
 the access the model stops; by page: never later, earlier only as a coarse stop, and the model's again with the allocation by
 word); a kernel that updates its buffer in place, tried again by word and kept, with the bits and counters of the run in order.
+
+For lines (round sp58): a second block, on the same worker and on another, reading and writing at every byte of a line another
+block holds as its record (some words read, some written, some untouched) and of the words on either side, with six lengths
+from 1 to 17 bytes: stopped exactly where the words stop it, never coarsely, and both blocks going on by word where it is not;
+what the counters say of a line one block touched and of one two did, and the words written out being zero for the next trial;
+a line kept whole once at its block's first write in it, and words kept one by one in a line another block came to first;
+1500 random interleavings of four blocks inside three lines across a page boundary against the model of the word states (noted by
+word, by page, and with the allocation by word); and two races on real threads, 800 rounds each: a line written out to words
+while its block goes on writing in it (no mark lost: a third block is stopped at every word, and every byte goes back), and a
+writer going up a line while a reader comes down it (one of the two is always stopped). For the scout: what block 0 read and
+wrote alone is the other blocks' to read and write, a stopped trial puts back what the launch started with though a later block
+wrote over block 0's store, a later piece of the log is not joined to the scout's, only what was read by page and written is
+learned, a stopped scout learns nothing, and the worker forgets what it remembered of the scout's marks; the kernel that updates
+its buffer in place is scouted at its first launch (no trial thrown away) and not on a small grid or with `VGPU_EXACT_SCOUT=0`.
+The width rule of trials is tested in `tests/unit/test_worker_pool.cpp` (the verdict by wins and sum; a kernel measured on one
+thread before its small launches go wide; a figure too high dropped).

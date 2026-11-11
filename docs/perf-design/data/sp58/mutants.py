@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Round sp58 mutation checks: each mutant is one wrong change in this round's code; its test must fail on it.
 
-  mutants.py <src> <build> <work> [name ... | controls]
+  nice -n 19 mutants.py <src> <build> <work> [name ... | controls]
 The road of round sp55's mutants.py for a Ninja build tree: a copy of the source file with the change is compiled with the build's
 own command (ninja -t commands, with -O1 for -O3: a third of the time) into <work>, and the test (test_exact_threads, or test_worker_pool for the width rule) is linked
 with that object ahead of libvgpu.a, so neither tree is touched. test_exact_threads is run in its four forms (default,
 VGPU_TIER=0, VGPU_FASTPATH=0, VGPU_EXACT_PAGES=0); a mutant is killed by the first form that fails. Each run is repeated
 (RUNS times) while it passes: three of the mutants are of a race between two threads, which one run may not meet. First of all
-the unchanged files go through the same road and must pass ("controls"). The machine lock is held for one mutant at a time."""
+the unchanged files go through the same road and must pass ("controls"). The machine lock is held over several mutants at a time."""
 import fcntl, os, re, subprocess, sys, time
 
 LOCK = "/tmp/pantheonsim-builder.lock"
@@ -124,13 +124,13 @@ def build(src, bld, work, path, text, test):
     assert (" -c " + full) in cmd, cmd
     cmd = cmd.replace(" -o " + o + " ", " -o %s " % obj).replace(" -c " + full, " -iquote %s -c %s" % (os.path.dirname(full), msrc))
     cmd = cmd.replace(" -O3 ", " -O1 ")   # (the mutant's file only, to shorten the hold of the machine lock: the same code, less optimised)
-    r = sh("nice -n 19 " + cmd, cwd=bld)
+    r = sh(cmd, cwd=bld)   # (the driver is run under nice -n 19: its children are too)
     if r.returncode != 0:
         return False, r.stdout[-2000:]
     link = [c for c in commands(bld, test) if (" -o " + test + " ") in c][-1]
     assert " libvgpu.a" in link, link
     link = link.replace(" -o " + test + " ", " %s -o %s " % (obj, os.path.join(work, test)))
-    r = sh("nice -n 19 " + link, cwd=bld)
+    r = sh(link, cwd=bld)
     return r.returncode == 0, r.stdout[-2000:]
 
 
@@ -142,7 +142,7 @@ def run(work, test, every=False):
         e.update(env)
         for i in range(1 if every else RUNS):
             try:
-                r = sh("nice -n 19 %s/%s" % (work, test), env=e, timeout=900)
+                r = sh("%s/%s" % (work, test), env=e, timeout=900)
                 if r.returncode != 0:
                     failed.append(form if i == 0 else "%s (run %d)" % (form, i + 1))
                     break
@@ -160,7 +160,16 @@ def main():
     os.makedirs(work, exist_ok=True)
     controls = [("(no mutant: %s)" % p, p, None, t) for p, t in ((M, T), (X, T), (P, TP))]
     todo = [c for c in controls if not want or "controls" in want] + [m for m in MUTANTS if not want or m[0] in want]
+    lock, since = open(LOCK, "w"), None
     for name, path, edits, test in todo:
+        # (the lock is held over several mutants, and let go after the first that ends more than 150 s into a hold)
+        if since is not None and time.monotonic() - since > 150:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            since = None
+            time.sleep(2)
+        if since is None:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            since = time.monotonic()
         text = open(os.path.join(src, path)).read()
         bad = [old for old, _ in edits or [] if text.count(old) != 1]
         if bad:
@@ -168,18 +177,15 @@ def main():
             continue
         for old, new in edits or []:
             text = text.replace(old, new)
-        with open(LOCK, "w") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            ok, log = build(src, bld, work, path, text, test)
-            if not ok:
-                print("%-40s DOES NOT BUILD\n%s" % (name, log), flush=True)
-                continue
-            failed = run(work, test, every=edits is None)
+        ok, log = build(src, bld, work, path, text, test)
+        if not ok:
+            print("%-40s DOES NOT BUILD\n%s" % (name, log), flush=True)
+            continue
+        failed = run(work, test, every=edits is None)
         if edits is None:
             print("%-40s %s" % (name, "passes in every form" if not failed else "FAILS: " + ", ".join(failed)), flush=True)
         else:
             print("%-40s %s" % (name, "killed by " + failed[0] if failed else "SURVIVED"), flush=True)
-        time.sleep(2)   # (another holder of the lock gets in)
 
 
 if __name__ == "__main__":

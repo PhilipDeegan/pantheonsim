@@ -14,8 +14,9 @@ a coarse stop threw away (the "again" lines of VGPU_EXACT_LOG, new build only).
   b.x2 b.x4 b.x8   new, VGPU_EXACT_THREADS=2/4/8
   b.t8   new, VGPU_THREADS=8                       the unproven mode: the ceiling
 Per run the signature of round sp47 (sp47_run.py: normalised output and files written, exit code, VGPU_COUNTERS_FILE,
-VGPU_MEMO_FINAL_HASH) is compared with a.t1's. Medians of the wall seconds of the whole program. The machine lock is held for one
-round of one program and let go between rounds."""
+VGPU_MEMO_FINAL_HASH) is compared with a.t1's. Medians of the wall seconds of the whole program. The machine lock is held over
+whole rounds, of one program after another, and let go after the first round that ends more than --hold seconds into a hold (the
+lock has many waiters: a hold per round would mean a turn of the whole queue per round)."""
 import argparse, fcntl, hashlib, json, os, random, re, shutil, statistics, sys, tempfile, time
 
 X = lambda n: {"VGPU_THREADS": "1", "VGPU_EXACT_THREADS": str(n)}
@@ -42,6 +43,7 @@ def main():
     ap.add_argument("--extra-env", default="", help="NAME=value,... added to the b.x* variants")
     ap.add_argument("--lock", default="")
     ap.add_argument("--seed", type=int, default=58)
+    ap.add_argument("--hold", type=float, default=150)
     ap.add_argument("--json", required=True)
     a = ap.parse_args()
     sys.path.insert(0, a.real)
@@ -56,6 +58,18 @@ def main():
     done = {(r["corpus"], r["name"]) for r in rows}
     lock = open(a.lock, "w") if a.lock else None
     rng = random.Random(a.seed)
+    held = [None]   # when this hold of the lock began
+
+    def take():
+        if lock and held[0] is None:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            held[0] = time.monotonic()
+
+    def give(always=False):
+        if lock and held[0] is not None and (always or time.monotonic() - held[0] > a.hold):
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            held[0] = None
+            time.sleep(1)   # (a waiting holder of the lock gets in)
     for e in progs:
         if (e[0], e[1]) in done:
             continue
@@ -68,8 +82,7 @@ def main():
             this = list(variants)
             rng.shuffle(this)
             order.append(" ".join(v[0] for v in this))
-            if lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
+            take()
             try:
                 for vname, b, venv in this:
                     d = tempfile.mkdtemp(prefix="sp58ab-")
@@ -95,13 +108,13 @@ def main():
                             thrown[vname] = [sum(int(l.split("\t")[-1]) for l in lines if "\t" + k + "\t" in l) / 1e6 for k in ("again", "stopped", "committed")]
                     shutil.rmtree(d, ignore_errors=True)
                     walls[vname].append(round(wall, 4))
-            finally:
-                if lock:
-                    fcntl.flock(lock, fcntl.LOCK_UN)
+            except BaseException:
+                give(True)
+                raise
+            give()
             if r == 0 and walls["a.t1"][0] >= a.long:
                 runs = min(runs, a.long_runs)
             r += 1
-            time.sleep(0.5)   # (a waiting holder of the lock gets in)
         ref = sig["a.t1"]
         row = dict(corpus=e[0], name=e[1], runs=runs, ref_one=len(ref) == 1, order=order)
         for vname, _, _ in variants:
@@ -114,6 +127,7 @@ def main():
         json.dump(rows, open(a.json, "w"), separators=(",", ":"))
         print("%-10s %-22s " % (e[0], e[1]) + " ".join("%s %.2f%s" % (v[0], row[v[0]], "" if row[v[0] + "_same"] else "!") for v in variants)
               + "  " + " ".join("%s%s" % (k[2:], v) for k, v in trials.items()), flush=True)
+    give(True)
 
 
 if __name__ == "__main__":
