@@ -249,7 +249,7 @@ jobs:
           # One result directory per matrix row, so a machine that wrote nothing is
           # reported as missing.
           rows=$(grep -cE '^ +- \{ key: ' .github/workflows/workloads.yml)
-          python3 tests/workloads/workload_matrix.py results "$rows" > matrix.md
+          python3 tests/workloads/workload_matrix.py results "$rows" .github/workflows/workloads.yml > matrix.md
           cat matrix.md >> "$GITHUB_STEP_SUMMARY"
 
       # While main is broken there is one open issue saying where, updated by

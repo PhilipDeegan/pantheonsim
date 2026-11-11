@@ -1,0 +1,13 @@
+11.61 s, 58098 instructions: none
+11.63 s, 58098 instructions: -fno-tree-pre
+9.57 s, 57531 instructions: -fno-gcse
+10.68 s, 58521 instructions: -fno-thread-jumps
+10.69 s, 58118 instructions: --param=sccvn-max-alias-queries-per-access=50
+11.56 s, 58098 instructions: --param=dse-max-alias-queries-per-store=32
+10.73 s, 58118 instructions: -fno-tree-pre --param=sccvn-max-alias-queries-per-access=50 --param=dse-max-alias-queries-per-store=32
+11.36 s, 58365 instructions: -fno-tree-dse -fno-dse
+11.57 s, 58078 instructions: -fno-tree-loop-distribute-patterns
+11.39 s, 58098 instructions: -fno-schedule-insns2
+7.92 s, 58445 instructions: -fno-tree-pre -fno-gcse -fno-thread-jumps --param=sccvn-max-alias-queries-per-access=50
+11.56 s, 58096 instructions: -fno-ipa-cp -fno-ipa-sra -fno-ipa-icf
+done

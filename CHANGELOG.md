@@ -7,6 +7,68 @@ release says what runs and what it produces, never how fast a real GPU would run
 
 ## Unreleased
 
+- PTX: `ld.weak` and `st.weak` are accepted (the explicit spelling of the default memory semantics, PTX ISA 6.0 and later). They
+  stopped GiMMiK 4.0's matrix-multiply kernels, and so PyFR's CUDA backend, at module load (pantheonsim #554).
+- NVRTC (the built-in compiler, used when no toolkit is visible): `--ftz=`, `--prec-div=` and `--prec-sqrt=` are accepted beside
+  `--fmad=`, as the real NVRTC takes them; PyFR passes `--ftz=true` to every compile (pantheonsim #555).
+- CUDA driver: `cuModuleLoadDataEx` fills `CU_JIT_ERROR_LOG_BUFFER` (and the size slot) when a load fails, and malformed PTX is
+  `CUDA_ERROR_INVALID_PTX` rather than `CUDA_ERROR_NOT_SUPPORTED`; a `.version` past 9.3 is `CUDA_ERROR_UNSUPPORTED_PTX_VERSION`, and
+  text that does not begin with `.version` is `CUDA_ERROR_INVALID_IMAGE`. `cuLinkAddData` checks its PTX as it is added and fails
+  the same three ways, with the log in the link state's error buffer, instead of `cuLinkComplete` succeeding on garbage. All
+  measured on an RTX 3060 (gocudrv's `TestRealModuleJITLog` and `TestRealLinkerBadPTX`, pantheonsim #558).
+- PTX: a `.reg` range may declare up to 1,048,576 registers (it was 65,536). ptxas allocates physical registers and counts only what
+  a kernel uses, so nvcc's unrolled BN254 field arithmetic declares 125,511 and loads on a GPU; the per-block limit on registers a
+  kernel uses is unchanged (pantheonsim #559).
+- PTX: lanes of one group that sit at two copies of a `vote.sync` naming the whole group (nvcc tail-duplicates a ballot into both arms
+  of an `if`) now vote together, as they do on a card, where each lane gets its group's ballot. The simulator ran the first copy
+  for its lanes alone, and the `bar.sync` after it stopped with "cannot be reached by every lane of the warp", as in fastMD's
+  neighbour-list build (pantheonsim #574). Measured on an RTX 3060 (sm_86, CUDA 13.0).
+
+- SASS: a loop that spins with `__nanosleep` as its back-off (lanes of one warp racing for a slot with `atomicCAS`, the losers
+  sleeping until the winner publishes) runs to the end. ptxas puts no YIELD in such a loop, so the lane that won stood at the
+  BSYNC closing it and the spinners ran until the exec limit; a NANOSLEEP now lets the other lanes and warps go first, as a YIELD
+  does, and the spin breaker applies (eliphatfs/cuacd's mesh_audit edge table, pantheonsim #553).
+- `VGPU_HOST_STATS=1` prints one line of host-kernel counters when a simulated program exits (CPU user and system time, page faults,
+  context switches, threads, huge-page use, heap-chunk `madvise` and `mmap` counts, worker-pool threads and calls, kernel, CPU count and
+  THP mode); `VGPU_HOST_STATS=30` also prints one every 30 seconds, flushed, and `VGPU_HOST_STATS_FILE` redirects them. For finding why a
+  run is slower on one kernel than another (pantheonsim #551).
+- CI: the workloads summary and the "Pantheon workloads failing on main" issue name the machines whose job wrote no results (a hosted
+  runner lost mid-build leaves no report, and the count alone did not say which) (pantheonsim #545).
+- PTX and SASS `min`/`max`: the SASS tier could not decode `HMNMX2`, the instruction behind `min`/`max` on `f16`, `f16x2`, `bf16` and
+  `bf16x2` (`__hmin2`, `__hmax2`, `min.NaN.f16`, ...), so a kernel using one stopped with an illegal-memory-access error; it now runs
+  them, with `.ftz`, `.NaN` and `.xorsign.abs` as the PTX engine and an RTX 3060 give. `FMNMX.XORSIGN` (`min.xorsign.abs.f32`) ignored
+  its sign rule on SASS and returned an unsigned magnitude. The PTX engine accepts the three-input `min`/`max{.ftz}{.NaN}{.abs}.f32` of
+  sm_100 that ptxas emits (it was an unsupported-PTX error). `max.s32.relu`, `__viaddmax_s32_relu` and the other `.relu` forms of
+  pantheonsim #547 already ran since #451; new e2e test `e2e_minmax_forms` sweeps every sibling form (the relu and DPX ones are in
+  `e2e_dpx_intrinsics`).
+- SASS engine, packed half arithmetic: with `HMNMX2` decoded, modules such as one holding `min.f16` no longer fall back to the PTX engine
+  wholesale, which exposed `HADD2`, `HMUL2` and `HFMA2` forms the SASS engine got wrong against an RTX 3060 (51 of 380 forms of
+  `e2e_ptx_half_forms`, and 4 of `e2e_ptx_forms`): `.FTZ` on an f16 result (subnormal inputs and result to a signed zero), `.SAT` (a -0 result is +0), `.RELU`
+  (a negative or -0 result is +0), `F2FP` with a directed rounding mode (`cvt.rz`, `.rm`, `.rp` to f16 and bf16) and its one-conversion
+  `MERGE_C` form (`cvt.rn.relu.bf16.f32`, which was read as an f16 pair) and `.SATFINITE` (`cvt.rn.satfinite.f16x2.f32`, whose
+  flag was read as part of the type). They now give the card's bits, on the interpreter and
+  the tier (the tier leaves those forms to the interpreter). `e2e_ptx_half_forms` runs on the SASS interpreter, the tier and the PTX engine
+  and fails if the SASS did not run.
+- cuFFT: an in-place real transform (`cufftExecR2C`, `D2Z`, `C2R`, `Z2D` on one buffer, no advanced layout) reads and writes the
+  padded real array cuFFT documents (each row of the fastest axis is `2 * (n / 2 + 1)` reals, a batch is the complex distance
+  apart). It read the array as dense, so 2D and 3D results were wrong and so was a 1D batch (pantheonsim #548).
+- cuBLAS and cuBLASLt: `CUBLAS_TF32_TENSOR_OP_MATH`, `CUBLAS_COMPUTE_32F_FAST_TF32` and the FP16/BF16 fast compute types round the
+  FP32 inputs of the host-computed GEMMs (A and B, not C) as a tensor core does: TF32 to nearest with ties away from zero
+  (measured on an RTX 3060), FP16 and BF16 to nearest even, for `Sgemm`, `SgemmEx`, `Cgemm`, the batched forms, `GemmEx` and
+  `cublasLtMatmul`, from the size the card starts using tensor cores; `NVIDIA_TF32_OVERRIDE=0` is honoured. Before, the result was the plain
+  FP32 one in every mode (pantheonsim #549; the rules and what is modelled are in `nvidia/docs/cublas.md`).
+- PTX engine, `wmma`: a fragment holds its matrix elements where a card puts them, for every shape and type (f16, bf16, tf32, s8/u8,
+  s4/u4, b1, f64 operands; f16, f32, s32 and f64 accumulators). It used a layout of its own, so code that reads or writes
+  fragment elements one by one (`acc.x[i] *= (a.x[i] > 0)`, how tiny-cuda-nn masks a ReLU's gradient, and the epilogues of CUTLASS and
+  hand-written kernels) met the wrong element: tiny-cuda-nn's `FullyFusedMLP` double-backward test gave mean relative errors of 0.6
+  to 0.8 for three of its five rows on the default SASS engine too, because a module holding one SASS instruction the engine did not decode (the packed half
+  maximum, `HMNMX2`, until pantheonsim #547) ran on the PTX engine wholesale. The three code paths that held old layouts (f16 and bf16 `m16n16k16` with an f32 accumulator, tf32, and the generic
+  one) are one now, and the tile route takes tf32 and the f16/bf16 `m16n16k16` forms with f16 accumulators too. The layout is the
+  Turing-and-later one, measured on an RTX 3060 (a Volta card, which was not measured, may differ)
+  (pantheonsim #550, new test `e2e_wmma_fragment_layout`).
+- PTX engine: a `wmma.load` whose registers nothing reads is dead code and does nothing, as on a card where ptxas removes it. tiny-cuda-nn's
+  fused backward pass loads a fragment of its last layer from a null pointer and uses none of it, which stopped the program with an
+  invalid-pointer error at address 0 on the simulator only (pantheonsim #550, in `test_exec3`).
 - CUDA runtime and driver: a zero-byte `cudaMalloc`, `cudaMallocManaged`, `cudaMallocHost`, `cudaHostAlloc` or `cudaMallocAsync` succeeds
   and gives a NULL pointer, as on a GPU, where it gave a distinct non-NULL one (Gpufit tests its unused buffers against NULL); the
   driver's `cuMemHostAlloc`/`cuMemAllocHost` of 0 bytes do the same, and `cuMemAlloc(0)` is `CUDA_ERROR_INVALID_VALUE` with the

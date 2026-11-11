@@ -60,34 +60,78 @@ using namespace jk::jk_kernels;
   return t;
 }
 
+// A row of 32 words copied: four 32-byte moves, written out. Not a loop (round sp53): the compiler recognises a loop of copies as one memcpy of
+// 128 bytes, and in a block it takes for a cold one it expands that memcpy as `rep movsl`. In a large function its guess of what is cold is poor
+// (SYR2K's inner loop with linking: ten result rows a pass of the loop were copied that way), the string instruction costs tens of cycles to start, and
+// the wide loads of the row that follow in the tier's handlers do not get their bytes forwarded from it: 3 % of that program's run. (The old loop is
+// kept for the mutation check of the test that reads the object: VGPU_JIT_ROW_LOOP, which the generator defines for VGPU_JIT_MUTANT=row_loop.)
+[[gnu::always_inline]] inline void cprow(u32* d, const u32* s) {
+#ifdef VGPU_JIT_ROW_LOOP
+  for (unsigned i = 0; i < 32; i += 8) {
+    V8u v;
+    std::memcpy(&v, s + i, sizeof v);
+    std::memcpy(d + i, &v, sizeof v);
+  }
+#else
+  V8u a, b, c, e;
+  std::memcpy(&a, s, sizeof a);
+  std::memcpy(&b, s + 8, sizeof b);
+  std::memcpy(&c, s + 16, sizeof c);
+  std::memcpy(&e, s + 24, sizeof e);
+  std::memcpy(d, &a, sizeof a);
+  std::memcpy(d + 8, &b, sizeof b);
+  std::memcpy(d + 16, &c, sizeof c);
+  std::memcpy(d + 24, &e, sizeof e);
+#endif
+}
+
 // A result row to the destination register for the executing lanes (tier_store): the whole row, or a blend of the lanes.
 [[gnu::always_inline]] inline void store_row(u32* d, u32 ex, const u32* r) {
   if (ex == 0xffffffffu) {
-    for (unsigned i = 0; i < 32; i += 8) {
-      V8u v;
-      std::memcpy(&v, r + i, sizeof v);
-      std::memcpy(d + i, &v, sizeof v);
-    }
+    cprow(d, r);
   } else {
     blend_m_k(d, r, ex);
   }
 }
 
 // The register file's row and a local copy of it (register residence).
-[[gnu::always_inline]] inline void ldrow(u32* x, const u32* r) {
-  for (unsigned i = 0; i < 32; i += 8) {
-    V8u v;
-    std::memcpy(&v, r + i, sizeof v);
-    std::memcpy(x + i, &v, sizeof v);
-  }
+[[gnu::always_inline]] inline void ldrow(u32* x, const u32* r) { cprow(x, r); }
+[[gnu::always_inline]] inline void strow(u32* r, const u32* x) { cprow(r, x); }
+
+// Fused runs (round sp48): a run of register-only ops is computed block by block of eight lanes, every op of the run on one block before the
+// next block, so that a value a later op of the run reads is in a host register and not in a 128-byte row in memory. These are the kernels of
+// src/simd/kernels.inc for one block (iadd3_k, imad_k and lop3_k are written out by the generator; the float ones are here because of the NaN
+// rule): the same expression, on a vector instead of a row. Only for the AVX2 level (a 32-byte vector argument is not a baseline x86-64 one).
+#if VGPU_SIMD_AVX2
+[[gnu::always_inline]] inline V8u ld8(const u32* p) {
+  V8u v;
+  std::memcpy(&v, p, sizeof v);
+  return v;
 }
-[[gnu::always_inline]] inline void strow(u32* r, const u32* x) {
-  for (unsigned i = 0; i < 32; i += 8) {
-    V8u v;
-    std::memcpy(&v, x + i, sizeof v);
-    std::memcpy(r + i, &v, sizeof v);
-  }
+[[gnu::always_inline]] inline void st8(u32* p, V8u v) { std::memcpy(p, &v, sizeof v); }
+[[gnu::always_inline]] inline V8u sp8(u32 v) { return V8u{v, v, v, v, v, v, v, v}; }
+// The lanes q .. q + 7 of a lane mask as a vector of all-ones or zero words (store_masked's `sel`).
+[[gnu::always_inline]] inline V8u lm8(u32 ex, unsigned q) {
+  const V8u pick = {1u, 2u, 4u, 8u, 16u, 32u, 64u, 128u};
+  return reinterpret_cast<V8u>((pick & sp8((ex >> q) & 0xffu)) != 0);
 }
+[[gnu::always_inline]] inline V8u bl8(V8u m, V8u r, V8u old) { return (old & ~m) | (r & m); }
+[[gnu::always_inline]] inline V8u tmod8(bool flt, unsigned mod, V8u v) {   // tmod, lane by lane
+  if (flt) {
+    if (mod & 4u) v &= sp8(0x7fffffffu);
+    if (mod & 1u) v ^= sp8(0x80000000u);
+  } else {
+    if (mod & 1u) v = sp8(0u) - v;
+    if (mod & 2u) v = ~v;
+  }
+  return v;
+}
+[[gnu::always_inline]] inline V8u fadd8(V8u a, V8u b) { return VGPU_CANON_NAN(reinterpret_cast<V8f>(a) + reinterpret_cast<V8f>(b)); }
+[[gnu::always_inline]] inline V8u fmul8(V8u a, V8u b) { return VGPU_CANON_NAN(reinterpret_cast<V8f>(a) * reinterpret_cast<V8f>(b)); }
+[[gnu::always_inline]] inline V8u ffma8(V8u a, V8u b, V8u c) {
+  return VGPU_CANON_NAN(reinterpret_cast<V8f>(_mm256_fmadd_ps(reinterpret_cast<__m256>(a), reinterpret_cast<__m256>(b), reinterpret_cast<__m256>(c))));
+}
+#endif
 
 // The scalar comparisons of the uniform datapath (exec_ops.inc's int_cmp and bool_op).
 [[gnu::always_inline]] inline bool icmp1(unsigned cmp, bool sgn, u32 a, u32 b) {

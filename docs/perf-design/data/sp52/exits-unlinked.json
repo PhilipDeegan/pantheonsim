@@ -1,0 +1,705 @@
+{
+ "hecbench/black-scholes-cuda": {
+  "rc": 0,
+  "wall": 22.46,
+  "exits": {
+   "split-branch": [
+    6249332,
+    1562333,
+    0
+   ],
+   "uniform-branch-taken": [
+    17185663,
+    17185663,
+    4686999
+   ],
+   "uniform-branch-not-taken": [
+    23434995,
+    23434995,
+    1562333
+   ],
+   "register-only-op": [
+    3124666,
+    3124666,
+    0
+   ],
+   "store-gate": [
+    1562333,
+    0,
+    0
+   ],
+   "to-compiled-region": [
+    4686997,
+    0,
+    0
+   ],
+   "bssy-nop": [
+    20310326,
+    9373998,
+    0
+   ],
+   "bsync": [
+    26559658,
+    9373998,
+    0
+   ],
+   "exit": [
+    4,
+    0,
+    0
+   ],
+   "exit-no-lane-leaves": [
+    1562332,
+    0,
+    0
+   ],
+   "bar-yield-call-ret-warpsync": [
+    17185661,
+    12498664,
+    0
+   ]
+  },
+  "calls": 115612635,
+  "insts": 910840043,
+  "gen": 798352088,
+  "continued": 35933657,
+  "fill_wall": 25.97
+ },
+ "polybench/LU": {
+  "rc": 0,
+  "wall": 25.96,
+  "exits": {
+   "store-gate": [
+    45793857,
+    0,
+    0
+   ],
+   "bssy-nop": [
+    34837,
+    0,
+    0
+   ],
+   "exit": [
+    45915443,
+    0,
+    0
+   ],
+   "exit-no-lane-leaves": [
+    44808411,
+    0,
+    0
+   ],
+   "bar-yield-call-ret-warpsync": [
+    34837,
+    0,
+    0
+   ],
+   "straight-op-outside-regions": [
+    34838,
+    0,
+    0
+   ]
+  },
+  "calls": 136622223,
+  "insts": 1594076261,
+  "gen": 1456381153,
+  "continued": 408721095,
+  "fill_wall": 29.41
+ },
+ "rodinia/gaussian": {
+  "rc": 0,
+  "wall": 3.6,
+  "exits": {
+   "store-gate": [
+    2817668,
+    0,
+    0
+   ],
+   "bssy-nop": [
+    5798,
+    0,
+    0
+   ],
+   "bsync": [
+    2899,
+    0,
+    0
+   ],
+   "exit": [
+    5662105,
+    0,
+    0
+   ],
+   "exit-no-lane-leaves": [
+    6953950,
+    0,
+    0
+   ],
+   "bar-yield-call-ret-warpsync": [
+    2899,
+    0,
+    0
+   ]
+  },
+  "calls": 15445319,
+  "insts": 146246043,
+  "gen": 137624280,
+  "continued": 44746455,
+  "fill_wall": 5.82
+ },
+ "rodinia/hotspot": {
+  "rc": 0,
+  "wall": 0.92,
+  "exits": {
+   "store-gate": [
+    191706,
+    0,
+    0
+   ],
+   "to-compiled-region": [
+    862707,
+    0,
+    0
+   ],
+   "bssy-nop": [
+    575145,
+    0,
+    0
+   ],
+   "bar-yield-call-ret-warpsync": [
+    1150281,
+    0,
+    0
+   ],
+   "straight-op-outside-regions": [
+    287576,
+    0,
+    0
+   ],
+   "interpreter-op": [
+    287568,
+    0,
+    0
+   ]
+  },
+  "calls": 3354983,
+  "insts": 47161306,
+  "gen": 38342515,
+  "continued": 6038951,
+  "fill_wall": 2.78
+ },
+ "polybench/SYRK": {
+  "rc": 0,
+  "wall": 4.87,
+  "exits": {
+   "store-gate": [
+    32744,
+    0,
+    0
+   ],
+   "exit": [
+    32751,
+    0,
+    0
+   ],
+   "exit-no-lane-leaves": [
+    32744,
+    0,
+    0
+   ]
+  },
+  "calls": 98239,
+  "insts": 194178695,
+  "gen": 91276043,
+  "continued": 2554516,
+  "fill_wall": 7.19
+ },
+ "polybench/SYR2K": {
+  "rc": 0,
+  "wall": 9.15,
+  "exits": {
+   "store-gate": [
+    32752,
+    0,
+    0
+   ],
+   "exit": [
+    32760,
+    0,
+    0
+   ],
+   "exit-no-lane-leaves": [
+    32752,
+    0,
+    0
+   ]
+  },
+  "calls": 98264,
+  "insts": 399144323,
+  "gen": 227188526,
+  "continued": 4357005,
+  "fill_wall": 11.56
+ },
+ "polybench/JACOBI1D": {
+  "rc": 0,
+  "wall": 1.01,
+  "exits": {
+   "store-gate": [
+    1272833,
+    0,
+    0
+   ],
+   "exit": [
+    39810,
+    0,
+    0
+   ],
+   "exit-no-lane-leaves": [
+    2507981,
+    0,
+    0
+   ]
+  },
+  "calls": 3820624,
+  "insts": 26746488,
+  "gen": 25473655,
+  "continued": 8916203,
+  "fill_wall": 2.04
+ },
+ "polybench/JACOBI2D": {
+  "rc": 0,
+  "wall": 0.53,
+  "exits": {
+   "store-gate": [
+    1268848,
+    0,
+    0
+   ],
+   "exit": [
+    81796,
+    0,
+    0
+   ],
+   "exit-no-lane-leaves": [
+    1189547,
+    0,
+    0
+   ]
+  },
+  "calls": 2540191,
+  "insts": 29856775,
+  "gen": 26047379,
+  "continued": 7625561,
+  "fill_wall": 1.76
+ },
+ "polybench/3DCONV": {
+  "rc": 0,
+  "wall": 0.63,
+  "exits": {
+   "store-gate": [
+    514194,
+    0,
+    0
+   ],
+   "exit": [
+    132602,
+    0,
+    0
+   ],
+   "exit-no-lane-leaves": [
+    385647,
+    0,
+    0
+   ]
+  },
+  "calls": 1032443,
+  "insts": 27325270,
+  "gen": 21669136,
+  "continued": 2587189,
+  "fill_wall": 1.44
+ },
+ "polybench/2DCONV": {
+  "rc": 0,
+  "wall": 0.67,
+  "exits": {
+   "store-gate": [
+    521512,
+    0,
+    0
+   ],
+   "exit": [
+    8278,
+    0,
+    0
+   ],
+   "exit-no-lane-leaves": [
+    513361,
+    0,
+    0
+   ]
+  },
+  "calls": 1043151,
+  "insts": 20862383,
+  "gen": 16168775,
+  "continued": 3651345,
+  "fill_wall": 1.38
+ },
+ "rodinia/lud": {
+  "rc": 0,
+  "wall": 2.91,
+  "exits": {
+   "uniform-branch-not-taken": [
+    2361,
+    2361,
+    0
+   ],
+   "store-gate": [
+    26,
+    0,
+    0
+   ],
+   "bssy-nop": [
+    32122,
+    0,
+    0
+   ],
+   "bsync": [
+    32122,
+    0,
+    0
+   ],
+   "exit": [
+    1984,
+    0,
+    0
+   ],
+   "bar-yield-call-ret-warpsync": [
+    713322,
+    2361,
+    0
+   ],
+   "straight-op-outside-regions": [
+    352,
+    0,
+    0
+   ]
+  },
+  "calls": 782289,
+  "insts": 19874495,
+  "gen": 16866189,
+  "continued": 3502321,
+  "fill_wall": 7.71
+ },
+ "rodinia/backprop": {
+  "rc": 0,
+  "wall": 0.52,
+  "exits": {
+   "exit": [
+    130088,
+    0,
+    0
+   ],
+   "bar-yield-call-ret-warpsync": [
+    520340,
+    0,
+    0
+   ]
+  },
+  "calls": 650428,
+  "insts": 12618152,
+  "gen": 9235952,
+  "continued": 650400,
+  "fill_wall": 2.1
+ },
+ "rodinia/pathfinder": {
+  "rc": 0,
+  "wall": 0.54,
+  "exits": {
+   "split-branch": [
+    9,
+    0,
+    0
+   ],
+   "store-gate": [
+    18278,
+    0,
+    0
+   ],
+   "bsync": [
+    18304,
+    9,
+    0
+   ],
+   "bar-yield-call-ret-warpsync": [
+    706529,
+    0,
+    0
+   ],
+   "straight-op-outside-regions": [
+    18312,
+    0,
+    0
+   ]
+  },
+  "calls": 761432,
+  "insts": 8631895,
+  "gen": 5659441,
+  "continued": 472239,
+  "fill_wall": 1.43
+ },
+ "hecbench/bilateral-cuda": {
+  "rc": 0,
+  "wall": 1.13,
+  "exits": {
+   "split-branch": [
+    70227,
+    0,
+    0
+   ],
+   "uniform-branch-taken": [
+    140446,
+    140446,
+    70221
+   ],
+   "uniform-branch-not-taken": [
+    210687,
+    210687,
+    70230
+   ],
+   "register-only-op": [
+    140460,
+    140460,
+    0
+   ],
+   "turn-budget": [
+    652,
+    0,
+    0
+   ],
+   "bssy-nop": [
+    1619630,
+    70227,
+    0
+   ],
+   "bsync": [
+    1177399,
+    70225,
+    0
+   ],
+   "exit-no-lane-leaves": [
+    1005,
+    0,
+    0
+   ],
+   "bar-yield-call-ret-warpsync": [
+    1221091,
+    0,
+    0
+   ],
+   "straight-op-outside-regions": [
+    123464,
+    0,
+    0
+   ],
+   "interpreter-op": [
+    2010,
+    0,
+    0
+   ]
+  },
+  "calls": 4566620,
+  "insts": 64666509,
+  "gen": 56161965,
+  "continued": 3986522,
+  "fill_wall": 10.71
+ },
+ "hecbench/bh-cuda": {
+  "rc": 0,
+  "wall": 0.67,
+  "exits": {
+   "split-branch": [
+    9727,
+    2783,
+    0
+   ],
+   "uniform-branch-taken": [
+    1739,
+    1739,
+    0
+   ],
+   "uniform-branch-not-taken": [
+    1729,
+    1729,
+    0
+   ],
+   "register-only-op": [
+    11122,
+    11122,
+    0
+   ],
+   "turn-budget": [
+    821,
+    0,
+    196
+   ],
+   "store-gate": [
+    157,
+    0,
+    0
+   ],
+   "to-compiled-region": [
+    625681,
+    0,
+    0
+   ],
+   "bssy-nop": [
+    1449350,
+    1473,
+    0
+   ],
+   "bsync": [
+    1469539,
+    95,
+    0
+   ],
+   "exit": [
+    542,
+    0,
+    0
+   ],
+   "exit-no-lane-leaves": [
+    156,
+    0,
+    0
+   ],
+   "bar-yield-call-ret-warpsync": [
+    9509,
+    6698,
+    0
+   ],
+   "straight-op-outside-regions": [
+    583,
+    0,
+    0
+   ],
+   "handler-op": [
+    8183,
+    6765,
+    0
+   ],
+   "interpreter-op": [
+    549777,
+    0,
+    0
+   ]
+  },
+  "calls": 4138419,
+  "insts": 40469007,
+  "gen": 31138172,
+  "continued": 3785991,
+  "fill_wall": 3.82
+ },
+ "hecbench/silu-cuda": {
+  "rc": 0,
+  "wall": 0.41,
+  "exits": {
+   "store-gate": [
+    180076,
+    0,
+    0
+   ],
+   "to-compiled-region": [
+    157742,
+    0,
+    0
+   ],
+   "bssy-nop": [
+    642592,
+    0,
+    0
+   ],
+   "bsync": [
+    480286,
+    0,
+    0
+   ],
+   "exit": [
+    39596,
+    0,
+    0
+   ],
+   "exit-no-lane-leaves": [
+    240863,
+    0,
+    0
+   ],
+   "bar-yield-call-ret-warpsync": [
+    322542,
+    0,
+    0
+   ]
+  },
+  "calls": 2063697,
+  "insts": 24177814,
+  "gen": 20370341,
+  "continued": 2085522,
+  "fill_wall": 7.52
+ },
+ "hecbench/aop-cuda": {
+  "rc": 0,
+  "wall": 1.97,
+  "exits": {
+   "store-gate": [
+    87649,
+    0,
+    0
+   ],
+   "bsync": [
+    12416,
+    0,
+    0
+   ],
+   "exit-no-lane-leaves": [
+    87648,
+    0,
+    0
+   ],
+   "straight-op-outside-regions": [
+    87648,
+    0,
+    0
+   ]
+  },
+  "calls": 275361,
+  "insts": 6107590,
+  "gen": 4456164,
+  "continued": 550720,
+  "fill_wall": 2.72
+ },
+ "hecbench/bitonic-sort-cuda": {
+  "rc": 0,
+  "wall": 0.22,
+  "exits": {
+   "bssy-nop": [
+    209306,
+    0,
+    0
+   ],
+   "exit": [
+    209306,
+    0,
+    0
+   ],
+   "exit-no-lane-leaves": [
+    67584,
+    0,
+    0
+   ]
+  },
+  "calls": 486196,
+  "insts": 15970325,
+  "gen": 13120735,
+  "continued": 763084,
+  "fill_wall": 1.09
+ }
+}

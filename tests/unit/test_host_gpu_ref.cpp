@@ -54,6 +54,16 @@ VTEST(reference_special_values) {
   VCHECK(ref::ulp_distance(0x80000000u, 0x00000000u) == 0);
   VCHECK(ref::fdiv_rn(bits(1.0f), bits(3.0f)) == bits(1.0f / 3.0f));
   VCHECK(ref::fdiv_rn(0u, 0u) == 0x7fffffffu);
+  // The IEEE forms of the card probe's sqrtrn and rcprn ops (sp43): correctly rounded, subnormals kept, NaN canonical.
+  VCHECK(ref::fsqrt_rn(bits(2.0f)) == bits(std::sqrt(2.0f)));
+  VCHECK(ref::fsqrt_rn(bits(4.0f)) == bits(2.0f));
+  VCHECK(ref::fsqrt_rn(0x00000001u) == bits(std::sqrt(std::bit_cast<float>(0x00000001u))));   // a subnormal is not flushed
+  VCHECK(ref::fsqrt_rn(bits(-1.0f)) == 0x7fffffffu);
+  VCHECK(ref::fsqrt_rn(0x80000000u) == 0x80000000u);                                          // sqrt(-0) = -0
+  VCHECK(ref::frcp_rn(bits(3.0f)) == bits(1.0f / 3.0f));
+  VCHECK(ref::frcp_rn(0x00000001u) == 0x7f800000u);                                           // 1 / 2^-149 overflows
+  VCHECK(ref::frcp_rn(0x00400000u) == 0x7f000000u);                                           // 1 / 2^-127 = 2^127: a subnormal divisor is not read as zero (the MUFU form says +inf)
+  VCHECK(ref::frcp_rn(0x7fc00001u) == 0x7fffffffu);
 }
 
 // The reference is the simulator's SIMD kernel, bit for bit, at every level this CPU has: RCP, RSQ, SQRT over a spread of every exponent and mantissa shape
@@ -160,6 +170,120 @@ VTEST(division_refinement_test_can_fail) {
   }
   VCHECK(total > 1000);
   VCHECK(bad > 0);
+}
+
+// ---- the integer division idiom (sp43; docs/performance.md "Round sp43", finding 3) ------------------------------------------------------------------------
+// Most MUFU.RCP of the refused kernels are not float divisions at all: they are the first step of ptxas's 32-bit integer `/` and `%` by a run-time divisor
+// (HeCBench mask, matrixT, md5hash, Rodinia backprop: I2F.RP, MUFU.RCP, IADD3 +0xffffffe, F2I.FTZ.U32.TRUNC.NTZ, a Newton step with IMAD.HI.U32, the
+// quotient estimate, and two corrections). The result is the exact quotient whatever the last bits of the reciprocal are, as long as the estimate is an
+// underestimate of 2^32 / y that is less than 2 off. This is the sequence of `mask-cuda`'s kernels (cuobjdump of sm_86, ptxas 13.0) as code:
+//   R4 = I2F.RP(y)          the float above y (round toward +inf)
+//   R2 = MUFU.RCP(R4)       the card's reciprocal (the simulator's: correctly rounded; the card's: within one ulp)
+//   R4 = R2 + 0xffffffe     as integer bits: times 2^32 and a little under (two units in the 23rd place)
+//   q0 = F2I.FTZ.U32.TRUNC.NTZ(R4)
+//   t  = (-q0) * y          low 32 bits
+//   q1 = IMAD.HI.U32(q0, t, {q0:0})  = q0 + (q0 * t >> 32)       (the 64-bit addend is the pair whose high word is q0)
+//   q  = IMAD.HI.U32(q1, x, RZ);  r = x - q * y;  if (!(y > r)) { r -= y; ++q; }  if (r >= y) ++q;
+// What is proven here, with no card: for EVERY divisor y (VGPU_EXHAUSTIVE=1; a spread of 1.05e6 by default) the estimate q1 satisfies q1 * y <= 2^32 (never
+// over) and (q1 + 2) * y > 2^32 (less than 2 under), for the simulator's reciprocal and for one that is up to 1 ulp off either way (the card's bound is 1 ulp of
+// the exact value, the simulator's 0.5 ulp, so 2 covers any pair). Then q = floor(x * q1 / 2^32) is at most the true quotient and at most 2 below it for
+// every x < 2^32 (x / y - x * q1 / 2^32 < 2 x / 2^32 < 2), which the two corrections repair: the result is x / y exactly on the card (C semantics) and in
+// the simulator, whatever the reciprocal's low bits. The test is the analysis; whether a kernel's instructions really are this chain is the recognizer's job
+// (not written: see the doc, and tools/probes/hostgpu_mufu_card_experiment.sh for the card run that gates it).
+namespace {
+uint32_t idiv_q0(uint32_t y, int ulps) {
+  float f = static_cast<float>(y);                                    // I2F.RP: round toward +inf
+  if (static_cast<double>(f) < static_cast<double>(y)) f = std::nextafter(f, INFINITY);
+  const uint32_t r = ref::mufu(ref::Fn::Rcp, std::bit_cast<uint32_t>(f)) + static_cast<uint32_t>(ulps);   // the reciprocal, shifted by whole ulps (a normal positive float)
+  const float g = std::bit_cast<float>(r + 0x0ffffffeu);
+  return g >= 4294967296.0f ? 0xffffffffu : static_cast<uint32_t>(g);   // F2I.FTZ.U32.TRUNC (a float below 2^32 truncates; the instruction saturates above)
+}
+uint32_t idiv_q1(uint32_t y, int ulps) {
+  const uint32_t q0 = idiv_q0(y, ulps);
+  const uint32_t t = (0u - q0) * y;
+  return q0 + static_cast<uint32_t>((static_cast<uint64_t>(q0) * t) >> 32);
+}
+uint32_t idiv_model(uint32_t x, uint32_t y, int ulps) {
+  const uint32_t q1 = idiv_q1(y, ulps);
+  uint32_t q = static_cast<uint32_t>((static_cast<uint64_t>(q1) * x) >> 32);
+  uint32_t r = x - q * y;
+  if (!(y > r)) { r -= y; ++q; }
+  if (r >= y) ++q;
+  return q;
+}
+// 0 when the estimate for divisor y is an underestimate less than 2 off.
+bool idiv_estimate_ok(uint32_t y, int ulps) {
+  const uint32_t q1 = idiv_q1(y, ulps);
+  const unsigned __int128 two32 = static_cast<unsigned __int128>(1) << 32;
+  return static_cast<unsigned __int128>(q1) * y <= two32 && static_cast<unsigned __int128>(q1 + 2ull) * y > two32;
+}
+}  // namespace
+
+VTEST(integer_division_estimate_is_a_close_underestimate_for_every_divisor) {
+  const uint32_t step = exhaustive() ? 1 : 4093;
+  uint64_t bad[3] = {0, 0, 0}, tested = 0;
+  uint32_t first = 0;
+  const auto check = [&](uint32_t y) {
+    ++tested;
+    for (int u = -1; u <= 1; ++u)
+      if (!idiv_estimate_ok(y, u) && !bad[u + 1]++ && !first) first = y;
+  };
+  for (uint64_t y = 1; y < (1ull << 32); y += step) check(static_cast<uint32_t>(y));
+  for (int b = 0; b < 32; ++b)   // every power of two and its neighbours, where the float rounding and the exponent change
+    for (int d = -3; d <= 3; ++d) {
+      const int64_t y = (int64_t{1} << b) + d;
+      if (y >= 1 && y < (int64_t{1} << 32)) check(static_cast<uint32_t>(y));
+    }
+  for (uint32_t y : {0xffffffffu, 0xfffffffeu, 0x80000000u, 0x7fffffffu, 3u, 5u, 7u, 10u, 641u}) check(y);
+  VCHECK(tested > 1000000);
+  std::string report;
+  for (int u = 0; u < 3; ++u)
+    if (bad[u]) report += " reciprocal " + std::to_string(u - 1) + " ulps off: " + std::to_string(bad[u]) + " divisors;";
+  if (!report.empty()) throw vtest::Failure("the estimate is not a close underestimate:" + report + " of " + std::to_string(tested) + ", first y=0x" + hex(first));
+}
+
+VTEST(integer_division_with_a_reciprocal_up_to_1_ulp_off_is_exact) {
+  std::mt19937_64 rng(7);
+  const uint32_t edges[] = {0u, 1u, 2u, 3u, 0x7fffffffu, 0x80000000u, 0x80000001u, 0xfffffffeu, 0xffffffffu, 12345u, 0x01234567u};
+  uint64_t n = 0;
+  const auto check = [&](uint32_t x, uint32_t y) {
+    if (!y) return;
+    for (int u = -1; u <= 1; ++u) {
+      ++n;
+      const uint32_t got = idiv_model(x, y, u);
+      if (got != x / y) throw vtest::Failure("x=0x" + hex(x) + " y=0x" + hex(y) + ": quotient 0x" + hex(got) + " instead of 0x" + hex(x / y) + " with the reciprocal " + std::to_string(u) + " ulps off");
+    }
+  };
+  for (uint32_t x : edges)
+    for (uint32_t y : edges) check(x, y);
+  const uint64_t pairs = exhaustive() ? 400000000ull : 1000000ull;
+  for (uint64_t i = 0; i < pairs; ++i) {
+    const uint64_t r = rng();
+    uint32_t x = static_cast<uint32_t>(r), y = static_cast<uint32_t>(r >> 32);
+    switch (i % 4) {   // divisors of every magnitude, and dividends next to multiples of the divisor (where a quotient is one off)
+      case 1: y >>= (r >> 59) & 31; break;
+      case 2: if (y) { const uint32_t k = static_cast<uint32_t>(rng()) % (0xffffffffu / y + 1); x = k * y + (static_cast<uint32_t>(r) % 3) - 1; } break;
+      case 3: y = (y >> 24) | 1u; break;
+      default: break;
+    }
+    check(x, y);
+  }
+  VCHECK(n > 3000000);
+}
+
+// The proof above has teeth: a reciprocal 100 ulps off, an estimate pushed 4 above, and a reciprocal 2 ulps off (the margin of the offset is one ulp) all fail the bounds.
+VTEST(integer_division_bounds_can_fail) {
+  uint64_t far = 0, over = 0, two = 0;
+  for (uint64_t y = 3; y < (1ull << 32); y += 99991) {
+    const uint32_t yy = static_cast<uint32_t>(y);
+    if (!idiv_estimate_ok(yy, 100) || !idiv_estimate_ok(yy, -100)) ++far;
+    over += static_cast<unsigned __int128>(idiv_q1(yy, 0) + 4ull) * yy > (static_cast<unsigned __int128>(1) << 32);
+    if (!idiv_estimate_ok(yy, 2)) ++two;
+  }
+  for (uint64_t y = 3; y < (1ull << 32); y += 1021) two += !idiv_estimate_ok(static_cast<uint32_t>(y), 2);
+  VCHECK(far > 0);
+  VCHECK(over > 0);
+  VCHECK(two > 0);
 }
 
 VTEST_MAIN

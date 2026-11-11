@@ -281,6 +281,7 @@ add_library(vgpu STATIC
   src/exec/worker_pool.cpp
   src/runtime/runtime.cpp
   src/runtime/memo.cpp
+  src/runtime/host_stats.cpp
   src/runtime/host_gpu.cpp
   src/runtime/shared_runtime.cpp
   src/runtime/visible_devices.cpp
@@ -1452,6 +1453,8 @@ vgpu_unit_test(test_ptx_block_reuse)
 # The host threads that run a grid's blocks, kept between launches: reuse,
 # nesting, several callers, fork; and the same kernels at 1, 2 and N threads.
 vgpu_unit_test(test_worker_pool)
+# VGPU_HOST_STATS: the host-kernel counters line for a run that is slower on one kernel than another (#551).
+vgpu_unit_test(test_host_stats)
 vgpu_unit_test(test_sched)
 # The SASS executor's atomics (vgpu/exec/sass_atomics.hpp), and its lane-state helpers and shuffle shapes (vgpu/exec/sass_lanes.hpp,
 # src/sass/tier.hpp), against the lane-by-lane code they replaced.
@@ -1533,6 +1536,7 @@ add_test(NAME test_sass_store_gate_tier0 COMMAND test_sass_store_gate)
 set_tests_properties(test_sass_store_gate_tier0 PROPERTIES ENVIRONMENT "VGPU_TIER=0")
 # The run loop going on past S2R, ULDC, UMOV, USEL, PLOP3 and SEL where the chain would have started the next call there: same words, counters and clocks as the interpreter.
 vgpu_unit_test(test_sass_chain_cont)
+target_include_directories(test_sass_chain_cont PRIVATE src)   # (src/sass/jit.hpp: the statistics the linking check reads)
 # What the run loop counts and when it stops, op by op, against the interpreter's: the lanes a guard leaves and their count, the group's count between
 # calls of the chain, a lane's exit or an op's fault in the middle of a run, and the step budget ended at every offset.
 vgpu_unit_test(test_sass_dispatch_counts)
@@ -1547,6 +1551,23 @@ foreach(_t test_sass_chain_cont test_sass_store_gate test_sass_alu_runs test_sas
   set_tests_properties(${_t}_jit PROPERTIES ENVIRONMENT
     "VGPU_JIT=1;VGPU_JIT_THRESHOLD=1;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-${_t}")
 endforeach()
+# And with linking (VGPU_JIT_LINK=1, round sp52: the generated code goes on past a branch or cont op in a diverged warp while the chain would pick its group again):
+# test_sass_chain_cont's kernels diverge, loop apart and meet; the same words, counters and clocks as the interpreter, and the linking must have happened.
+# (VGPU_JIT_LINK_RULE=0: every section linked. The loop rule of round sp53 leaves a section with a loop and no BSSY, BSYNC, CALL or RET unlinked, and several of
+# these hand-written kernels are such sections; test_sass_chain_cont_jit_link_rule below runs with the rule and checks what it declines and what it leaves linked.)
+# (VGPU_JIT_LINK_BSYNC=1: BSYNC as a region's op, an opt-in of its own; test_sass_chain_cont checks that the generated code ran its kernels' BSYNCs.)
+foreach(_t test_sass_chain_cont test_sass_store_gate test_sass_alu_runs test_sass_dispatch_counts)
+  add_test(NAME ${_t}_jit_link COMMAND ${_t})
+  set_tests_properties(${_t}_jit_link PROPERTIES ENVIRONMENT
+    "VGPU_JIT=1;VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_LINK_RULE=0;VGPU_JIT_STATS=1;VGPU_JIT_STATS_FILE=/dev/null;VGPU_JIT_THRESHOLD=1;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-link-${_t}")
+endforeach()
+# ... and linking as it is by default (BSYNC the run loop's), on the kernels that diverge:
+add_test(NAME test_sass_chain_cont_jit_link_nobsync COMMAND test_sass_chain_cont)
+set_tests_properties(test_sass_chain_cont_jit_link_nobsync PROPERTIES ENVIRONMENT
+  "VGPU_JIT=1;VGPU_JIT_LINK=1;VGPU_JIT_LINK_RULE=0;VGPU_JIT_STATS=1;VGPU_JIT_STATS_FILE=/dev/null;VGPU_JIT_THRESHOLD=1;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-link-nobsync-test_sass_chain_cont")
+add_test(NAME test_sass_chain_cont_jit_link_rule COMMAND test_sass_chain_cont)
+set_tests_properties(test_sass_chain_cont_jit_link_rule PROPERTIES ENVIRONMENT
+  "VGPU_JIT=1;VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_STATS=1;VGPU_JIT_STATS_FILE=/dev/null;VGPU_JIT_THRESHOLD=1;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-link-rule-test_sass_chain_cont")
 vgpu_unit_test(test_sass_s2r_fill)
 # LDGSTS (cp.async): the tier's own handler against the rule and the interpreter, registers, shared memory and counters.
 vgpu_unit_test(test_sass_ldgsts)
@@ -2281,6 +2302,20 @@ target_include_directories(link_devrt PRIVATE nvidia/include)
 target_link_libraries(link_devrt PRIVATE vgpucuda)
 add_test(NAME c_harness_link_devrt COMMAND link_devrt)
 set_tests_properties(c_harness_link_devrt PROPERTIES ENVIRONMENT "VGPU_GPU=nvidia/h100")
+
+# PTX the driver takes or refuses -- ld.weak, 70,000 declared registers, the JIT error log, a .version too
+# new, malformed input to cuLinkAddData -- and the NVRTC floating-point options, each as an RTX 3060 does.
+add_executable(ptx_driver_jit nvidia/tests/c_harness/ptx_driver_jit.c)
+target_include_directories(ptx_driver_jit PRIVATE nvidia/include include)
+target_link_libraries(ptx_driver_jit PRIVATE vgpucuda ${CMAKE_DL_LIBS})
+if(TARGET vgpunvrtc)
+  add_test(NAME c_harness_ptx_driver_jit COMMAND ptx_driver_jit $<TARGET_FILE:vgpunvrtc>)
+  set_tests_properties(c_harness_ptx_driver_jit PROPERTIES DEPENDS vgpunvrtc)
+else()
+  add_test(NAME c_harness_ptx_driver_jit COMMAND ptx_driver_jit)
+endif()
+set_tests_properties(c_harness_ptx_driver_jit PROPERTIES
+  ENVIRONMENT "VGPU_GPU=nvidia/h100;VGPU_NVRTC=nvcc;VGPU_QUIET=1")
 
 # The register C API for bring-up software (vgpu_regs.h), and a plain C
 # program against it.
@@ -3020,7 +3055,7 @@ if(TARGET vgpucublas)
                           "cutensornet_paths:cutensornet" "cutensornet_state_paths:cutensornet" "cutensornet_state_gradient:cutensornet" "cutensornet_decomp_paths:cutensornet"
                           "solver_metis_paths:cusolver:cusparse"
                           "blas_u8gemm_paths:cublas" "blas_emulation_paths:cublas" "sparse_color_paths:cusparse"
-                          "lt_emulation_paths:cublasLt:cublas")
+                          "lt_emulation_paths:cublasLt:cublas" "fft_inplace_real:cufft" "blas_tf32_rounding:cublas:cublasLt")
     string(REPLACE ":" ";" _parts "${_check}")
     list(POP_FRONT _parts _name)
     add_test(NAME e2e_${_name}
@@ -3039,6 +3074,14 @@ if(TARGET vgpucublas)
       SKIP_REGULAR_EXPRESSION "^SKIP:"
       TIMEOUT 300)
   endforeach()
+
+  # The same TF32 program with NVIDIA_TF32_OVERRIDE=0: TF32 is off everywhere, explicit FAST_TF32 included.
+  add_test(NAME e2e_blas_tf32_override
+           COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_lib_check.sh blas_tf32_rounding cublas cublasLt)
+  set_tests_properties(e2e_blas_tf32_override PROPERTIES
+    ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR};NVIDIA_TF32_OVERRIDE=0"
+    SKIP_REGULAR_EXPRESSION "^SKIP:"
+    TIMEOUT 300)
 
   # cuSOLVER's Jacobi solvers (syevd, syevj, gesvd, gesvdj), each result checked by its defining property and, on the
   # simulator, bit for bit against what the plain loops gave before their sweeps were put on vector lanes.
@@ -3404,6 +3447,13 @@ if(TARGET vgpucublas)
   add_test(NAME e2e_spin_lock_bsync
            COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_spin_lock_bsync.sh)
   set_tests_properties(e2e_spin_lock_bsync PROPERTIES
+    DEPENDS vgpucudart
+    ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
+    TIMEOUT 300)
+
+  add_test(NAME e2e_spin_claim_nanosleep
+           COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_spin_claim_nanosleep.sh)
+  set_tests_properties(e2e_spin_claim_nanosleep PROPERTIES
     DEPENDS vgpucudart
     ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
     TIMEOUT 300)
@@ -3881,6 +3931,17 @@ if(TARGET vgpucudart)
   set_tests_properties(e2e_dpx_intrinsics PROPERTIES
     DEPENDS vgpucudart
     ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR};VGPU_SASS_PROGRAMS=dpx_intrinsics:75;VGPU_SASS_ARCHS=sm_80 sm_89 sm_90 sm_120"
+    SKIP_REGULAR_EXPRESSION "^SKIP:"
+    TIMEOUT 1800)
+endif()
+
+# min and max in every PTX form (f32, f16, f16x2, bf16, bf16x2 with .ftz, .NaN and .xorsign.abs; the sm_100 three-input f32 forms), against a
+# model of the ISA, on sm_80 and up, SASS (interpreter and tier) and PTX (pantheonsim #547 and its siblings).
+if(TARGET vgpucudart)
+  add_test(NAME e2e_minmax_forms COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_sass_archs.sh)
+  set_tests_properties(e2e_minmax_forms PROPERTIES
+    DEPENDS vgpucudart
+    ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR};VGPU_SASS_PROGRAMS=minmax_forms:80;VGPU_SASS_ARCHS=sm_80 sm_86 sm_89 sm_90 sm_100 sm_120"
     SKIP_REGULAR_EXPRESSION "^SKIP:"
     TIMEOUT 1800)
 endif()
@@ -4380,6 +4441,17 @@ if(TARGET vgpucudart)
     TIMEOUT 600)
 endif()
 
+# Which matrix element each WMMA fragment element is, for every shape and type (the card's layout), and the accumulator-masked-by-an-A-
+# fragment pattern of tiny-cuda-nn's fused backward pass; on the SASS engine and on the PTX engine.
+if(TARGET vgpucudart)
+  add_test(NAME e2e_wmma_fragment_layout COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_wmma_fragment_layout.sh)
+  set_tests_properties(e2e_wmma_fragment_layout PROPERTIES
+    DEPENDS vgpucudart
+    ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
+    SKIP_REGULAR_EXPRESSION "^SKIP:"
+    TIMEOUT 600)
+endif()
+
 # Dynamic parallelism: device-side launches, nesting, order, named streams.
 if(TARGET vgpucudart)
   add_test(NAME e2e_dynamic_parallelism COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_dynamic_parallelism.sh)
@@ -4713,6 +4785,9 @@ add_test(NAME pantheon_workload_verdicts
 # And the PATH it starts vgpu shell with, which must not hold the Action's drop-in nvcc.
 add_test(NAME pantheon_workload_path
          COMMAND ${CMAKE_SOURCE_DIR}/tests/workloads/path_test.sh)
+# And the summary table, which names the machine whose job left no report.
+add_test(NAME pantheon_workload_matrix
+         COMMAND python3 ${CMAKE_SOURCE_DIR}/tests/workloads/workload_matrix_test.py)
 add_test(NAME pantheon_workloads
          COMMAND ${CMAKE_SOURCE_DIR}/tests/workloads/run_pantheon_workloads.sh)
 set_tests_properties(pantheon_workloads PROPERTIES
@@ -4772,7 +4847,7 @@ endif()
 foreach(_t e2e_cutlass_gemm e2e_cutlass_sm120 e2e_cutlass_sm100 e2e_cutlass_hopper e2e_cutlass_sm103
            e2e_cutlass_sm100_conv e2e_cutlass_fmha e2e_tma_gemm_cute e2e_wgmma_cute
            e2e_tma_reduce_cute e2e_tensormap_replace_cute e2e_sass_archs e2e_device_runtime
-           e2e_sync_masks e2e_dpx_intrinsics e2e_packed_f32x2)
+           e2e_sync_masks e2e_dpx_intrinsics e2e_minmax_forms e2e_packed_f32x2)
   if(TEST ${_t})
     set_property(TEST ${_t} APPEND PROPERTY RESOURCE_LOCK nvcc_memory)
   endif()

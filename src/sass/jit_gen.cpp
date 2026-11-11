@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 #include <string>
 
 #include "jit.hpp"
@@ -290,6 +291,118 @@ bool generates(const OpFacts& o) {
   }
 }
 
+// ---- fused runs (round sp48; jit.hpp) ---------------------------------------------------------------------------------------
+
+namespace {
+// A 32-bit source of a fused op that is the same in every lane and does not change within the run (no fused form writes a uniform register or the
+// constant bank): a scalar expression, or "" for a source that is a register row.
+std::string fused_scalar(const SrcFacts& x, bool flt) {
+  char buf[128] = "";
+  if (is_pool(x)) std::snprintf(buf, sizeof buf, "0x%xu", x.val);
+  else if (is_dyn(x, Dyn::Bank0)) std::snprintf(buf, sizeof buf, "tmod(%s, %uu, b0w(c, %uu))", flt ? "true" : "false", unsigned{x.mod}, x.off);
+  else if (is_dyn(x, Dyn::UReg)) std::snprintf(buf, sizeof buf, "tmod(%s, %uu, c->ur[%u])", flt ? "true" : "false", unsigned{x.mod}, x.off);
+  return buf;
+}
+bool fused_float(Form f) { return f == Form::Ffma || f == Form::Fadd || f == Form::Fmul; }
+unsigned fused_nsrc(Form f) { return f == Form::Mov ? 1u : (f == Form::Fadd || f == Form::Fmul || f == Form::Lea) ? 2u : 3u; }
+}  // namespace
+
+bool fusable(const OpFacts& o) {
+  if (!o.unguarded || o.br || o.cont || o.store || o.form == 0 || !generates(o)) return false;
+  switch (static_cast<Form>(o.form)) {
+    case Form::Mov: case Form::Iadd3: case Form::Imad: return true;
+    case Form::Lop3: return !(o.aux & 1);                                       // (no predicate result)
+    case Form::Lea: return !(o.aux & (1 | 2 | 8)) && o.dst2 == kNoReg;          // the plain form: (a << sh) + b, no carry in or out
+    case Form::Ffma: case Form::Fadd: case Form::Fmul: return o.a == 0 && o.b == 0;   // (round to nearest, no FTZ: the forms of fadd_k, fmul_k, ffma_k)
+    default: return false;
+  }
+}
+
+std::string gen_fused_run(const OpFacts* ops, uint32_t n, bool full) {
+  W w, pre;
+  std::set<unsigned> have, written;
+  // The value of register row `reg` for the lanes of this block: the variable the run has for it, read from the register file the first time.
+  const auto use = [&](unsigned reg) {
+    char name[24];
+    std::snprintf(name, sizeof name, "g%u", reg);
+    if (!have.count(reg) || (mut("fuse_stale") && written.count(reg))) {
+      if (have.count(reg)) w.f("      g%u = ld8(R + %uu + q);\n", reg, reg * 32u);
+      else w.f("      V8u g%u = ld8(R + %uu + q);\n", reg, reg * 32u);
+      have.insert(reg);
+    }
+    return std::string(name);
+  };
+  for (uint32_t i = 0; i < n; ++i) {
+    const OpFacts& o = ops[i];
+    const Form form = static_cast<Form>(o.form);
+    const bool flt = fused_float(form);
+    std::string a[3];
+    for (unsigned k = 0; k < fused_nsrc(form); ++k) {
+      const SrcFacts& x = o.s[k];
+      char buf[160];
+      if (is_row(x)) a[k] = use(x.off / 32u);
+      else if (is_dyn(x, Dyn::Reg)) {
+        std::snprintf(buf, sizeof buf, "tmod8(%s, %uu, %s)", flt ? "true" : "false", unsigned{x.mod}, use(x.off).c_str());
+        a[k] = buf;
+      } else {   // the same word in every lane: worked out once, before the loop
+        pre.f("    const u32 k%u_%u = %s;\n", i, k, fused_scalar(x, flt).c_str());
+        std::snprintf(buf, sizeof buf, "sp8(k%u_%u)", i, k);
+        a[k] = buf;
+      }
+    }
+    w.f("      const V8u t%u = ", i);
+    switch (form) {
+      case Form::Mov: w.f("%s", a[0].c_str()); break;
+      case Form::Iadd3: w.f("%s + %s + %s + sp8(%uu)", a[0].c_str(), a[1].c_str(), a[2].c_str(), o.a); break;   // iadd3_k
+      case Form::Imad: w.f("%s * %s + %s", a[0].c_str(), a[1].c_str(), a[2].c_str()); break;                     // imad_k
+      case Form::Lop3: {   // lop3_k: each set bit t of the table is one minterm of (a, b, c)
+        std::string e;
+        for (unsigned t = 0; t < 8; ++t)
+          if ((o.a >> t) & 1) {
+            if (!e.empty()) e += " | ";
+            e += std::string("(") + ((t & 4) ? "" : "~") + a[0] + " & " + ((t & 2) ? "" : "~") + a[1] + " & " + ((t & 1) ? "" : "~") + a[2] + ")";
+          }
+        w.s += e.empty() ? std::string("sp8(0u)") : e;
+        break;
+      }
+      case Form::Lea:   // h_lea, the plain form
+        if (o.a >= 32) w.f("%s", a[1].c_str());
+        else w.f("(%s << %uu) + %s", a[0].c_str(), o.a, a[1].c_str());
+        break;
+      case Form::Ffma: w.f("ffma8(%s, %s, %s)", a[0].c_str(), a[1].c_str(), a[2].c_str()); break;   // ffma_k
+      case Form::Fadd: w.f("fadd8(%s, %s)", a[0].c_str(), a[1].c_str()); break;                      // fadd_k
+      case Form::Fmul: w.f("fmul8(%s, %s)", a[0].c_str(), a[1].c_str()); break;                      // fmul_k
+      default: break;
+    }
+    w.f(";  // op +%u %s\n", i, tier::form_name(form));
+    if (o.dst == kNoReg) continue;
+    const unsigned d = o.dst;
+    char val[48];
+    std::snprintf(val, sizeof val, mut((std::string("fuse_") + tier::form_name(form)).c_str()) ? "(t%u ^ sp8(1u))" : "t%u", i);   // (mutants fuse_mov, fuse_iadd3, ...)
+    if (full || mut("fuse_noblend")) {   // the whole warp runs it: the row is the result
+      w.f(have.count(d) ? "      g%u = %s;\n" : "      V8u g%u = %s;\n", d, val);
+      have.insert(d);
+    } else {                             // the lanes outside the group keep what the register holds
+      const std::string old = use(d);
+      w.f("      %s = bl8(m, %s, %s);\n", old.c_str(), val, old.c_str());
+    }
+    written.insert(d);
+  }
+  std::string out = pre.s;
+  out += "    for (unsigned q = 0; q < 32; q += 8) {\n";
+  if (!full) out += "      const V8u m = lm8(ex, q);\n";
+  out += w.s;
+  unsigned skip = mut("fuse_nostore") && !written.empty() ? *written.rbegin() : ~0u;
+  for (unsigned reg : written)
+    if (reg != skip) {
+      char buf[96];
+      std::snprintf(buf, sizeof buf, "      st8(R + %uu + q, g%u);\n", reg * 32u, reg);
+      out += buf;
+    }
+  out += "    }\n";
+  return out;
+}
+
 std::string gen_op_body(const OpFacts& o, RowCtx& rc) {
   g_rc = &rc;
   rc.reads.clear();
@@ -437,7 +550,7 @@ std::string gen_op_body(const OpFacts& o, RowCtx& rc) {
     case Form::Fsel:   // h_fsel
       decl_src(w, o.s[0], 0, true);
       decl_src(w, o.s[1], 1, true);
-      w.f("    u32 r[32]; for (unsigned l = 0; l < 32; ++l) r[l] = A1[l];\n    blend_m_k(r, A0, %s);\n", pm(w, o.p, pa, sizeof pa));
+      w.f("    u32 r[32]; cprow(r, A1);\n    blend_m_k(r, A0, %s);\n", pm(w, o.p, pa, sizeof pa));
       store(w, o.dst, "r");
       break;
     case Form::Ffma:   // h_ffma (no directed rounding: that stays an escape)
@@ -481,7 +594,7 @@ std::string gen_op_body(const OpFacts& o, RowCtx& rc) {
     case Form::Sel:   // h_sel: b where the predicate is clear, a where it holds
       decl_src(w, o.s[0], 0, false);
       decl_src(w, o.s[1], 1, false);
-      w.f("    u32 r[32]; for (unsigned l = 0; l < 32; ++l) r[l] = A1[l];\n    blend_m_k(r, A0, %s);\n", pm(w, o.p, pa, sizeof pa));
+      w.f("    u32 r[32]; cprow(r, A1);\n    blend_m_k(r, A0, %s);\n", pm(w, o.p, pa, sizeof pa));
       store(w, o.dst, "r");
       break;
     case Form::Plop3: {   // h_plop3: for each lane the table bit the three predicates select, into two predicates

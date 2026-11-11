@@ -54,6 +54,7 @@
 #include "vgpu/sass/exec.hpp"
 #include "vgpu/cuda_attributes.hpp"
 #include "vgpu/driver_version.hpp"
+#include "vgpu/ptx/parser.hpp"
 #include "vgpu/error.hpp"
 #include "vgpu/exec/tensormap.hpp"
 #include "vgpu/exec/texture.hpp"
@@ -329,6 +330,10 @@ int trace_level() {
 bool trace() { return trace_level() >= 1; }
 bool trace_calls() { return trace_level() >= 2; }
 
+// The message of the last error an API body threw on this thread: what a JIT error log
+// (CU_JIT_ERROR_LOG_BUFFER) is filled from, as the driver's is from ptxas's output.
+thread_local std::string t_last_error;
+
 void report(const char* api, const std::string& msg) {
   if (!quiet()) std::fprintf(stderr, "[vgpu] %s: %s\n", api, msg.c_str());
 }
@@ -340,6 +345,8 @@ CUresult map_error(const vgpu::Error& e, bool kernel_context) {
     case Err::UnknownGpu: return CUDA_ERROR_INVALID_DEVICE;
     case Err::PtxParse: return CUDA_ERROR_INVALID_PTX;
     case Err::UnsupportedPtx: return CUDA_ERROR_NOT_SUPPORTED;
+    case Err::PtxVersion: return CUDA_ERROR_UNSUPPORTED_PTX_VERSION;
+    case Err::InvalidImage: return CUDA_ERROR_INVALID_IMAGE;
     case Err::Unsupported: return CUDA_ERROR_NOT_SUPPORTED;
     case Err::NotFound: return CUDA_ERROR_NOT_FOUND;
     case Err::ExecLimit: return CUDA_ERROR_LAUNCH_TIMEOUT;
@@ -506,6 +513,7 @@ CUresult api(const char* name, bool needs_init, bool kernel_context, F&& body) {
     return r;
   } catch (const vgpu::Error& e) {
     report(name, e.what());
+    t_last_error = e.message();
     CUresult r = map_error(e, kernel_context);
     if (s.initialized && poisons_context(e.code(), kernel_context)) {
       s.rt->set_context_fault(static_cast<int>(r));
@@ -1676,6 +1684,37 @@ static void announce_module_loaded(uintptr_t handle, int device, const uint8_t* 
   }
 }
 
+// What the driver tells apart before it hands PTX text to its compiler (measured on an RTX 3060,
+// driver 596, PTX ISA 9.3): text whose first token, after white space and comments, is not
+// ".version" is "not recognized" (CUDA_ERROR_INVALID_IMAGE), and a .version past 9.3 is
+// CUDA_ERROR_UNSUPPORTED_PTX_VERSION whatever follows it. Everything else is the compiler's
+// to judge (CUDA_ERROR_INVALID_PTX). `len` is the text's length, or (size_t)-1 for a C string.
+static void check_ptx_image(const char* text, size_t len) {
+  if (len == static_cast<size_t>(-1)) len = std::strlen(text);
+  size_t i = 0, line = 1;
+  while (i < len) {
+    const char c = text[i];
+    if (c == '\n') { ++line; ++i; }
+    else if (c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v') ++i;
+    else if (c == '/' && i + 1 < len && text[i + 1] == '/') { while (i < len && text[i] != '\n') ++i; }
+    else if (c == '/' && i + 1 < len && text[i + 1] == '*') {
+      i += 2;
+      while (i + 1 < len && !(text[i] == '*' && text[i + 1] == '/')) { if (text[i] == '\n') ++line; ++i; }
+      i = std::min(len, i + 2);
+    } else break;
+  }
+  static const char kVersion[] = ".version";
+  const size_t n = sizeof kVersion - 1;
+  if (len - i < n || std::memcmp(text + i, kVersion, n) != 0 ||
+      (len - i > n && !std::isspace(static_cast<unsigned char>(text[i + n]))))
+    throw vgpu::Error::make(vgpu::Err::InvalidImage, "Can't load this binary kind, as it's not recognized");
+  const std::string rest(text + i + n, std::min<size_t>(len - i - n, 32));
+  int major = 0, minor = 0;
+  if (std::sscanf(rest.c_str(), " %d.%d", &major, &minor) == 2 && (major > 9 || (major == 9 && minor > 3)))
+    throw vgpu::Error::make(vgpu::Err::PtxVersion, "line ", line, "; fatal   : Unsupported .version ", major, ".", minor,
+                            "; current version is '9.3'");
+}
+
 static CUresult cuModuleLoadData_impl(CUmodule* module, const void* image) {
   return api("cuModuleLoadData", true, false, [&](ShimState& s) {
     if (!module || !image) return CUDA_ERROR_INVALID_VALUE;
@@ -1727,6 +1766,7 @@ static CUresult cuModuleLoadData_impl(CUmodule* module, const void* image) {
       }
       loaded_cubin.assign(b, b + size);
     } else {
+      check_ptx_image(text, static_cast<size_t>(-1));
       mid = s.rt->device(dev).load_module(text);
     }
     bind_managed_globals(s, dev, mid);
@@ -1807,7 +1847,25 @@ static CUresult cuDevicePrimaryCtxReset_impl(CUdevice dev) {
 struct LinkState {
   std::vector<std::string> inputs;  // PTX modules, in the order they were added
   std::string image;                // merged result, kept alive until destroy
+  // CU_JIT_ERROR_LOG_BUFFER and its size, as cuLinkCreate was given them: a failed add or
+  // complete says why there, as the driver's linker does with ptxas's output.
+  char* error_buf = nullptr;
+  size_t error_cap = 0;
+  void** error_size_slot = nullptr;  // the caller's slot for CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES
+  size_t error_len = 0;
 };
+
+// Appends `msg` to the link state's error log, when the caller asked for one.
+void link_log_error(LinkState& st, const std::string& msg) {
+  if (!st.error_buf || st.error_cap == 0) return;
+  const std::string line = msg + "\n";
+  const size_t room = st.error_cap - 1 - std::min(st.error_len, st.error_cap - 1);
+  const size_t n = std::min(room, line.size());
+  std::memcpy(st.error_buf + st.error_len, line.data(), n);
+  st.error_len += n;
+  st.error_buf[st.error_len] = '\0';
+  if (st.error_size_slot) *st.error_size_slot = reinterpret_cast<void*>(st.error_len);
+}
 
 std::mutex& link_mutex() {
   static std::mutex m;
@@ -1940,6 +1998,15 @@ void link_add(LinkState& st, int type, const void* data, size_t size, const char
   // PTX may or may not carry a terminating NUL inside the reported size.
   size_t len = size;
   while (len > 0 && text[len - 1] == '\0') --len;
+  // The driver compiles an input as it is added: an unrecognised or too-new image, or PTX its
+  // compiler rejects, fails here, not at cuLinkComplete. Valid PTX this engine lacks an
+  // instruction of is not judged here; it fails when the linked module is loaded.
+  check_ptx_image(text, len);
+  try {
+    (void)vgpu::ptx::parse(std::string(text, len));
+  } catch (const vgpu::Error& e) {
+    if (e.code() == vgpu::Err::PtxParse) throw;
+  }
   st.inputs.emplace_back(text, len);
 }
 
@@ -2327,13 +2394,24 @@ static CUresult cuMulticastGetGranularity_impl(size_t*, const void*, int) {
 // alone, a program printing its info log -- CUDA's matrixMulDynlinkJIT
 // sample -- printed whatever its buffer held.
 static CUresult cuModuleLoadDataEx_impl(CUmodule* module, const void* image, unsigned int numOptions, void* options, void** optionValues) {
+  t_last_error.clear();
   const CUresult r = cuModuleLoadData_impl(module, image);
   const int* opts = static_cast<const int*>(options);
   if (!opts || !optionValues) return r;
-  size_t info_size = 0, error_size = 0;
+  size_t info_size = 0, error_size = 0, written_error = 0;
+  char* error_buf = nullptr;
   for (unsigned i = 0; i < numOptions; ++i) {
     if (opts[i] == 4) info_size = reinterpret_cast<size_t>(optionValues[i]);    // INFO_LOG_BUFFER_SIZE_BYTES
     if (opts[i] == 6) error_size = reinterpret_cast<size_t>(optionValues[i]);   // ERROR_LOG_BUFFER_SIZE_BYTES
+    if (opts[i] == 5) error_buf = static_cast<char*>(optionValues[i]);          // ERROR_LOG_BUFFER
+  }
+  // The error log carries what the loader said about a failed load, as the driver's carries
+  // ptxas's output; a successful load leaves it empty.
+  if (error_buf && error_size) {
+    const std::string msg = r == CUDA_SUCCESS || t_last_error.empty() ? std::string() : t_last_error + "\n";
+    written_error = std::min(msg.size(), error_size - 1);
+    std::memcpy(error_buf, msg.data(), written_error);
+    error_buf[written_error] = '\0';
   }
   for (unsigned i = 0; i < numOptions; ++i) {
     switch (opts[i]) {
@@ -2345,11 +2423,8 @@ static CUresult cuModuleLoadDataEx_impl(CUmodule* module, const void* image, uns
       case 3:     // CU_JIT_INFO_LOG_BUFFER
         if (optionValues[i] && info_size) static_cast<char*>(optionValues[i])[0] = '\0';
         break;
-      case 5:     // CU_JIT_ERROR_LOG_BUFFER
-        if (optionValues[i] && error_size) static_cast<char*>(optionValues[i])[0] = '\0';
-        break;
-      case 4:
-      case 6: optionValues[i] = nullptr; break;   // bytes written: none
+      case 4: optionValues[i] = nullptr; break;                                   // info bytes written: none
+      case 6: optionValues[i] = reinterpret_cast<void*>(written_error); break;    // error bytes written
       default: break;
     }
   }
@@ -3471,13 +3546,25 @@ static CUresult cuLaunchCooperativeKernel_impl(CUfunction f, unsigned int gridDi
 // these take opaque parameters because they only need to exist and refuse.
 static CUresult cuLinkCreate_v2_impl(unsigned int, void*, void*, void** stateOut);
 VGPU_EXPORT CUresult cuLinkCreate_v2(unsigned int a0, void* a1, void* a2, void** stateOut) { return traced("cuLinkCreate_v2", cuLinkCreate_v2_impl, a0, a1, a2, stateOut); }
-static CUresult cuLinkCreate_v2_impl(unsigned int, void*, void*, void** stateOut) {
+static CUresult cuLinkCreate_v2_impl(unsigned int numOptions, void* options, void* optionValues, void** stateOut) {
   return api("cuLinkCreate_v2", true, false, [&](ShimState&) {
     if (!stateOut) return CUDA_ERROR_INVALID_VALUE;
     // JIT options (register caps, optimisation level, log buffers) describe a
     // code generator this has no equivalent of, so they are accepted and left
     // unused rather than refused.
     auto st = std::make_unique<LinkState>();
+    if (options && optionValues) {
+      const int* keys = static_cast<const int*>(options);
+      void** vals = static_cast<void**>(optionValues);
+      for (unsigned i = 0; i < numOptions; ++i) {
+        if (keys[i] == 5) st.get()->error_buf = static_cast<char*>(vals[i]);                       // CU_JIT_ERROR_LOG_BUFFER
+        if (keys[i] == 6) {                                                                         // ..._SIZE_BYTES
+          st.get()->error_cap = reinterpret_cast<size_t>(vals[i]);
+          st.get()->error_size_slot = &vals[i];
+        }
+      }
+      if (st->error_buf && st->error_cap) st->error_buf[0] = '\0';
+    }
     void* h = st.get();
     {
       std::lock_guard<std::mutex> g(link_mutex());
@@ -3499,7 +3586,13 @@ static CUresult cuLinkAddData_v2_impl(void* state, int type, void* data, size_t 
                                       const char* name, unsigned int, void*, void*) {
   return api("cuLinkAddData_v2", true, false, [&](ShimState&) {
     if (!state) return CUDA_ERROR_INVALID_VALUE;
-    link_add(link_state(state), type, data, size, name);
+    LinkState& st = link_state(state);
+    try {
+      link_add(st, type, data, size, name);
+    } catch (const vgpu::Error& e) {
+      link_log_error(st, e.message());
+      throw;
+    }
     return CUDA_SUCCESS;
   });
 }

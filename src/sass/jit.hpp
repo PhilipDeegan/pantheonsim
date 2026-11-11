@@ -31,10 +31,10 @@ struct Program;
 namespace vgpu::sass::jit {
 
 // Bumped when the layout of Ctx, the symbols of an object or the meaning of its metadata change: an object of another ABI is not loaded.
-inline constexpr uint32_t kAbiVersion = 3;
+inline constexpr uint32_t kAbiVersion = 5;
 // Bumped when the text the generator writes for the same regions changes. (The key also hashes the text itself, so a forgotten bump
 // cannot make a stale object load; the number is for people reading a cache directory.)
-inline constexpr uint32_t kGeneratorVersion = 4;
+inline constexpr uint32_t kGeneratorVersion = 6;
 inline constexpr uint32_t kMinRegion = 2;
 // The size of tier::MOp (static_assert'ed in jit.cpp): the generated code finds the MOp of op i at Ctx::ops + kMopSize * i, its handler in the first word.
 inline constexpr uint32_t kMopSize = 96;
@@ -42,6 +42,7 @@ inline constexpr uint32_t kMopSize = 96;
 inline constexpr uint32_t kFlagTierStats = 1;   // the tier's statistics are on (every op is reported, even one with no lane)
 inline constexpr uint32_t kFlagJitStats = 2;    // the JIT's statistics are on (generated ops are counted into Ctx::gen_run)
 inline constexpr uint32_t kFlagChain = 4;       // the run loop would go on past a branch or a register-only op that is not straight (see "Control flow" below)
+inline constexpr uint32_t kFlagLink = 8;        // the chain bit is down only because other runnable lanes of the warp stand elsewhere: with Ctx::olo, see "Linking" below
 // Ctx::exit_ps when the generated code took no branch or register-only op that resets the loop's 256-instruction run
 inline constexpr int32_t kNoPassStart = INT32_MIN;
 // The run loop of the tier executes at most this many straight instructions in one pass (n < 256), then one more that ends the pass.
@@ -88,7 +89,43 @@ struct Ctx {
   int32_t exit_idx;
   int32_t exit_ps;
   uint32_t last;              // the index of the op whose handler the generated code called last (a fault names it); the host sets ~0u before a call
+  // Linking (ABI 4, round sp52; read only by code generated with Config::link, and only when kFlagLink is up). In a warp whose runnable lanes stand at several
+  // addresses the loop ends its pass at every branch and cont op and its chain picks the group at the lowest address. While that is this group again -- the
+  // op the group goes to lies strictly below every other runnable lane -- the next pass starts where the generated code is, so it goes on, as it does when the
+  // chain bit is up: the call is counted against the turn, the 256-op run starts afresh. `olo` is the lowest address of the other runnable lanes as a
+  // region-relative op index (rounded up), `spins` the warp's count of taken backward branches while other lanes can run (the loop's spin rule: the 64th makes
+  // the group give way, so the generated code leaves before it).
+  int64_t olo;
+  uint32_t* spins;
+  // A BSSY inside a region (OpFacts::hostctl): the lanes of `ex` join the barrier of op `op` and the barrier's nesting stamp is renewed (the run loop's own lines).
+  void (*ctl)(Ctx*, uint32_t op, uint32_t ex);
+  // A branch that splits the group, run by the generated code (linking): the lanes of `take` stand at the region-relative op `tgt` from now on, the others of
+  // `group` at `fall` (the loop's select_pcs). The generated code then goes on with the half at the lower place, and says so: `group` (the host sets it to the
+  // group it calls with; it differs afterwards when a split was run), `pcs_at` (the op the group's lanes' addresses were last set to) and `olo` (above).
+  void (*split)(Ctx*, uint32_t group, uint32_t take, int32_t tgt, int32_t fall);
+  uint32_t group;
+  int32_t pcs_at;
+  // An EXIT inside a region that no lane of the group takes (OpFacts::hostctl 2): whether the run loop would run it itself (no lane of the warp waits, no block
+  // barrier has an arrival; else it is the interpreter's and the generated code stops before it), and then the rest of what the loop does for it.
+  uint32_t (*exit0)(Ctx*);
+  // A CALL.REL inside a region (OpFacts::call): whether the place op `op` calls is plain code of the section (not a function the simulator provides, which the
+  // interpreter runs). A RET inside a region (hostctl 3): the region-relative op every lane of `group` returns to, or INT64_MIN when the guard lets only
+  // some of them run it (ex != group), they return to different places, or the place is not an op of the section (all of these are the loop's).
+  uint32_t (*callok)(Ctx*, uint32_t op);
+  int64_t (*ret)(Ctx*, uint32_t op, uint32_t ex, uint32_t group);
+  // A BSYNC inside a region (ABI 5, round sp53; OpFacts::hostctl 4). The host runs it as the run loop does (the lanes of `ex` wait at the barrier, which is
+  // released when all its lanes have arrived; the others of `group` go on) and then asks what the loop's chain asks: which runnable lanes stand at the lowest
+  // address. The answer is the group the next pass would start with: `group` (the joined lanes after a release, the lanes the guard kept out, or another
+  // group of the warp that stood waiting its turn), the region-relative op it stands at (the return value, also in `pcs_at`), and `olo`: the lowest place of
+  // the runnable lanes outside it, or kNoOthers when there are none (the chain bit is then up for the new group, else the link bit). kBsyncOver: the BSYNC
+  // was run and the loop's chain would not start another pass (no lane can run, or the lowest stands outside the section): the generated code counts the
+  // op, sets `over` and leaves, and the loop returns as it does after its chain says no. Called only when the chain's other conditions hold (the chain or
+  // the link bit is up, a call is left in the turn); the turn's call is charged by the generated code.
+  int64_t (*bsync)(Ctx*, uint32_t op, uint32_t ex, uint32_t group);
+  uint32_t over;              // the host clears it before a call; see `bsync`
 };
+inline constexpr int64_t kNoOthers = INT64_MAX;    // Ctx::olo after a BSYNC: no runnable lane outside the group
+inline constexpr int64_t kBsyncOver = INT64_MIN;   // Ctx::bsync's answer: the pass is over
 
 // A region is entered at any of its stretch starts (stretch_starts) with the number of ops the loop's current pass has taken since its start (n0);
 // it runs until it must leave, and says where in exit_idx and exit_ps.
@@ -116,6 +153,17 @@ struct OpFacts {
   bool guard_uniform = false;
   bool unguarded = true;       // MOp::unguarded: the op runs on the whole group
   bool cont = false;           // MOp::cont: not straight, a handler that only writes registers: the run loop may go on past it (a stretch ends here)
+  uint8_t hostctl = 0;         // (with cont; linking only) an op without a handler that the generated code goes on past. 1, a BSSY: the host's Ctx::ctl does its
+                               // bookkeeping, whatever the guard says. 2, an EXIT (aux, p, p2: its conditions): gone past only when no lane leaves and
+                               // the host's Ctx::exit0 says the loop itself would run it; else the generated code stops before it. 3, a RET (dst: the
+                               // register pair that holds the address): gone past when every lane of the group returns to one place in the section
+                               // (the host's Ctx::ret reads it), which the generated code then looks up among the region's entries
+                               // 4, a BSYNC (round sp53): run by the host's Ctx::bsync, which also says which group the loop's chain would run next and
+                               // where; the generated code goes on with that group there
+  bool call = false;           // (with br; linking only) a CALL.REL to a fixed place in the section: a branch every lane its guard lets run takes, without
+                               // the spin rule and the divergent-branch count of a BRA, and only when the place is no function the simulator provides (Ctx::callok)
+  bool stop = false;           // (merged regions; linking only) not an op of the region at all: an op between two of the regions that were merged, which the
+                               // run loop runs. The generated code leaves before it; it is no entry, no branch target and belongs to no stretch
   bool store = false;          // MOp::store: a store to global memory (an escape): while the warp's store gate is up the generated code leaves before it
   bool br = false;             // a plain relative BRA (tier::Form::Bra) that the generated code runs itself: imm is its target in the section, tgt in the region, p/p2/aux its conditions
   int32_t tgt = 0;             // a branch: the region-relative index of its target (outside [0, k): the generated code leaves there)
@@ -153,8 +201,19 @@ struct RowCtx {
 
 // The C++ for a generated op: a block that reads `R` (the register file), `c` (the Ctx) and `ex` (the executing lanes).
 std::string gen_op_body(const OpFacts& o, RowCtx& rc);
+// Fused runs (round sp48, docs/perf-design/rounds/11-rounds-sp36-sp41.md). A run of consecutive ops that only read and write register rows, each for the
+// whole group and of a form whose result in a lane depends on that lane alone, is generated as one loop over the warp's four blocks of eight lanes
+// with every op of the run inside it: a row the run writes is a local vector until the block's end, so the value an op reads from an earlier op of the
+// run comes from a host register (the op-by-op form stores every result's 32 lanes and loads them again). Each row is read from the register file once,
+// at its first use, and each row written is stored once, at the block's end; the result, lane for lane, is what the ops one after the other give,
+// because no op of the run reads a lane other than its own. `fusable` says whether an op may be in a run; `gen_fused_run` writes the loop for `n`
+// such ops (`full`: for a whole warp, where a result is the row; otherwise the lanes outside `ex` keep the register's value). The text reads `R`,
+// `c` and `ex`. Only the AVX2 level and only without register residence (Engine::source).
+bool fusable(const OpFacts& o);
+std::string gen_fused_run(const OpFacts* ops, uint32_t n, bool full);
 struct RegionSpec {
   std::vector<OpFacts> ops;
+  uint32_t first = 0;          // the section's op its first op is (make_unit sets it; merging needs it; not part of the metadata)
 };
 // Control flow inside a region (milestone 5). A region is a run of consecutive ops that may hold uniform branches (every lane of the group takes it, or none),
 // ops that are not straight but only write registers (`cont`), and stores. It is cut into *stretches*: a stretch starts at the region's first op, at the target
@@ -172,6 +231,8 @@ inline bool is_ctl(const OpFacts& o) { return o.cont || o.br; }
 struct UnitSpec {
   int sm = 0;
   std::vector<RegionSpec> regions;
+  bool nolink = false;         // (linking; the loop rule of make_unit) this section is generated without linking whatever Config::link says: the text, the object and
+                               // the selection are those of a run without VGPU_JIT_LINK. Not part of the metadata
 };
 
 struct Config {
@@ -180,7 +241,9 @@ struct Config {
   std::string path;                 // PATH to search; "": the process's
   std::string extra_flags;          // appended to the compile command (and part of the key)
   bool residence = true;            // keep register-file rows in locals within a region (from_env: off, VGPU_JIT_RESIDENCE=1: on)
+  bool link = false;                // go on past a branch or cont op in a diverged warp while the chain would pick the group again (Ctx::olo; from_env: VGPU_JIT_LINK=1 turns it on)
   bool specialize = true;           // also generate the body for a whole warp (all 32 lanes) apart from the one for any group (from_env: off, VGPU_JIT_SPECIALIZE=1: on; off is only the general one: half the code, a faster compile)
+  bool fuse = false;                // generate runs of register-only ops block by block of eight lanes (gen_fused_run; from_env: VGPU_JIT_FUSE=1 turns it on)
   unsigned timeout_s = 120;         // wall limit of one compile
   unsigned mem_mb = 4096;           // RLIMIT_AS of the compiler
   // For tests: replaces dlopen (returns null and fills the error on a failure), and the ISA level the key and flags use.
@@ -224,11 +287,17 @@ class Engine {
   explicit Engine(Config cfg);
   ~Engine();
   // The C++ the generator writes for the unit (deterministic: a function of the spec only).
-  static std::string source(const UnitSpec& spec, bool avx2 = true, bool residence = true, bool specialize = true);
+  static std::string source(const UnitSpec& spec, bool avx2 = true, bool residence = true, bool specialize = true, bool link = false, bool fuse = false);
   // The words the object's metadata array must hold for the spec.
   static std::vector<uint32_t> meta(const UnitSpec& spec);
   // The 32-hex-digit key: the source, the compiler's identity, flags, ISA level, ABI and generator versions. Empty (and `why` set) with no compiler.
   std::string key(const UnitSpec& spec, std::string* why = nullptr);
+  // Merging (linking). The selected regions of a section as ONE region that runs from the first selected region's first op to the last one's last: the ops
+  // between them are `stop` ops, branch targets are rebased. One function then holds every compiled op of the section, so a branch, a call or a return
+  // from one of the old regions into another is a jump inside generated code. merges(): whether a selection is merged (linking on, and the span is not huge).
+  static RegionSpec merge_regions(const UnitSpec& spec, const std::vector<uint32_t>& sel);
+  bool merges(const UnitSpec& spec, const std::vector<uint32_t>& sel) const;
+  UnitSpec selected_spec(const UnitSpec& full, const std::vector<uint32_t>& sel) const;   // subspec, or the one merged region
   // The cache only: found, damaged (removed), or absent. Never compiles.
   Result lookup(const UnitSpec& spec);
   // The cache, else the compiler (under a per-key lock file, so that threads and processes compile one key once).
@@ -307,6 +376,9 @@ struct Unit : std::enable_shared_from_this<Unit> {
   std::atomic<bool> sampling{false};   // the share rule has not decided yet (set by make_unit when the rule is on)
   std::atomic<uint64_t> sampled{0};    // warp instructions run in the hook loop while sampling
   std::unique_ptr<std::atomic<uint64_t>[]> counts;   // ... per region: which ones are hot decides which are compiled
+  // Merging (linking): `regions` has one more element than spec.regions, a placeholder until a merged selection is published; then it is the merged region
+  // (its spec is `merged`), the only one with entries in active_at and a function.
+  RegionSpec merged;
   std::shared_ptr<Loaded> lib;         // valid once state is Ready (published with release)
   std::vector<int32_t> fn_index;       // region -> its function in lib, -1 for a region that was not compiled (valid once Ready)
   bool ready() const { return state.load(std::memory_order_acquire) == static_cast<int>(State::Ready); }
@@ -323,12 +395,18 @@ struct Unit : std::enable_shared_from_this<Unit> {
   RegionFn fn(uint32_t region) const { return ready() ? fast[region] : nullptr; }
 };
 
-// Mutation checks of the executor's side (tests only: compiled in with -DVGPU_JIT_MUTANTS=ON, VGPU_JIT_MUTANT=<host_ps|host_chain|host_maxreg|host_n0>); 0 otherwise.
+// Mutation checks of the executor's side (tests only: compiled in with -DVGPU_JIT_MUTANTS=ON, VGPU_JIT_MUTANT=<host_ps|host_chain|host_maxreg|host_n0|host_olo|host_spins|host_bsync_olo|host_bsync_pcs>); 0 otherwise.
 inline constexpr uint32_t kMutHostPs = 2, kMutHostChain = 4, kMutHostMaxreg = 8, kMutHostN0 = 16;
+inline constexpr uint32_t kMutHostOlo = 32, kMutHostSpins = 64;   // host_olo: the other lanes are taken to stand above everything; host_spins: the generated code counts its taken backward branches somewhere else
+// (round sp53, BSYNC in a region) host_bsync_olo: after a BSYNC the other lanes are said not to exist; host_bsync_pcs: the group's addresses are not set before the
+// BSYNC is run.
+inline constexpr uint32_t kMutHostBsyncOlo = 128, kMutHostBsyncPcs = 256;
 uint32_t host_mutants();
 
 // Whether VGPU_JIT=1 is set, the tier is on, and this is not a sanitizer build. Read once.
 bool requested();
+// Whether VGPU_JIT_LINK=1 is set (linking, see Ctx::olo): the host then works out kFlagLink and Ctx::olo for a region call in a diverged warp. Read once.
+bool link_requested();
 
 // Region discovery over the tier's program; null if the unit has none. `max_region` caps a region's length.
 std::shared_ptr<Unit> make_unit(const tier::Program& prog, int sm);
@@ -343,7 +421,38 @@ struct Stats {
   std::atomic<uint64_t> compile_us{0}, lookup_us{0}, units_ready{0};
   std::atomic<uint64_t> declined{0}, accepted{0};   // the share rule's decisions
   std::atomic<uint64_t> continued{0};   // branches and register-only ops the generated code went on past (the loop's chain steps it took over)
+  // Why generated code was left (round sp52), per reason (ExitWhy): [0] the group was every runnable lane of the warp, [1] other runnable lanes stood elsewhere
+  // (a diverged warp: the loop's chain conditions do not hold), [2] the calls of these that left at their entry with nothing run.
+  std::atomic<uint64_t> exits[24][3] = {};
+  std::atomic<uint64_t> splits{0};      // region calls that ran a branch that split the group and went on with one half (linking)
+  std::atomic<uint64_t> linked{0};      // ... of `continued`, those of region calls in a diverged warp (linking, Ctx::olo)
+  std::atomic<uint64_t> link_declined{0};   // sections the loop rule left unlinked (make_unit)
+  std::atomic<uint64_t> bsyncs{0}, bsync_groups{0}, bsync_over{0};   // BSYNCs the generated code ran (linking, round sp53): all, those after which it went on with another group, those that ended the pass
 };
+// Why a region call ended, as the host works it out from where it ended (jit_exit_why, tier_ops.inc); kept only with VGPU_JIT_STATS.
+enum ExitWhy : unsigned {
+  kExSplit,          // a branch that splits the group (some lanes take it, some do not)
+  kExBraTaken,       // a branch the whole group takes, when the loop would not go on past it (the chain's conditions do not hold)
+  kExBraFall,        // ... that no lane of the group takes
+  kExCont,           // a register-only op that is not straight, likewise
+  kExBudget,         // a branch or such an op when the turn has no calls left
+  kExBound,          // the start of a stretch that does not fit the loop's 256-op run
+  kExSteps,          // ... or the warp's step budget
+  kExGate,           // a store while the warp's store gate is up
+  kExToRegion,       // left the region (its end, or a branch out of it) at an entry of a compiled region
+  kExBssy,           // ... at a BSSY or a NOP
+  kExBsync,          // ... at a BSYNC
+  kExExit,           // ... at an EXIT that lanes of the group take
+  kExExitNone,       // ... at an EXIT that no lane of the group takes (a guard or a condition holds for none: the group goes on)
+  kExCallRet,        // ... at a CALL or a RET
+  kExOtherCtl,       // ... at a BAR, YIELD or WARPSYNC
+  kExBraOther,       // ... at a branch that is in no compiled region
+  kExStraight,       // ... at a straight op that is in no compiled region
+  kExHandler,        // ... at an op with a handler that is not straight (SHFL, VOTE, ...)
+  kExInterp,         // ... at an op the interpreter runs
+  kExCount
+};
+const char* exit_name(unsigned why);
 Stats& stats();
 // Whether the statistics are being kept (VGPU_JIT_STATS): the executor counts nothing otherwise, an atomic add per region call being a visible cost on small regions.
 namespace detail { extern bool g_stats_on __attribute__((visibility("hidden"))); }   // libcuda and libcudart both contain this code (tests/lint/check_odr_globals.py)

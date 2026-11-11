@@ -42,6 +42,8 @@ bool executes(const Instr& ins) {
       // format the decoder did not recognise would run as some other one.
       if (ins.f[5] == 1 && ins.f[3] < 10) return false;
       if (ins.f[5] == 4 && ins.f[4] != 0 && ins.f[4] < 10) return false;
+      // MERGE_C to f16/bf16 merges Rc above the converted half; only the RZ ptxas always passes is modelled.
+      if (ins.f[5] == 2 && !(ins.src.size() > 1 && ins.src[1].kind == Kind::Reg && ins.src[1].reg == kRZ)) return false;
       return true;
     case Op::LDSM: {
       // ldmatrix's forms: 16-bit 8x8, either way; packed 4- or 6-bit 8x16;
@@ -79,7 +81,7 @@ bool executes(const Instr& ins) {
     case Op::UTCSHIFT: case Op::UTCATOMSWS: case Op::STAS: case Op::REDAS: case Op::UGETNEXTWORKID:
     case Op::DADD: case Op::DFMA: case Op::DMUL: case Op::DSETP: case Op::F2F: case Op::F2I:
     case Op::FADD: case Op::FCHK: case Op::FFMA: case Op::FMNMX: case Op::FMUL: case Op::FRND: case Op::FSEL: case Op::FSWZADD:
-    case Op::FSET: case Op::FSETP: case Op::HADD2: case Op::HFMA2: case Op::HMUL2: case Op::HSET2: case Op::HSETP2:
+    case Op::FSET: case Op::FSETP: case Op::HADD2: case Op::HFMA2: case Op::HMUL2: case Op::HSET2: case Op::HSETP2: case Op::HMNMX2:
     case Op::I2F: case Op::I2FP: case Op::I2I: case Op::I2IP: case Op::MUFU:
     case Op::ATOM: case Op::ATOMG: case Op::ATOMS: case Op::LD: case Op::LDC: case Op::LDG: case Op::LDGDEPBAR:
     case Op::LDGSTS: case Op::LDL: case Op::LDS: case Op::RED: case Op::ST: case Op::STG:
@@ -1018,6 +1020,19 @@ uint16_t f32_to_bf16(float f) {
   if (f != f) return static_cast<uint16_t>((b >> 16) | 0x40);
   b += 0x7fff + ((b >> 16) & 1);
   return static_cast<uint16_t>(b >> 16);
+}
+// An f32 narrowed to f16 or bf16 in a directed rounding mode (rnd as F2FP's field: 1 RM, 2 RP, 3 RZ), from the nearest-even
+// result: when that lies on the wrong side of the value it is moved one step (an RTX 3060, e2e ptx_half_forms: cvt.rz.f16.f32 of
+// 70000.0 is 0x7bff, of a value just under a half's next step is the one below). A NaN is the caller's.
+uint16_t f32_to_narrow_directed(float f, bool bf, unsigned rnd) {
+  uint16_t n = bf ? f32_to_bf16(f) : f32_to_half(f);
+  if (rnd == 0) return n;
+  const bool down = rnd == 1 || (rnd == 3 && !std::signbit(f));
+  const float v = bf ? bf16_to_f32(n) : half_to_f32(n);
+  const bool neg = (n & 0x8000) != 0;
+  if (down && v > f) return n == 0x0000 ? uint16_t{0x8001} : neg ? static_cast<uint16_t>(n + 1) : static_cast<uint16_t>(n - 1);
+  if (!down && v < f) return n == 0x8000 ? uint16_t{0x0001} : neg ? static_cast<uint16_t>(n - 1) : static_cast<uint16_t>(n + 1);
+  return n;
 }
 uint16_t f64_to_bf16(double d) {
   // Rounded once, from the double: HFMA2.BF16_V2's fused result is a single rounding of the exact product and sum (an RTX 3060: going through
@@ -2046,9 +2061,9 @@ bool Runner::fast_float(Warp& w, const Instr& ins, Mask ex) {
       return true;
     }
     case Op::FMNMX: {
-      if (ins.src.size() < 3 || !plain(ins.src[0]) || !plain(ins.src[1]) || ins.src[0].bnot || ins.src[1].bnot ||
+      if (ins.f[2] || ins.src.size() < 3 || !plain(ins.src[0]) || !plain(ins.src[1]) || ins.src[0].bnot || ins.src[1].bnot ||
           !is_pred(ins.src[2]) || ins.dst[0].kind != Kind::Reg)
-        return false;
+        return false;   // (.XORSIGN takes the general path)
       sk->fmnmx(r, lanes(0, ins.src[0], true), lanes(1, ins.src[1], true), static_cast<uint32_t>(pmask(ins.src[2])), ins.f[0] != 0,
                 ins.f[1] != 0);
       if (ins.dst[0].reg != kRZ) store_row(ins.dst[0].reg, r);
@@ -2148,7 +2163,9 @@ bool Runner::fast_float(Warp& w, const Instr& ins, Mask ex) {
       const bool bf = ins.f[0], f32out = ins.f[1], st = ins.f[3];
       const unsigned need = ins.op == Op::HFMA2 ? 3u : 2u;
       // (The f32 result is taken for HADD2, the half-to-float conversion, with no flush or saturation: the forms ptxas emits.)
-      if (st || (bf && (f32out || ins.op != Op::HFMA2)) || (f32out && (ins.op != Op::HADD2 || ins.f[2])) || ins.dst[0].kind != Kind::Reg || ins.src.size() < need)
+      // (.FTZ on an f16 result and .RELU are the general rule's: it flushes and clamps the halves.)
+      if (st || ins.f[5] || (ins.f[2] && !f32out && !bf) || (bf && (f32out || ins.op != Op::HFMA2)) || (f32out && (ins.op != Op::HADD2 || ins.f[2])) ||
+          ins.dst[0].kind != Kind::Reg || ins.src.size() < need)
         return false;
       alignas(32) uint32_t pk[3][32];
       bool ok = true;
@@ -2242,8 +2259,9 @@ bool Runner::fast_float(Warp& w, const Instr& ins, Mask ex) {
     case Op::F2FP: {
       // Two f32 packed into the halves of a register -- f16 or bf16, to nearest even, .RELU first sending a negative value to 0 (not
       // the narrow formats, TF32 packs or the unpacks, which take the general path).
-      if (ins.src.size() < 2 || ins.dst[0].kind != Kind::Reg || ins.f[5] == 4 || ins.f[3] >= 6 || !plain(ins.src[0]) || !plain(ins.src[1]) ||
-          ins.src[0].bnot || ins.src[1].bnot)
+      // (A directed rounding mode (ins.f[1]) and the MERGE_C form (f[5] == 2) are the general rule's.)
+      if (ins.src.size() < 2 || ins.dst[0].kind != Kind::Reg || ins.f[5] == 4 || ins.f[5] == 2 || ins.f[1] != 0 || ins.f[6] != 0 || ins.f[3] >= 6 || !plain(ins.src[0]) ||
+          !plain(ins.src[1]) || ins.src[0].bnot || ins.src[1].bnot)
         return false;
       alignas(32) float fa[32], fb[32];
       const uint32_t* ra = lanes(0, ins.src[0], true);
@@ -2597,7 +2615,10 @@ void Runner::exec_float(Block&, Warp& w, const Instr& ins, Mask ex) {
         else if (b != b) r = a;
         else if (a == 0 && b == 0) r = mn ? (std::signbit(a) ? a : b) : (std::signbit(a) ? b : a);
         else r = mn ? std::min(a, b) : std::max(a, b);
-        write32(w, ins.dst[0], l, f32_bits(r));
+        uint32_t bits = f32_bits(r);
+        // .XORSIGN: the smaller or larger magnitude (the operands carry |.|), signed by the XOR of the operands' own signs.
+        if (ins.f[2]) bits = (bits & 0x7fffffffu) | ((read32(w, ins.src[0], l) ^ read32(w, ins.src[1], l)) & 0x80000000u);
+        write32(w, ins.dst[0], l, bits);
       });
       return;
     case Op::MUFU: {
@@ -2780,14 +2801,23 @@ void Runner::exec_float(Block&, Warp& w, const Instr& ins, Mask ex) {
         return;
       }
       each_lane(ex, [&](unsigned l) {
-        float a = f32src(ins.src[0], l, false), b = f32src(ins.src[1], l, false);
+        // MERGE_C (f[5] == 2): the one source (src[0]) into the low half and the merged-in register (src[1], RZ: see executes()) above.
+        const bool merge = ins.f[5] == 2;
+        float a = merge ? 0.0f : f32src(ins.src[0], l, false), b = f32src(ins.src[merge ? 0 : 1], l, false);
         if (ins.f[2]) {   // .RELU: a negative value or -0 becomes +0 (an RTX 3060); a NaN stays one
           if (a == a && std::signbit(a)) a = 0;
           if (b == b && std::signbit(b)) b = 0;
         }
-        // A NaN packs to 0x7fff in either format, whatever its sign and payload (an RTX 3060, as the PTX engine's cvt).
-        const auto half = [&](float v) -> uint32_t { return v != v ? 0x7fffu : ins.f[0] ? f32_to_bf16(v) : f32_to_half(v); };
-        write32(w, ins.dst[0], l, (half(a) << 16) | half(b));
+        // A NaN packs to 0x7fff in either format, whatever its sign and payload (an RTX 3060, as the PTX engine's cvt). The rounding
+        // mode (ins.f[1]: 0 nearest even, 1 RM, 2 RP, 3 RZ) applies to both values.
+        // .SATFINITE (f[6]) turns an infinity the conversion made, or one it was given, into the largest finite value of its sign.
+        const auto half = [&](float v) -> uint32_t {
+          if (v != v) return 0x7fffu;
+          uint32_t h = f32_to_narrow_directed(v, ins.f[0], ins.f[1]);
+          if (ins.f[6] && (h & 0x7fffu) == (ins.f[0] ? 0x7f80u : 0x7c00u)) h = (h & 0x8000u) | (ins.f[0] ? 0x7f7fu : 0x7bffu);
+          return h;
+        };
+        write32(w, ins.dst[0], l, merge ? half(b) : (half(a) << 16) | half(b));
       });
       return;
     case Op::I2IP:
@@ -2820,7 +2850,7 @@ void Runner::exec_float(Block&, Warp& w, const Instr& ins, Mask ex) {
       const bool bf = ins.f[0], f32out = ins.f[1], fz = ins.f[2], st = ins.f[3];
       // The plain HFMA2 Rd, Ra, Rb, Rc of f16 halves (registers, no swizzle, no |.| or -) is one SIMD kernel
       // (vgpu/simd/simd.hpp: hfma2_m); it gives the bits the lane loop below gives (tests/unit/test_simd.cpp).
-      if (ins.op == Op::HFMA2 && !bf && !f32out && !st && simd::enabled() && ins.src.size() >= 3 &&
+      if (ins.op == Op::HFMA2 && !bf && !f32out && !st && !fz && !ins.f[5] && simd::enabled() && ins.src.size() >= 3 &&
           ins.dst[0].kind == Kind::Reg) {
         const auto plain = [](const Operand& o) { return o.kind == Kind::Reg && !o.abs && !o.neg && o.suffix.empty(); };
         if (plain(ins.src[0]) && plain(ins.src[1]) && plain(ins.src[2])) {
@@ -2854,6 +2884,10 @@ void Runner::exec_float(Block&, Warp& w, const Instr& ins, Mask ex) {
           if (o.neg) out[i] = -out[i];
         }
       };
+      // .FTZ on an f16 result: the inputs' subnormal halves are signed zeros first, and so is a subnormal result (the PTX engine's
+      // half_post; an RTX 3060, e2e ptx_half_forms). The f32 result's flush is its own, below.
+      const bool hftz = fz && !bf && !f32out;
+      const auto flush_half = [&](float v) { return std::fabs(v) < 6.103515625e-05f && v != 0.0f ? std::copysign(0.0f, v) : v; };   // below 2^-14: an f16 subnormal
       // The immediate pair: the second printed half is the low lane.
       each_lane(ex, [&](unsigned l) {
         float a[2], b[2], c[2] = {0, 0};
@@ -2877,13 +2911,16 @@ void Runner::exec_float(Block&, Warp& w, const Instr& ins, Mask ex) {
             halves(ins.src[next], l, c);
           }
         }
+        if (hftz) {
+          for (int i = 0; i < 2; ++i) { a[i] = flush_half(a[i]); b[i] = flush_half(b[i]); c[i] = flush_half(c[i]); }
+        }
         double r[2];
         for (int i = 0; i < 2; ++i) {
           if (ins.op == Op::HADD2) r[i] = static_cast<double>(a[i]) + b[i];
           else if (ins.op == Op::HMUL2) r[i] = static_cast<double>(a[i]) * b[i];
           else r[i] = bf ? simd::fma_round_odd(static_cast<double>(a[i]), static_cast<double>(b[i]), static_cast<double>(c[i]))   // (rounded once to bf16 below)
                          : std::fma(static_cast<double>(a[i]), static_cast<double>(b[i]), static_cast<double>(c[i]));
-          if (st) r[i] = r[i] != r[i] ? 0.0 : std::clamp(r[i], 0.0, 1.0);
+          if (st && f32out) r[i] = r[i] != r[i] ? 0.0 : std::clamp(r[i], 0.0, 1.0);
         }
         if (f32out) {
           float f = static_cast<float>(r[0]);
@@ -2895,8 +2932,70 @@ void Runner::exec_float(Block&, Warp& w, const Instr& ins, Mask ex) {
         }
         // A NaN result is the canonical 0x7fff, as the PTX engine writes it.
         uint16_t h[2];
-        for (int i = 0; i < 2; ++i) h[i] = r[i] != r[i] ? uint16_t{0x7fff} : bf ? f64_to_bf16(r[i]) : f64_to_half(r[i]);
+        for (int i = 0; i < 2; ++i) {
+          h[i] = r[i] != r[i] ? uint16_t{0x7fff} : bf ? f64_to_bf16(r[i]) : f64_to_half(r[i]);
+          // The modifiers on the rounded half, as the PTX engine's half_post applies them: .FTZ a subnormal result to a signed zero,
+          // .RELU (HMUL2 and HFMA2) a negative one, -0 included, to +0 (a NaN stays), .SAT a NaN, a negative or -0 to +0 and
+          // anything above 1 to 1.
+          const bool nan = bf ? (h[i] & 0x7fff) > 0x7f80 : (h[i] & 0x7fff) > 0x7c00;
+          if (hftz && (h[i] & 0x7c00) == 0) h[i] &= 0x8000;
+          if (ins.f[5] && !nan && (h[i] & 0x8000)) h[i] = 0;
+          if (st) {
+            if (nan || (h[i] & 0x8000)) h[i] = 0;
+            else if (h[i] > (bf ? 0x3f80 : 0x3c00)) h[i] = bf ? 0x3f80 : 0x3c00;
+          }
+        }
         write32(w, ins.dst[0], l, h[0] | (static_cast<uint32_t>(h[1]) << 16));
+      });
+      return;
+    }
+    case Op::HMNMX2: {
+      // The min (p) or max of two f16 (or bf16) lanes at once, as the PTX engine's min/max.{f16,f16x2,bf16,bf16x2} computes each
+      // lane (and as an RTX 3060 does, tests e2e minmax_forms): in double, a NaN operand losing unless .NAN, min(+0, -0) = -0,
+      // .FTZ flushing subnormal f16 inputs and the result, .XORSIGN giving the magnitude the XOR of the inputs' signs (taken before
+      // the operands' |.|). A NaN result is the canonical 0x7fff.
+      const bool bf = ins.f[0], fz = ins.f[1], nanp = ins.f[2], xs = ins.f[3];
+      const bool imm_pair = ins.src.size() > 3 && ins.src[1].kind == Kind::FImm && ins.src[2].kind == Kind::FImm;
+      const size_t next = imm_pair ? 3 : 2;
+      each_lane(ex, [&](unsigned l) {
+        const bool mn = pred(w, ins.src[next], l);
+        // A source's two halves, after its swizzle: the raw bits, and with |.| and - applied.
+        const auto halves = [&](const Operand& o, uint16_t raw[2], uint16_t val[2]) {
+          const uint32_t v = read32(w, o, l);
+          raw[0] = static_cast<uint16_t>(v);
+          raw[1] = static_cast<uint16_t>(v >> 16);
+          if (o.suffix == ".H0_H0") raw[1] = raw[0];
+          else if (o.suffix == ".H1_H1") raw[0] = raw[1];
+          for (int i = 0; i < 2; ++i) {
+            val[i] = raw[i];
+            if (o.abs) val[i] &= 0x7fffu;
+            if (o.neg) val[i] ^= 0x8000u;
+          }
+        };
+        uint16_t ar[2], av[2], br[2], bv[2];
+        halves(ins.src[0], ar, av);
+        if (imm_pair) {
+          br[1] = bv[1] = static_cast<uint16_t>(ins.src[1].fbits);   // the high half prints first
+          br[0] = bv[0] = static_cast<uint16_t>(ins.src[2].fbits);
+        } else {
+          halves(ins.src[1], br, bv);
+        }
+        uint32_t out = 0;
+        for (int i = 0; i < 2; ++i) {
+          const uint16_t xa = fz_half(av[i], bf, fz), xb = fz_half(bv[i], bf, fz);
+          const double x = bf ? static_cast<double>(bf16_to_f32(xa)) : static_cast<double>(half_to_f32(xa));
+          const double y = bf ? static_cast<double>(bf16_to_f32(xb)) : static_cast<double>(half_to_f32(xb));
+          double v;
+          if (x == 0 && y == 0) v = mn ? (std::signbit(x) || std::signbit(y) ? -0.0 : 0.0) : (std::signbit(x) && std::signbit(y) ? -0.0 : 0.0);
+          else v = mn ? std::fmin(x, y) : std::fmax(x, y);
+          const bool any_nan = x != x || y != y;
+          if (nanp && any_nan) v = std::numeric_limits<double>::quiet_NaN();
+          uint16_t h = v != v ? uint16_t{0x7fff} : bf ? f64_to_bf16(v) : f64_to_half(v);
+          const bool h_nan = bf ? (h & 0x7fffu) > 0x7f80u : (h & 0x7fffu) > 0x7c00u;
+          if (xs && !h_nan) h = static_cast<uint16_t>((h & 0x7fffu) | ((ar[i] ^ br[i]) & 0x8000u));
+          out |= static_cast<uint32_t>(fz_half(h, bf, fz)) << (16 * i);
+        }
+        write32(w, ins.dst[0], l, out);
       });
       return;
     }
@@ -2913,7 +3012,8 @@ void Runner::exec_float(Block&, Warp& w, const Instr& ins, Mask ex) {
           else if (r == 0 && b == 0) r = mn ? (std::signbit(r) ? r : b) : (std::signbit(r) ? b : r);
           else r = mn ? std::min(r, b) : std::max(r, b);
         }
-        write32(w, ins.dst[0], l, ins.f[1] && nan ? 0x7fffffffu : f32_bits(r));
+        // (Three NaNs give the canonical NaN, as FMNMX does for two -- measured on an RTX 3060; not measured on an sm_100 part.)
+        write32(w, ins.dst[0], l, (ins.f[1] && nan) || r != r ? 0x7fffffffu : f32_bits(r));
       });
       return;
     case Op::FSETP: case Op::FSET: {
@@ -5460,9 +5560,10 @@ bool Runner::exec_control(Block& blk, Warp& w, const Instr& ins, Mask ex, Mask g
         });
       }
       return false;
-    case Op::NOP: case Op::DEPBAR: case Op::MEMBAR: case Op::ERRBAR: case Op::NANOSLEEP:
+    case Op::NOP: case Op::DEPBAR: case Op::MEMBAR: case Op::ERRBAR:
     case Op::ENDCOLLECTIVE:
       return false;
+    case Op::NANOSLEEP:   // a thread that sleeps lets the others go first, as a YIELD does: a spin-wait with a back-off is no different
     case Op::YIELD:
       // A hint ptxas puts in loops, spin-waits among them (sm_80's mbarrier
       // waits poll shared memory): other lane groups, and other warps, go

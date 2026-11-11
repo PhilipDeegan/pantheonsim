@@ -1,0 +1,12 @@
+polybench/LU                       thr=1 dev:tier                   tier  same
+polybench/LU                       thr=1 dev:jit                    cold  same
+polybench/LU                       thr=1 dev:jit                    warm  same
+polybench/LU                       thr=1 dev:jit:VGPU_JIT_FUSE=1    cold  same
+polybench/LU                       thr=1 dev:jit:VGPU_JIT_FUSE=1    warm  same
+hecbench/black-scholes-cuda        thr=1 dev:tier                   tier  same
+hecbench/black-scholes-cuda        thr=1 dev:jit                    cold  same
+hecbench/black-scholes-cuda        thr=1 dev:jit                    warm  same
+hecbench/black-scholes-cuda        thr=1 dev:jit:VGPU_JIT_FUSE=1    cold  same
+hecbench/black-scholes-cuda        thr=1 dev:jit:VGPU_JIT_FUSE=1    warm  same
+DIFFERENCES: 0
+BATCH2C_DONE

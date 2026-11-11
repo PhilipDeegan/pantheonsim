@@ -23,7 +23,20 @@ read -r -a san_flags <<< "$(shim_sanitizer_nvcc_flags "$shim")"
 if ! require_shim_libs "$shim" "$out"; then exit 0; fi
 
 log="$out.log"
-VGPU_QUIET=1 VGPU_GPU=nvidia/rtx3060 LD_LIBRARY_PATH="$shim" "$out" > "$log" 2>&1
-rc=$?
-sed 's/^/    /' "$log"
-[[ $rc == 0 && "$(tail -n 1 "$log")" == PASS ]] || { echo "FAIL: half-precision PTX forms"; exit 1; }
+# The program's cubin carries SASS for sm_86, which runs by default. A module whose SASS holds one instruction the decoder refuses
+# runs on the PTX engine instead, which hid every f16 form the SASS engine got wrong (.ftz, .sat, .relu, the directed cvt) until
+# HMNMX2 was decoded. So the card's answers are checked on the SASS interpreter (VGPU_TIER=0), on the pre-decoded tier, and on the
+# PTX engine (VGPU_SASS=0), and the SASS runs must say they ran SASS.
+fail=0
+for mode in "VGPU_TIER=0 VGPU_SASS_LOG=1" "VGPU_TIER=1 VGPU_SASS_LOG=1" "VGPU_SASS=0"; do
+  # shellcheck disable=SC2086
+  env VGPU_QUIET=1 VGPU_GPU=nvidia/rtx3060 LD_LIBRARY_PATH="$shim" $mode "$out" > "$log" 2>&1
+  rc=$?
+  echo "  [$mode]"
+  sed 's/^/    /' "$log"
+  if [[ $rc != 0 || "$(tail -n 1 "$log")" != PASS ]]; then echo "FAIL: half-precision PTX forms ($mode)"; fail=1; fi
+  if [[ $mode == *VGPU_SASS_LOG* ]] && { ! grep -q "running SASS" "$log" || grep -q "running PTX instead of SASS" "$log"; }; then
+    echo "FAIL: the SASS did not run ($mode)"; fail=1
+  fi
+done
+exit $fail

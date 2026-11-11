@@ -9,6 +9,10 @@
 // (The table was regenerated again for VIADD.16x2 on sm_90 (add.u16x2 / add.s16x2) and the packed VIADDMNMX / VIMNMX forms (S16x2 and U16x2, with
 // the per-half choice predicates of the sm_90 VIMNMX): with the corpora grown by those rows, the unmodified decoder's dump and the new one's differ in
 // exactly the words with bit 73 set that decode as VIADD (before sm_120), VIADDMNMX (every architecture) or VIMNMX (sm_90 only).)
+// (The flipped and random digests were regenerated for HMNMX2 and FMNMX.XORSIGN (pantheonsim #547: main's dump and the new one's differ in
+// exactly the FMNMX and HMNMX2 words) and for the one-conversion f16/bf16 F2FP.MERGE_C (bit 78 set, family clear, type 4 or 5, which was
+// read as a TF32 or unnamed pack) and the two-operand f16/bf16 F2FP.SATFINITE (bit 77, a type of 2 or 3, which was an unnamed pack): they differ
+// in exactly the F2FP words with those types; the corpora digest is unchanged).)
 //
 // VGPU_DECODE_PRINT=1 prints the digests (to regenerate the table after a decoder change that is meant to change
 // them); VGPU_DECODE_DUMP=<dir> writes the full dump of every pass, so two builds can be diffed to see which
@@ -162,7 +166,7 @@ VTEST(words_with_flipped_bits_decode_to_the_same_bits) {
     words.push_back({w, 16 * (rng.next() % 4096)});
   }
   const std::vector<int> archs = {75, 86, 90, 100, 120};
-  check("flipped", run_pass("flipped", words, archs), "8f6753506417a0e110243f4bee6bd934");
+  check("flipped", run_pass("flipped", words, archs), "234148dcb781f68c8ef6f16f35ec3db8");
 }
 
 VTEST(random_opcodes_decode_to_the_same_bits) {
@@ -175,7 +179,7 @@ VTEST(random_opcodes_decode_to_the_same_bits) {
     words.push_back({w, 16 * (rng.next() % 4096)});
   }
   const std::vector<int> archs = {80, 89, 103, 120};
-  check("random", run_pass("random", words, archs), "74fdb982067245257620e41c62013bfe");
+  check("random", run_pass("random", words, archs), "423aa628f61acd671ab354a2f7c0a8d8");
 }
 
 VTEST(bench_decode) {

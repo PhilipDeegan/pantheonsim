@@ -1,0 +1,81 @@
+polybench/SYRK                     thr=1 b:jit                      warm  same
+polybench/SYRK                     thr=1 b:jit:VGPU_JIT_LINK=1      cold  same
+polybench/SYRK                     thr=1 b:jit:VGPU_JIT_LINK=1      warm  same
+polybench/SYRK                     thr=4 b:jit                      cold  same
+polybench/SYRK                     thr=4 b:jit                      warm  same
+polybench/SYRK                     thr=4 b:jit:VGPU_JIT_LINK=1      cold  same
+polybench/SYRK                     thr=4 b:jit:VGPU_JIT_LINK=1      warm  same
+polybench/JACOBI1D                 thr=1 b:jit                      cold  same
+polybench/JACOBI1D                 thr=1 b:jit                      warm  same
+polybench/JACOBI1D                 thr=1 b:jit:VGPU_JIT_LINK=1      cold  same
+polybench/JACOBI1D                 thr=1 b:jit:VGPU_JIT_LINK=1      warm  same
+polybench/JACOBI1D                 thr=4 b:jit                      cold  same
+polybench/JACOBI1D                 thr=4 b:jit                      warm  same
+polybench/JACOBI1D                 thr=4 b:jit:VGPU_JIT_LINK=1      cold  same
+polybench/JACOBI1D                 thr=4 b:jit:VGPU_JIT_LINK=1      warm  same
+polybench/JACOBI2D                 thr=1 b:jit                      cold  same
+polybench/JACOBI2D                 thr=1 b:jit                      warm  same
+polybench/JACOBI2D                 thr=1 b:jit:VGPU_JIT_LINK=1      cold  same
+polybench/JACOBI2D                 thr=1 b:jit:VGPU_JIT_LINK=1      warm  same
+polybench/JACOBI2D                 thr=4 b:jit                      cold  same
+polybench/JACOBI2D                 thr=4 b:jit                      warm  same
+polybench/JACOBI2D                 thr=4 b:jit:VGPU_JIT_LINK=1      cold  same
+polybench/JACOBI2D                 thr=4 b:jit:VGPU_JIT_LINK=1      warm  same
+polybench/3DCONV                   thr=1 b:jit                      cold  same
+polybench/3DCONV                   thr=1 b:jit                      warm  same
+polybench/3DCONV                   thr=1 b:jit:VGPU_JIT_LINK=1      cold  same
+polybench/3DCONV                   thr=1 b:jit:VGPU_JIT_LINK=1      warm  same
+polybench/3DCONV                   thr=4 b:jit                      cold  same
+polybench/3DCONV                   thr=4 b:jit                      warm  same
+polybench/3DCONV                   thr=4 b:jit:VGPU_JIT_LINK=1      cold  same
+polybench/3DCONV                   thr=4 b:jit:VGPU_JIT_LINK=1      warm  same
+rodinia/lud                        thr=1 b:jit                      cold  same
+rodinia/lud                        thr=1 b:jit                      warm  same
+rodinia/lud                        thr=1 b:jit:VGPU_JIT_LINK=1      cold  same
+rodinia/lud                        thr=1 b:jit:VGPU_JIT_LINK=1      warm  same
+rodinia/lud                        thr=4 b:jit                      cold  same
+rodinia/lud                        thr=4 b:jit                      warm  same
+rodinia/lud                        thr=4 b:jit:VGPU_JIT_LINK=1      cold  same
+rodinia/lud                        thr=4 b:jit:VGPU_JIT_LINK=1      warm  same
+rodinia/backprop                   thr=1 b:jit                      cold  DIFFERENT out:e0741560cfb9/e0741560cfb9 cnt:True dig:False rc:0/0
+rodinia/backprop                   thr=1 b:jit                      warm  DIFFERENT out:e0741560cfb9/e0741560cfb9 cnt:True dig:False rc:0/0
+rodinia/backprop                   thr=1 b:jit:VGPU_JIT_LINK=1      cold  DIFFERENT out:e0741560cfb9/e0741560cfb9 cnt:True dig:False rc:0/0
+rodinia/backprop                   thr=1 b:jit:VGPU_JIT_LINK=1      warm  DIFFERENT out:e0741560cfb9/e0741560cfb9 cnt:True dig:False rc:0/0
+rodinia/backprop                   thr=4 b:jit                      cold  DIFFERENT out:e0741560cfb9/e0741560cfb9 cnt:True dig:False rc:0/0
+rodinia/backprop                   thr=4 b:jit                      warm  DIFFERENT out:e0741560cfb9/e0741560cfb9 cnt:True dig:False rc:0/0
+rodinia/backprop                   thr=4 b:jit:VGPU_JIT_LINK=1      cold  DIFFERENT out:e0741560cfb9/e0741560cfb9 cnt:True dig:False rc:0/0
+rodinia/backprop                   thr=4 b:jit:VGPU_JIT_LINK=1      warm  DIFFERENT out:e0741560cfb9/e0741560cfb9 cnt:True dig:False rc:0/0
+hecbench/bilateral-cuda            thr=1 b:jit                      cold  same
+hecbench/bilateral-cuda            thr=1 b:jit                      warm  same
+hecbench/bilateral-cuda            thr=1 b:jit:VGPU_JIT_LINK=1      cold  same
+hecbench/bilateral-cuda            thr=1 b:jit:VGPU_JIT_LINK=1      warm  same
+hecbench/bilateral-cuda            thr=4 b:jit                      cold  same
+hecbench/bilateral-cuda            thr=4 b:jit                      warm  same
+hecbench/bilateral-cuda            thr=4 b:jit:VGPU_JIT_LINK=1      cold  same
+hecbench/bilateral-cuda            thr=4 b:jit:VGPU_JIT_LINK=1      warm  same
+hecbench/bh-cuda                   thr=1 b:jit                      cold  same
+hecbench/bh-cuda                   thr=1 b:jit                      warm  same
+hecbench/bh-cuda                   thr=1 b:jit:VGPU_JIT_LINK=1      cold  same
+hecbench/bh-cuda                   thr=1 b:jit:VGPU_JIT_LINK=1      warm  same
+hecbench/bh-cuda                   thr=4 b:jit                      cold  DIFFERENT out:6bde291205ee/6bde291205ee cnt:False dig:False rc:0/0
+hecbench/bh-cuda                   thr=4 b:jit                      warm  DIFFERENT out:6bde291205ee/6bde291205ee cnt:False dig:False rc:0/0
+hecbench/bh-cuda                   thr=4 b:jit:VGPU_JIT_LINK=1      cold  DIFFERENT out:6bde291205ee/6bde291205ee cnt:False dig:False rc:0/0
+hecbench/bh-cuda                   thr=4 b:jit:VGPU_JIT_LINK=1      warm  DIFFERENT out:6bde291205ee/6bde291205ee cnt:False dig:False rc:0/0
+hecbench/silu-cuda                 thr=1 b:jit                      cold  DIFFERENT out:dc58fe022bac/dc58fe022bac cnt:True dig:False rc:0/0
+hecbench/silu-cuda                 thr=1 b:jit                      warm  DIFFERENT out:dc58fe022bac/dc58fe022bac cnt:True dig:False rc:0/0
+hecbench/silu-cuda                 thr=1 b:jit:VGPU_JIT_LINK=1      cold  DIFFERENT out:dc58fe022bac/dc58fe022bac cnt:True dig:False rc:0/0
+hecbench/silu-cuda                 thr=1 b:jit:VGPU_JIT_LINK=1      warm  DIFFERENT out:dc58fe022bac/dc58fe022bac cnt:True dig:False rc:0/0
+hecbench/silu-cuda                 thr=4 b:jit                      cold  DIFFERENT out:dc58fe022bac/dc58fe022bac cnt:True dig:False rc:0/0
+hecbench/silu-cuda                 thr=4 b:jit                      warm  DIFFERENT out:dc58fe022bac/dc58fe022bac cnt:True dig:False rc:0/0
+hecbench/silu-cuda                 thr=4 b:jit:VGPU_JIT_LINK=1      cold  DIFFERENT out:dc58fe022bac/dc58fe022bac cnt:True dig:False rc:0/0
+hecbench/silu-cuda                 thr=4 b:jit:VGPU_JIT_LINK=1      warm  DIFFERENT out:dc58fe022bac/dc58fe022bac cnt:True dig:False rc:0/0
+hecbench/aop-cuda                  thr=1 b:jit                      cold  same
+hecbench/aop-cuda                  thr=1 b:jit                      warm  same
+hecbench/aop-cuda                  thr=1 b:jit:VGPU_JIT_LINK=1      cold  same
+hecbench/aop-cuda                  thr=1 b:jit:VGPU_JIT_LINK=1      warm  same
+hecbench/aop-cuda                  thr=4 b:jit                      cold  same
+hecbench/aop-cuda                  thr=4 b:jit                      warm  same
+hecbench/aop-cuda                  thr=4 b:jit:VGPU_JIT_LINK=1      cold  same
+hecbench/aop-cuda                  thr=4 b:jit:VGPU_JIT_LINK=1      warm  same
+DIFFERENCES: 20
+SAME_DONE

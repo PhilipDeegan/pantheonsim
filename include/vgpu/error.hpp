@@ -38,6 +38,8 @@ enum class Err {
   NotFound,               // module/function lookup failure
   Unsupported,            // unimplemented runtime feature
   Internal,               // invariant violation in the emulator itself
+  PtxVersion,             // a .version newer than the driver's PTX compiler takes (CUDA_ERROR_UNSUPPORTED_PTX_VERSION, 222)
+  InvalidImage,           // text the driver does not recognise as PTX or a binary (CUDA_ERROR_INVALID_IMAGE, 200)
 };
 
 const char* err_name(Err e);

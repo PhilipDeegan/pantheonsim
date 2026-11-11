@@ -1,0 +1,13 @@
+Scripts of round sp53, written for server3 (paths under `~/.cache/sp53` are what the rig used; `real.py` of `tools/bench/real` is copied beside them there).
+
+* `sigprof.c`, `sigprof_sym.py`, `sigprof_diff.py`, `sigprof_addr.py`: a profiler for a host without `perf` (`perf_event_paranoid` 4, no root). `sigprof.so` is preloaded into the program (after `taskset env`, not into `taskset`), takes a `SIGPROF` every millisecond of CPU time and writes the interrupted addresses at exit as module, offset and count; the three scripts give the samples by function, two runs side by side, and one function address by address (to set against `objdump -d`).
+* `stepcount.c`, `stepmix.py`: exact instruction counts of a fixed piece of a JIT run. `stepcount.so` is preloaded like the sampler, interposes `dlopen`, puts a breakpoint at every region function of the generated object, lets `STEP_SKIP` region calls go by and then counts every instruction by its address (the trap flag, a `SIGTRAP` an instruction) until `STEP_CALLS` more have begun; its output has the sampler's format. `stepmix.py` sorts the generated code's instructions by the kind of their operands.
+* `one.py`: one program, N runs on a given cache with given variables, optionally under the sampler or with the JIT's statistics.
+* `aslr.py`: two settings of one program with address-space randomisation off and the stack moved by an environment variable of a given size (is a difference a matter of placement?).
+* `bisect.sh`: the linking features one at a time (`VGPU_JIT_LINK_MERGE=0`, `VGPU_JIT_LINK_EXIT=0`) and the two forms of the row copy (`VGPU_JIT_MUTANT=row_loop` is round sp52's): what each object holds (functions, instructions, `rep movs`).
+* `compile_cost.sh`: the compile of a program's objects, variant by variant (unlinked, linked, linked without merging, without split blocks, without BSYNC), with the engine's command line, three times each; `TIME_REPORT=1` keeps the compiler's `-ftime-report` of the largest source.
+* `flag_sweep.sh`: one kept source compiled with the engine's command line and one more flag set at a time.
+* `tests_all.sh`: the JIT's unit tests and the run-loop tests in every leg ctest has for them, one line a leg.
+* `table18.py`, `compact.py`: the table of the 18 programs from `sp33.py`'s files; a result file of `sp33.py` with one line a program (what is kept in `data/sp53/`).
+* `mutants.sh`: the round's four tests on the pristine build and under each of its mutants (needs `-DVGPU_JIT_MUTANTS=ON`).
+* `sp33.py`, `count.py`, `verify.py`, `abtable.py`, `exittable.py`: round sp52's drivers, unchanged but for a default path (timing with interleaved sides, exit counts, same bits, the tables).

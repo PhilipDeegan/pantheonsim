@@ -684,6 +684,51 @@ VTEST(wmma_m16n16k16_matmul) {
     VCHECK_EQ(as_f32(e.mem.load_scalar(out + l * 4, 4)), 96.0f);  // 16 * 2 * 3
 }
 
+// tiny-cuda-nn's fused backward pass loads the "forward activations" fragment of its last layer from a null pointer and reads nothing of
+// it (that layer has no activation function): ptxas removes the load as dead code, so on a card the address is never touched. Run as
+// written, the PTX engine read address 0 and stopped the program (an invalid-pointer error). A wmma.load whose registers nothing reads
+// is a nop; one whose registers are read still faults on a bad address.
+static std::string wmma_load_null_ptx(bool use_result) {
+  return std::string(kHeader) + R"(
+.visible .entry k(.param .u64 out)
+{
+    .reg .b32 %r<24>;
+    .reg .f32 %f<10>;
+    .reg .b64 %rd<8>;
+    ld.param.u64 %rd1, [out];
+    cvta.to.global.u64 %rd2, %rd1;
+    mov.u64 %rd5, 0;                  // a null base
+    mov.u32 %r20, 16;
+    wmma.load.a.sync.aligned.row.m16n16k16.f16 {%r1, %r2, %r3, %r4, %r5, %r6, %r7, %r8}, [%rd5], %r20;
+    mov.u32 %r10, 7;
+)" + (use_result ? "    add.u32 %r10, %r10, %r1;\n" : "") + R"(
+    mov.u32 %r11, %laneid;
+    mul.wide.u32 %rd3, %r11, 4;
+    add.s64 %rd4, %rd2, %rd3;
+    st.global.u32 [%rd4], %r10;
+    ret;
+}
+)";
+}
+VTEST(a_wmma_load_nothing_reads_is_dead_code_and_never_touches_its_address) {
+  Env e;
+  auto m = ptx::parse(wmma_load_null_ptx(false));
+  uint64_t out = e.mem.alloc(32 * 4);
+  LaunchConfig cfg;
+  cfg.block = {32, 1, 1};
+  exec::launch(m.entries[0], cfg, {arg_u64(out)}, e.mem, e.prof);
+  for (uint32_t l = 0; l < 32; ++l) VCHECK_EQ(e.mem.load_scalar(out + l * 4, 4), uint64_t{7});
+}
+VTEST(a_wmma_load_whose_registers_are_read_still_faults_on_a_bad_address) {
+  Env e;
+  auto m = ptx::parse(wmma_load_null_ptx(true));
+  uint64_t out = e.mem.alloc(32 * 4);
+  LaunchConfig cfg;
+  cfg.block = {32, 1, 1};
+  auto err = VCAPTURE(Error, exec::launch(m.entries[0], cfg, {arg_u64(out)}, e.mem, e.prof));
+  VCHECK_CONTAINS(err.what(), "read at 0x0");
+}
+
 VTEST(wmma_accumulator_is_added) {
   // Same as above but with a non-zero C: D = A*B + C = 96 + 10 = 106.
   std::string ptx = std::string(kHeader) + R"(
@@ -2431,6 +2476,57 @@ DONE:
   exec::launch(m.entries[0], cfg, {arg_u64(out)}, e.mem, e.prof);
   for (uint32_t l = 16; l < 32; ++l)
     VCHECK_EQ(e.mem.load_scalar(out + l * 4, 4), uint64_t{0xFFFF0000});
+}
+
+VTEST(group_ballots_at_two_sites_rendezvous_and_reach_the_barrier) {
+  // Groups of 4 lanes vote with their own mask, but the lanes of one group sit at two copies of the
+  // ballot (the compiler tail-duplicates it into both arms of an if). On an RTX 3060 (sm_86, CUDA 13.0)
+  // every lane gets its whole group's ballot, and the bar.sync after them is reached. The simulator ran
+  // the first copy for its lanes alone, then the barrier found the other lanes parked at a ballot that
+  // nothing could complete: "bar.sync cannot be reached by every lane of the warp" (issue #574).
+  std::string ptx = std::string(kHeader) + R"(
+.visible .entry k(.param .u64 out)
+{
+    .reg .b32 %r<12>;
+    .reg .b64 %rd<6>;
+    .reg .pred %p<6>;
+    ld.param.u64 %rd1, [out];
+    cvta.to.global.u64 %rd2, %rd1;
+    mov.u32 %r1, %laneid;
+    mul.wide.u32 %rd3, %r1, 4;
+    add.s64 %rd4, %rd2, %rd3;
+    and.b32 %r2, %r1, 28;
+    mov.u32 %r3, 15;
+    shl.b32 %r4, %r3, %r2;
+    mul.lo.u32 %r5, %r1, 7;
+    add.u32 %r5, %r5, 3;
+    rem.u32 %r5, %r5, 5;
+    setp.gt.u32 %p1, %r5, 1;
+    setp.gt.u32 %p2, %r5, 1;
+    and.b32 %r6, %r1, 1;
+    setp.ne.u32 %p3, %r6, 0;
+    @%p3 bra ODD;
+    vote.sync.ballot.b32 %r7, %p1, %r4;
+    bra.uni JOIN;
+ODD:
+    vote.sync.ballot.b32 %r7, %p2, %r4;
+JOIN:
+    st.global.u32 [%rd4], %r7;
+    bar.sync 0;
+    ret;
+}
+)";
+  Env e;
+  auto m = ptx::parse(ptx);
+  uint64_t out = e.mem.alloc(32 * 4);
+  LaunchConfig cfg;
+  cfg.block = {32, 1, 1};
+  exec::launch(m.entries[0], cfg, {arg_u64(out)}, e.mem, e.prof);
+  // Card output, lane group by group (probe in the issue's shape, run on the 3060).
+  const uint32_t want[8] = {0x0000000d, 0x000000a0, 0x00000500, 0x0000b000,
+                            0x00060000, 0x00d00000, 0x0a000000, 0x50000000};
+  for (uint32_t l = 0; l < 32; ++l)
+    VCHECK_EQ(e.mem.load_scalar(out + l * 4, 4), uint64_t{want[l / 4]});
 }
 
 // ---- counters derived from the addresses themselves ----
@@ -7400,6 +7496,22 @@ VTEST(cvt_float_to_64bit_int_saturates_at_the_limits) {
   VCHECK_EQ(e.mem.load_scalar(out + 24, 8), 0xffffffffffffffffull);   // 2^64 -> u64 max
   VCHECK_EQ(e.mem.load_scalar(out + 32, 8), 0x8000000000000000ull);   // -inf -> s64 min
   VCHECK_EQ(e.mem.load_scalar(out + 40, 8), 0x8000000000000000ull);   // NaN -> the sign bit (an RTX 3060)
+}
+
+// PTX the parser must take: ld.weak/st.weak (the explicit spelling of the default semantics, GiMMiK's
+// loads and stores), and a .reg range past 65,536 (nvcc's unrolled field arithmetic declares 125,511;
+// ptxas allocates physical registers and counts only the ones a kernel uses).
+VTEST(weak_ld_st_and_huge_register_ranges_parse) {
+  const std::string body = std::string(kHeader) + ".visible .entry k(.param .u64 out)\n{\n"
+      "    .reg .b64 %rd<2>;\n    .reg .f64 %fd<2>;\n    .reg .b64 %big<125511>;\n"
+      "    ld.param.u64 %rd0, [out];\n"
+      "    ld.weak.global.cg.f64 %fd0, [%rd0];\n    st.weak.global.f64 [%rd0], %fd0;\n"
+      "    mov.u64 %big125510, 7;\n    ret;\n}\n";
+  const ptx::Module m = ptx::parse(body);
+  VCHECK_EQ(m.entries.size(), size_t(1));
+  // A word that is no directive is a syntax error (INVALID_PTX), not valid PTX this engine lacks.
+  auto err = VCAPTURE(Error, ptx::parse(std::string(kHeader) + "this is not valid ptx\n"));
+  VCHECK(err.code() == Err::PtxParse);
 }
 
 // Malformed PTX gets a precise parse error, never a crash, a wrong register or

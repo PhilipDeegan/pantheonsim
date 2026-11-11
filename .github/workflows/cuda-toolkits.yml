@@ -37,7 +37,9 @@ jobs:
   suite:
     name: build + tests, CUDA ${{ matrix.cuda }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 150
+    # A hosted runner can be half again as slow as the next one: the same
+    # tests took 93 minutes on one and 122 on another (2026-11-10).
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -108,9 +110,10 @@ jobs:
 
       - name: Unit and end-to-end tests
         # The build job's set. The ML tests are the ml job's, the workloads
-        # and ollama ci.yml's, and CUTLASS's builds take hours.
+        # and ollama ci.yml's, and CUTLASS's builds take hours. The two _jit_link
+        # repeats of a unit test (7 to 11 minutes) are left to the build job.
         env:
           SKIP: ${{ matrix.skip }}
         run: |
           ctest --test-dir build --output-on-failure \
-            -E "^(pantheon_workloads|.*ollama.*|amd_pytorch.*|amd_rocblas|amd_hipsparselt.*|amd_vllm.*|e2e_cutlass.*$SKIP)\$"
+            -E "^(pantheon_workloads|.*ollama.*|amd_pytorch.*|amd_rocblas|amd_hipsparselt.*|amd_vllm.*|e2e_cutlass.*|test_sass_alu_runs_jit_link|test_sass_dispatch_counts_jit_link$SKIP)\$"

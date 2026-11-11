@@ -1,0 +1,15 @@
+hecbench/black-scholes-cuda unlinked: objects 1, source lines 9413, instructions 39870, compile s 3.39
+hecbench/black-scholes-cuda linked: objects 1, source lines 13757, instructions 58098, compile s 11.68
+hecbench/black-scholes-cuda linked-nomerge: objects 1, source lines 13836, instructions 59079, compile s 7.75
+hecbench/black-scholes-cuda linked-nosplit: objects 1, source lines 12983, instructions 55901, compile s 11.5
+hecbench/black-scholes-cuda linked-nobsync: objects 1, source lines 12847, instructions 56069, compile s 10.41
+hecbench/bilateral-cuda unlinked: objects 3, source lines 19769, instructions 92232, compile s 8.45
+hecbench/bilateral-cuda linked: objects 3, source lines 25725, instructions 110419, compile s 20.92
+hecbench/bilateral-cuda linked-nomerge: objects 3, source lines 25846, instructions 112371, compile s 15.32
+hecbench/bilateral-cuda linked-nosplit: objects 3, source lines 24504, instructions 106944, compile s 20.53
+hecbench/bilateral-cuda linked-nobsync: objects 3, source lines 24163, instructions 106570, compile s 16.83
+rodinia/hotspot unlinked: objects 1, source lines 4546, instructions 16392, compile s 1.84
+rodinia/hotspot linked: objects 1, source lines 6515, instructions 23180, compile s 4.06
+rodinia/hotspot linked-nomerge: objects 1, source lines 6585, instructions 23613, compile s 3.12
+rodinia/hotspot linked-nosplit: objects 1, source lines 6136, instructions 22125, compile s 3.96
+rodinia/hotspot linked-nobsync: objects 1, source lines 6484, instructions 23104, compile s 4.04
