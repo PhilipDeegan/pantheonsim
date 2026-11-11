@@ -840,6 +840,38 @@ struct Machine {
     w.sgpr[i] = v;
   }
   uint64_t sgpr64(const Wave& w, uint32_t i) const { return sgpr(w, i) | static_cast<uint64_t>(sgpr(w, i + 1)) << 32; }
+  // Dword `i` of an SMEM instruction's data operand (SDATA). The field is seven bits and names any scalar destination, not only s0..s101:
+  // LLVM writes `s_load_dwordx2 vcc, s[94:95], 0x0` when it is short of scalar registers (issue #579), and the destination's `index` is
+  // 0 for VCC, so writing it as an SGPR put the loaded value in s0 and s1, which on gfx90a hold the private segment buffer.
+  // Dword 0 of VCC is vcc_lo and dword 1 vcc_hi, the same for EXEC; M0 and the trap temporaries are one dword each.
+  void put_sdata(Wave& w, const Operand& o, uint32_t i, uint32_t v) {
+    if (o.kind == OperandKind::Sgpr) return set_sgpr(w, o.index + i, v);
+    const auto lo_hi = [&](uint64_t& reg, bool high_only) {
+      const bool high = high_only || i == 1;
+      if (!high_only && i > 1) throw Error::make(Err::Unsupported, "a scalar load of ", i + 1, " dwords into a 64-bit special register");
+      reg = high ? (reg & 0xFFFFFFFFull) | uint64_t{v} << 32 : (reg & ~0xFFFFFFFFull) | v;
+    };
+    switch (o.kind) {
+      case OperandKind::Vcc: return lo_hi(w.vcc, false);
+      case OperandKind::VccHi: return lo_hi(w.vcc, true);
+      case OperandKind::Exec: return lo_hi(w.exec, false);
+      case OperandKind::ExecLo: return i == 0 ? lo_hi(w.exec, false) : throw Error::make(Err::Unsupported, "a scalar load past exec_lo");
+      case OperandKind::ExecHi: return lo_hi(w.exec, true);
+      case OperandKind::M0:
+        if (i == 0) { w.m0 = v; return; }
+        break;
+      case OperandKind::Ttmp:
+        if (o.index + i < 16) { w.ttmp[o.index + i] = v; return; }
+        break;
+      case OperandKind::Null: return;
+      default: break;
+    }
+    throw Error::make(Err::Unsupported, "a scalar load into a register this does not write");
+  }
+  uint32_t get_sdata(const Wave& w, const Operand& o, uint32_t i) const {
+    if (o.kind == OperandKind::Sgpr) return sgpr(w, o.index + i);
+    return static_cast<uint32_t>(scalar(w, o) >> (32 * i));
+  }
   // A memory instruction's scalar base or offset: a scalar register, or one
   // of the special ones the same field can name (VCC most often, which a
   // kernel short of scalar registers keeps an address in).
@@ -1199,8 +1231,15 @@ struct Machine {
       case OperandKind::Inline:
       case OperandKind::InlineFloat:
       case OperandKind::Literal:
-        if (top)
+        if (top) {
+          // The second part of a constant: a 64-bit operand's inline constant is a double or a sign-extended integer, and a literal
+          // is padded (CDNA3 ISA 6.2.1.1), so what that half holds depends on the form, and this models none of them -- except
+          // zero, whose every expansion is zero. LLVM writes `v_pk_add_f32 v[2:3], v[2:3], 0 neg_lo:[1,1] neg_hi:[1,1]` for a
+          // float subtract of zero (op_sel_hi left at its default, the second half): the constant is zero in both halves.
+          const bool zero = o.kind == OperandKind::InlineFloat ? o.fvalue == 0 : o.value == 0;
+          if (o.kind != OperandKind::Literal && zero) return 0;
           throw Error::make(Err::Unsupported, in.name, " takes the second part of a constant, which this does not model");
+        }
         // Each half of a packed float is a float: an inline float constant
         // is a float's bits here, though the operand is a register pair.
         if (o.kind == OperandKind::InlineFloat) return as_bits(static_cast<float>(o.fvalue));
@@ -2774,7 +2813,7 @@ struct Machine {
   [[gnu::noinline]] bool scalar_load_run(Wave& w, const Inst& in, uint64_t base, uint32_t words) {
     uint32_t run[16];
     if (!at(base).load_run(base, run, 4ull * words, 4)) return false;
-    for (uint32_t i = 0; i < words; ++i) set_sgpr(w, in.dst[0].index + i, run[i]);
+    for (uint32_t i = 0; i < words; ++i) put_sdata(w, in.dst[0], i, run[i]);
     return true;
   }
   void scalar_load(Wave& w, const Inst& in) {
@@ -2785,7 +2824,7 @@ struct Machine {
       const uint32_t words = in.dst[0].width;
       if (words >= 2 && words <= 16 && scalar_load_run(w, in, base, words)) return;
       for (uint32_t i = 0; i < words; ++i)
-        set_sgpr(w, in.dst[0].index + i, static_cast<uint32_t>(at(base + 4 * i).load_scalar(base + 4 * i, 4)));
+        put_sdata(w, in.dst[0], i, static_cast<uint32_t>(at(base + 4 * i).load_scalar(base + 4 * i, 4)));
       return;
     }
     scalar_load_general(w, in, mf);
@@ -2806,8 +2845,8 @@ struct Machine {
     // wall_clock64() loops do, waits that long.
     if (mf.smem == SK::Time) {
       const uint64_t t = !mf.smem_realtime ? stats.instructions : realtime_ticks();
-      set_sgpr(w, in.dst[0].index, static_cast<uint32_t>(t));
-      set_sgpr(w, in.dst[0].index + 1, static_cast<uint32_t>(t >> 32));
+      put_sdata(w, in.dst[0], 0, static_cast<uint32_t>(t));
+      put_sdata(w, in.dst[0], 1, static_cast<uint32_t>(t >> 32));
       return;
     }
     // The scalar cache holds nothing here to write back or drop.
@@ -2821,7 +2860,7 @@ struct Machine {
     const uint64_t base = scalar_load_base(w, in);
     if (mf.smem == SK::Store) {
       for (uint32_t i = 0; i < in.dst[0].width; ++i)
-        at(base + 4 * i).store_scalar(base + 4 * i, 4, sgpr(w, in.dst[0].index + i));
+        at(base + 4 * i).store_scalar(base + 4 * i, 4, get_sdata(w, in.dst[0], i));
       return;
     }
     // Through a buffer resource (s_buffer_load's): the resource's base (48 bits) and its size in bytes (num_records), the offset
@@ -2835,7 +2874,7 @@ struct Machine {
       const uint64_t offset = static_cast<uint64_t>(in.offset) + (in.has_saddr ? scalar_field(w, in.saddr, false) : 0);
       for (uint32_t i = 0; i < in.dst[0].width; ++i) {
         const uint64_t off = offset + 4 * i, addr = buffer + off;
-        if (off + 4 <= records) at(addr).store_scalar(addr, 4, sgpr(w, in.dst[0].index + i));
+        if (off + 4 <= records) at(addr).store_scalar(addr, 4, get_sdata(w, in.dst[0], i));
       }
       return;
     }
@@ -2900,7 +2939,7 @@ struct Machine {
       const bool sign = mf.smem_sign;
       const uint32_t v = bytes == 1 ? (sign ? static_cast<uint32_t>(static_cast<int8_t>(raw)) : static_cast<uint32_t>(raw & 0xFF))
                                     : (sign ? static_cast<uint32_t>(static_cast<int16_t>(raw)) : static_cast<uint32_t>(raw & 0xFFFF));
-      set_sgpr(w, in.dst[0].index, v);
+      put_sdata(w, in.dst[0], 0, v);
       return;
     }
     const uint32_t words = in.dst[0].width;
@@ -2913,13 +2952,12 @@ struct Machine {
       const uint64_t offset = static_cast<uint64_t>(in.offset) + (in.has_saddr ? scalar_field(w, in.saddr, false) : 0);
       for (uint32_t i = 0; i < words; ++i) {
         const uint64_t off = offset + 4 * i, addr = buffer + off;
-        set_sgpr(w, in.dst[0].index + i,
-                 off + 4 <= records ? static_cast<uint32_t>(at(addr).load_scalar(addr, 4)) : 0);
+        put_sdata(w, in.dst[0], i, off + 4 <= records ? static_cast<uint32_t>(at(addr).load_scalar(addr, 4)) : 0);
       }
       return;
     }
     for (uint32_t i = 0; i < words; ++i)
-      set_sgpr(w, in.dst[0].index + i, static_cast<uint32_t>(at(base + 4 * i).load_scalar(base + 4 * i, 4)));
+      put_sdata(w, in.dst[0], i, static_cast<uint32_t>(at(base + 4 * i).load_scalar(base + 4 * i, 4)));
   }
 
   static uint32_t first_active(const Wave& w) {
@@ -8938,6 +8976,13 @@ struct Machine {
                                           : static_cast<int32_t>(lane_src(w, in.src[0], lane));
         offset = static_cast<uint64_t>(v + static_cast<int32_t>(scalar_field(w, in.saddr, false)) + in.offset);
       }
+      // The work-item's offset is a 32-bit quantity: a stack pointer kept in an SGPR that is negative (below the frame's base) with an
+      // instruction offset that brings it back (`scratch_store_dwordx4 off, v[0:3], s0 offset:32` with s0 = -32) gives offset 0, not
+      // 2^32 (issue #578). The ISA sums "sgpr_offset + inst.offset" (CDNA3 ISA 10.5; the field widths are 32 bits and a signed 13), and
+      // gfx1250's SVS form above is already summed as signed 32-bit numbers. Assumed, not stated: that the sum wraps at 32 bits where
+      // the ISA text is silent. A sum that stays out of the work-item's scratch is still refused by scratch_at.
+      // Only a sum that wraps into the work-item's scratch is changed: one that does not is refused with the 64-bit number it always was.
+      if (in.arch != gcn::Target::Gfx1250 && (offset >> 32) && static_cast<uint32_t>(offset) < g.scratch_per_lane) offset = static_cast<uint32_t>(offset);
       // A narrow access moves one byte or two; every other one moves whole
       // registers.
       const Narrow n = narrow_of(mf);
