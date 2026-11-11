@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "vgpu/exec/devrt.hpp"
+#include "vgpu/ptx/ast.hpp"
 #include "vgpu/memory.hpp"
 #include "vgpu/registry.hpp"
 #include "vtest.hpp"
@@ -297,6 +298,19 @@ VTEST(function_attributes_layout) {
   VCHECK_EQ(i[1], 24);
   VCHECK_EQ(i[2], 86);
   VCHECK_EQ(i[3], 86);
+}
+
+// A kernel's thread limit, from its registers: whole warps per sub-partition on NVIDIA, the limit a launch of it
+// is accepted at.
+VTEST(kernel_thread_limit_from_registers) {
+  const DeviceProfile p = load_gpu("nvidia/h100");
+  const ptx::EntryFn fn;
+  VCHECK_EQ(devrt::kernel_thread_limit(fn, p, 32), 1024u);
+  VCHECK_EQ(devrt::kernel_thread_limit(fn, p, 102), 512u);  // 19 warps of 104 fit the file, 16 the sub-partitions
+  VCHECK_EQ(devrt::kernel_thread_limit(fn, p, 104), 512u);
+  VCHECK_EQ(devrt::kernel_thread_limit(fn, p, 128), 512u);
+  VCHECK_EQ(devrt::kernel_thread_limit(fn, p, 168), 384u);
+  VCHECK_EQ(devrt::kernel_thread_limit(fn, p, 255), 256u);
 }
 
 VTEST_MAIN
