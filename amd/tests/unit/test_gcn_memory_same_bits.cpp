@@ -9,6 +9,8 @@
 // instruction left behind (registers, LDS, scratch, the three allocations, the counts, or the text of the error it
 // threw) is compared with amd/tests/data/mem_same_bits_digests.txt, which was recorded from the base build
 // (VGPU_MEM_SAME_BITS_UPDATE=<file> writes it: only ever from the commit before the change under test).
+// Re-recorded on purpose once (issue #579): the 13 scalar loads whose destination is VCC (s_load_dword vcc_lo, vcc_hi, vcc; s_load_b32/b64
+// likewise) used to write the loaded words to s0 and s1; they fill VCC now. Every other digest is as it was.
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
