@@ -660,6 +660,7 @@ class MemoryManager {
   struct SpecPlan {
     bool pages = true;   // false: every page is noted by word from its first touch
     std::vector<std::pair<uint64_t, uint64_t>> by_word;   // [first, end) address ranges noted by word from the first touch
+    bool scouted = false;   // (the caller's: the kernel's first block has been run alone once, spec_scouted)
   };
   // What the notes of a trial cost, for VGPU_EXACT_STATS and the tests (sums over the workers).
   struct SpecStats {
@@ -676,7 +677,9 @@ class MemoryManager {
     uint64_t words_written_first = 0;   // ... taken by compare-and-swap (their bytes are kept)
     uint64_t keeps = 0;                 // pieces kept for undoing
     uint64_t runs_known = 0;            // accesses inside a run of words the worker remembered its block had noted
-    uint64_t word_pages = 0;            // pages of words put in place
+    uint64_t word_pages = 0;            // pages of lines and words put in place
+    uint64_t lines_by_word = 0;         // 64-byte lines a second block came to (their sixteen words are noted one by one from then)
+    uint64_t lines_one_block = 0;       // ... that one block alone had touched when the trial ended
     void add(const SpecStats& o);
   };
   struct SpecOutcome {
@@ -698,6 +701,12 @@ class MemoryManager {
   void spec_enter(unsigned worker);
   void spec_block(uint64_t block);
   void spec_leave();
+  // The scout. The launching thread, after it ran block 0 alone as worker 0 (spec_enter(0), spec_block(0), spec_leave) and before
+  // any other block starts: block 0's notes are forgotten (its kept bytes are not), so that the blocks after it are noted against
+  // one another only. Block 0 is the first block of the run in order, so what it left is what every later block finds in order.
+  // Returns the allocations block 0 read in by page state and wrote in, which the rest of the trial notes by word from the first
+  // touch; the caller keeps them for the kernel's later trials. Nothing is learned or forgotten when block 0 stopped the trial.
+  std::vector<std::pair<uint64_t, uint64_t>> spec_scouted();
   bool spec_active() const { return spec_ != nullptr; }
   bool spec_stopped() const;
   // Stops the trial for a reason of the caller's (a block failed, the kernel asked for something that depends on the thread).

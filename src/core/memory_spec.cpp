@@ -29,6 +29,26 @@
 // A stopped trial is undone from the bytes each block kept when it first wrote a word (it owned the word then, so
 // what it kept is what the launch started with), and the launch is run again in order.
 //
+// The words of a page noted by word are kept sixteen at a time while one block alone has touched them (round sp58): a
+// line is 64 bytes of device memory, and its record is one 64-bit value
+//     0                                  no block has touched the line's sixteen words
+//     b + 1 | read bits | written bits   block b alone has touched them: a bit per word it read, a bit per word it wrote
+//     kLineByWord                        the sixteen words (above) say what was done; final
+//     kLineBusy                          a block is writing the sixteen words out from the record (a few stores long), or the
+//                                        line's block is keeping its 64 bytes before its first write in it; others wait
+// The record of one block is the sixteen word marks 0, b + 1 and kWrite | (b + 1) written down in 64 bits, and a block
+// moves it by one compare-and-swap, which is the single-word moves of several of its words made at the same instant.
+// A second block that comes to the line reads from the record exactly which words the first read and wrote: where its
+// own access may not be made by the word rules it stops the trial; otherwise it writes the marks out to the words
+// (kLineBusy while it does, so that no block sees half of them) and the line is noted by word from then on. Nothing is
+// noted that the words would not note, so a line never makes a stop of its own.
+//
+// What a block keeps for undoing in a line it alone holds is the whole line, once, at its first write in it: the record
+// is kLineBusy while the 64 bytes are copied, so no other block can come to the line and write in it meanwhile, and no
+// block had touched it before; the copy is what the trial started with in all sixteen words. The block's later writes in
+// the line keep nothing. (Another block that comes to the line afterwards keeps its own words by the word rules; those
+// bytes are what the trial started with too, so the order of putting back stays free.)
+//
 // A stop at a page state, or at a word of a kWordsCoarse page that says "read", may be the note's fault and not the
 // kernel's (the page says more was read than was). Such a stop is marked coarse and names the allocation; the caller
 // may run the trial again with that allocation noted by word from the start (SpecPlan), which is the exact note.
@@ -39,6 +59,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include <sys/mman.h>
@@ -47,8 +68,7 @@ namespace vgpu {
 
 class MemoryManager::Spec {
  public:
-  // A mark of the shadow: 32 bits, read and moved only by the atomic builtins. (Not std::atomic: two marks side by side are also
-  // read and taken as one 64-bit value, `Pair` below, which the builtins allow on a type that may alias.)
+  // A mark of the shadow: 32 bits, read and moved only by the atomic builtins.
   struct Word {
     uint32_t v;
     uint32_t load(std::memory_order) const { return __atomic_load_n(&v, __ATOMIC_ACQUIRE); }
@@ -60,9 +80,40 @@ class MemoryManager::Spec {
       return __atomic_compare_exchange_n(&v, &expected, desired, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
     }
   };
-  // Two neighbouring words of a page (the first at an even index, so the pair is aligned), the lower index in the low half.
-  typedef uint64_t __attribute__((may_alias)) Pair;
-  static Pair* pair_at(Word* first) { return reinterpret_cast<Pair*>(first); }
+  // The record of a line (sixteen words of a page noted by word; the comment at the top of the file): the block's mark in the low
+  // half, then a bit per word it read, then a bit per word it wrote.
+  struct Line {
+    uint64_t v;
+    uint64_t load() const { return __atomic_load_n(&v, __ATOMIC_ACQUIRE); }
+    void store(uint64_t x) { __atomic_store_n(&v, x, __ATOMIC_RELEASE); }
+    bool take(uint64_t& expected, uint64_t desired) {
+      return __atomic_compare_exchange_n(&v, &expected, desired, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    }
+  };
+  static constexpr uint64_t kLineWords = 16, kPageLines = 64;
+  static constexpr uint32_t kLineByWord = 0xFFFFFFFEu, kLineBusy = 0xFFFFFFFDu;   // (no block's mark, as the page states)
+  struct Worker;
+  // A line is kLineBusy for sixteen stores, or for a copy of 64 bytes (which may end in a stop: the waiting block then stops too).
+  // (After a few looks the thread gives its CPU up: the block that holds the line may have lost its own.)
+  void wait_busy(Worker& w) {
+    if (stopped.load(std::memory_order_relaxed)) throw SpecStop{};
+    if (++w.waits % 64 == 0) {
+      std::this_thread::yield();
+      return;
+    }
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#else
+    std::this_thread::yield();
+#endif
+  }
+  static uint32_t owner(uint64_t line) { return static_cast<uint32_t>(line); }
+  static uint32_t read_bits(uint64_t line) { return static_cast<uint32_t>(line >> 32) & 0xFFFFu; }
+  static uint32_t written_bits(uint64_t line) { return static_cast<uint32_t>(line >> 48); }
+  static uint64_t as_read(uint32_t bits) { return uint64_t{bits} << 32; }
+  static uint64_t as_written(uint32_t bits) { return uint64_t{bits} << 48; }
+  // The bits of words [first, last] of a line (0 <= first <= last <= 15).
+  static uint32_t bits_of(uint64_t first, uint64_t last) { return (0xFFFFu >> (15 - (last - first))) << first; }
   static constexpr uint32_t kMany = 0xFFFFFFFFu, kWrite = 0x80000000u;
   // Page states only (no block's mark: run_exact tries fewer than 0x7FFFFFF0 blocks).
   static constexpr uint32_t kWords = 0xFFFFFFFEu, kWordsCoarse = 0xFFFFFFFDu;
@@ -70,7 +121,13 @@ class MemoryManager::Spec {
   static constexpr uint64_t kGranule = 4;          // bytes a word stands for
   static constexpr uint64_t kPageWords = 1024;     // words of a shadow page: 4 KiB of device memory, 4 KiB of shadow
   static constexpr uint64_t kPageBytes = kGranule * kPageWords;
-  static constexpr size_t kPoolPages = 65536;      // shadow pages kept between trials (256 MiB of host memory at most)
+  // What stands for a page noted by word: its lines' records, and the words of the lines that more than one block came to (the rest of
+  // `words` is never touched, so a page whose blocks keep to their own lines costs 512 bytes of host memory that is ever written).
+  struct Page {
+    Line lines[kPageLines];
+    Word words[kPageWords];
+  };
+  static constexpr size_t kPoolPages = 65536;      // shadow pages kept between trials (288 MiB of host memory at most)
   static constexpr uint64_t kKeepLimit = uint64_t{1} << 30;   // bytes one worker may keep for undoing before the trial stops
   static constexpr size_t kSeen = 256;             // pages a worker remembers it may read without a look at the shadow
   static constexpr size_t kRanges = 4;             // runs of words a worker remembers its block has noted
@@ -117,39 +174,46 @@ class MemoryManager::Spec {
 
   struct Worker {
     uint32_t tag = 0;                    // block + 1 of the block it runs now
-    std::vector<Word*> fresh;            // zeroed pages ready to install
+    std::vector<Page*> fresh;            // zeroed pages ready to install
     std::vector<uint64_t> installed;     // the top-table slots whose pages this worker installed
     std::vector<uint64_t> noted;         // the slots whose page state this worker moved from 0
     std::vector<std::pair<uint64_t, uint64_t>> kept_at;   // (address, length) of each kept piece, in the order kept
     std::vector<uint8_t> kept;                            // their bytes, one after another
     // The last page noted by word that was asked for (a block's accesses are mostly near one another).
     uint64_t last_slot = ~uint64_t{0};
-    Word* last_page = nullptr;
+    Page* last_page = nullptr;
     // The allocation the last kept piece was in.
     uint64_t keep_base = 1, keep_end = 0;
     const void* keep_alloc = nullptr;
+    size_t sealed = 0;                   // pieces [0, sealed) of the log are not added to (a scout's)
+    uint32_t waits = 0;                  // looks at a busy line (wait_busy)
     SpecStats st;
     Run wrote[kRanges], read[kRanges];
     uint8_t wrote_next = 0, read_next = 0;
     // Pages noted by word the worker has read in, and their words (a page's words stay where they are for the trial).
     struct WordPage {
       uint64_t slot = ~uint64_t{0};
-      Word* page = nullptr;
+      Page* page = nullptr;
     } pages[kWordPages];
     Seen seen[kSeen];
 
     // Ready for a trial. The undo log keeps its memory from the last trial (a launch that writes much writes as much the next time).
     void reset() {
-      tag = 0;
       installed.clear();
       noted.clear();
       kept_at.clear();
       kept.clear();
-      last_slot = ~uint64_t{0};
-      last_page = nullptr;
       keep_base = 1, keep_end = 0;
       keep_alloc = nullptr;
+      sealed = 0;
       st = SpecStats{};
+      forget();
+    }
+    // What the worker remembers of the shadow (every memory is of marks that are there; when marks are taken away, so is this).
+    void forget() {
+      tag = 0;
+      last_slot = ~uint64_t{0};
+      last_page = nullptr;
       for (size_t i = 0; i < kRanges; ++i) wrote[i] = read[i] = Run{};
       wrote_next = read_next = 0;
       for (Seen& e : seen) e = Seen{};
@@ -158,8 +222,8 @@ class MemoryManager::Spec {
   };
 
   ~Spec() {
-    for (Word* p : pool) std::free(p);
-    if (top) ::munmap(top, top_slots * sizeof(std::atomic<Word*>));
+    for (Page* p : pool) std::free(p);
+    if (top) ::munmap(top, top_slots * sizeof(std::atomic<Page*>));
     if (pstate) ::munmap(pstate, top_slots * sizeof(Word));
   }
 
@@ -170,25 +234,25 @@ class MemoryManager::Spec {
     span = bytes;
     const uint64_t slots = (bytes / kGranule + kPageWords - 1) / kPageWords + 1;
     if (slots <= top_slots) return;
-    if (top) ::munmap(top, top_slots * sizeof(std::atomic<Word*>));
+    if (top) ::munmap(top, top_slots * sizeof(std::atomic<Page*>));
     if (pstate) ::munmap(pstate, top_slots * sizeof(Word));
     top = nullptr;
     pstate = nullptr;
     const uint64_t want = std::max<uint64_t>(slots * 2, 4096);
     top_slots = 0;
-    void* m = ::mmap(nullptr, want * sizeof(std::atomic<Word*>), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    void* m = ::mmap(nullptr, want * sizeof(std::atomic<Page*>), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (m == MAP_FAILED) throw std::bad_alloc();
     void* m2 = ::mmap(nullptr, want * sizeof(Word), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (m2 == MAP_FAILED) {
-      ::munmap(m, want * sizeof(std::atomic<Word*>));
+      ::munmap(m, want * sizeof(std::atomic<Page*>));
       throw std::bad_alloc();
     }
-    top = static_cast<std::atomic<Word*>*>(m);   // (zero bytes: null pointers)
+    top = static_cast<std::atomic<Page*>*>(m);   // (zero bytes: null pointers)
     pstate = static_cast<Word*>(m2);             // (zero bytes: untouched pages)
     top_slots = want;
   }
 
-  Word* fresh_page(Worker& w) {
+  Page* fresh_page(Worker& w) {
     if (w.fresh.empty()) {
       std::lock_guard<std::mutex> g(pool_mu);
       for (int i = 0; i < 16 && !pool.empty(); ++i) {
@@ -197,20 +261,20 @@ class MemoryManager::Spec {
       }
     }
     if (!w.fresh.empty()) {
-      Word* p = w.fresh.back();
+      Page* p = w.fresh.back();
       w.fresh.pop_back();
       return p;
     }
-    void* m = std::calloc(kPageWords, sizeof(Word));
+    void* m = std::calloc(1, sizeof(Page));
     if (!m) throw std::bad_alloc();
-    return static_cast<Word*>(m);
+    return static_cast<Page*>(m);
   }
 
-  // The words of a page whose state is kWords or kWordsCoarse (installed zeroed by whoever comes first), remembered as the worker's last.
-  Word* word_page(Worker& w, uint64_t slot) {
-    Word* page = top[slot].load(std::memory_order_acquire);
+  // The lines and words of a page whose state is kWords or kWordsCoarse (installed zeroed by whoever comes first), remembered as the worker's last.
+  Page* word_page(Worker& w, uint64_t slot) {
+    Page* page = top[slot].load(std::memory_order_acquire);
     if (!page) {
-      Word* mine = fresh_page(w);
+      Page* mine = fresh_page(w);
       if (top[slot].compare_exchange_strong(page, mine, std::memory_order_acq_rel)) {
         page = mine;
         w.installed.push_back(slot);
@@ -248,62 +312,58 @@ class MemoryManager::Spec {
     refuse(reason);
   }
 
-  // A block reads bytes [lo, hi] (offsets in the range, both in page `slot`) and the worker has no memory of the page: the note,
-  // by the page's state when that is enough and by word when the page is noted by word.
-  [[gnu::noinline]] void read_page(Worker& w, uint64_t slot, uint64_t lo, uint64_t hi) {
+  // A block reads in page `slot` and the worker has no memory of the page: the note by the page's state when that is enough (null:
+  // nothing more to note), or the page's lines and words when it is noted by word.
+  [[gnu::noinline]] Page* read_page(Worker& w, uint64_t slot) {
     const uint32_t tag = w.tag;
-    const uint64_t first = lo / kGranule, last = hi / kGranule;
-    Word* page;
-    if (slot == w.last_slot) {
-      page = w.last_page;
-    } else {
-      Word& ps = pstate[slot];
-      uint32_t v = ps.load(std::memory_order_acquire);
-      for (;;) {
-        if (v == kMany || v == tag) {
-          w.seen[seen_at(slot)] = {slot, v};
-          return;
-        }
-        if (by_words(v)) break;
-        if (v == 0) {
-          const uint32_t to = by_word(slot) ? kWords : tag;
-          if (!ps.compare_exchange_weak(v, to, std::memory_order_acq_rel)) continue;
-          w.noted.push_back(slot);
-          ++(to == tag ? w.st.pages_read : w.st.pages_by_word);
-          v = to;
-          continue;
-        }
-        // Another block's reader mark: several readers now.
-        if (ps.compare_exchange_weak(v, kMany, std::memory_order_acq_rel)) {
-          ++w.st.pages_shared;
-          v = kMany;
-        }
+    if (slot == w.last_slot) return w.last_page;
+    Word& ps = pstate[slot];
+    uint32_t v = ps.load(std::memory_order_acquire);
+    for (;;) {
+      if (v == kMany || v == tag) {
+        w.seen[seen_at(slot)] = {slot, v};
+        return nullptr;
       }
-      page = word_page(w, slot);
+      if (by_words(v)) break;
+      if (v == 0) {
+        const uint32_t to = by_word(slot) ? kWords : tag;
+        if (!ps.compare_exchange_weak(v, to, std::memory_order_acq_rel)) continue;
+        w.noted.push_back(slot);
+        ++(to == tag ? w.st.pages_read : w.st.pages_by_word);
+        v = to;
+        continue;
+      }
+      // Another block's reader mark: several readers now.
+      if (ps.compare_exchange_weak(v, kMany, std::memory_order_acq_rel)) {
+        ++w.st.pages_shared;
+        v = kMany;
+      }
     }
-    w.pages[seen_at(slot) % kWordPages] = {slot, page};
-    const uint64_t g0 = first % kPageWords, g1 = last % kPageWords;
-    w.st.words_read += g1 - g0 + 1;
-    const auto mine = [tag](uint32_t v) { return v == kMany || v == tag || v == (tag | kWrite); };
-    for (uint64_t g = g0; g <= g1; ++g) {
-      Word& word = page[g];
-      if (!(g & 1) && g < g1) {
-        // Two words at once: both readable already, or both untouched and taken by one compare-and-swap.
-        Pair* two = pair_at(&word);
-        uint64_t v2 = __atomic_load_n(two, __ATOMIC_ACQUIRE);
-        if (mine(static_cast<uint32_t>(v2)) && mine(static_cast<uint32_t>(v2 >> 32))) {
-          ++g;
-          continue;
-        }
-        if (v2 == 0 && __atomic_compare_exchange_n(two, &v2, uint64_t{tag} | uint64_t{tag} << 32, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-          w.st.words_read_first += 2;
-          ++g;
-          continue;
-        }
-        // (anything else: one word at a time, below)
-      }
+    return word_page(w, slot);
+  }
+
+  // A second block has come to line `l` of `page`, whose record `v` is another block's: its marks are written out to the line's
+  // words, and the line is noted by word from then on. Nobody looks at the words of a line before its record says kLineByWord,
+  // and nobody but the block that put kLineBusy there writes them before that. On return `v` is the record as it is now.
+  [[gnu::noinline]] void to_words(Worker& w, Page* page, uint64_t l, uint64_t& v) {
+    Line& line = page->lines[l];
+    if (!line.take(v, kLineBusy)) return;   // (the record moved: its owner noted more, or another block is writing it out)
+    const uint32_t b = owner(v), r = read_bits(v), wr = written_bits(v);
+    Word* words = page->words + l * kLineWords;
+    for (uint64_t i = 0; i < kLineWords; ++i)
+      words[i].store((wr >> i & 1) ? (b | kWrite) : (r >> i & 1) ? b : 0, std::memory_order_relaxed);
+    line.store(kLineByWord);
+    ++w.st.lines_by_word;
+    v = kLineByWord;
+  }
+
+  // The words `m` (a bit each) of a line noted by word, for a read: the four states of a word.
+  [[gnu::always_inline]] void read_words(Worker& w, Word* words, uint32_t m) {
+    const uint32_t tag = w.tag;
+    for (; m; m &= m - 1) {
+      Word& word = words[__builtin_ctz(m)];
       uint32_t v = word.load(std::memory_order_acquire);
-      if (mine(v)) [[likely]] continue;
+      if (v == kMany || v == tag || v == (tag | kWrite)) [[likely]] continue;
       for (;;) {
         if (v == 0) {
           if (word.compare_exchange_weak(v, tag, std::memory_order_acq_rel)) {
@@ -320,7 +380,99 @@ class MemoryManager::Spec {
         }
       }
     }
-    if (last - first + 1 >= kRunWorth) learn(w.read, w.read_next, tag, first, last);
+  }
+
+  // A read of words `m` of line `l` found the line another block's, or being written out (`v` is its record).
+  [[gnu::noinline]] void read_line_met(Worker& w, Page* page, uint64_t l, uint32_t m, uint64_t v) {
+    Line& line = page->lines[l];
+    for (;;) {
+      const uint32_t o = owner(v);
+      if (o == kLineByWord) return read_words(w, page->words + l * kLineWords, m);
+      if (o == kLineBusy) {
+        wait_busy(w);
+        v = line.load();
+        continue;
+      }
+      if (v == 0 || o == w.tag) return read_line(w, page, l, m);   // (cannot be: the caller saw another block's; said, not assumed)
+      // Another block's line. A word of the read that it wrote stops the trial as the word would (its written bit was set before
+      // its store, and is never cleared); otherwise the two blocks' marks go to the words.
+      if (m & written_bits(v)) refuse("a block read what another block wrote");
+      to_words(w, page, l, v);
+    }
+  }
+
+  // A block reads words `m` of line `l` of a page noted by word.
+  [[gnu::always_inline]] void read_line(Worker& w, Page* page, uint64_t l, uint32_t m) {
+    Line& line = page->lines[l];
+    uint64_t v = line.load();
+    const uint32_t tag = w.tag;
+    for (;;) {
+      if (owner(v) == tag) [[likely]] {
+        const uint32_t fresh = m & ~(read_bits(v) | written_bits(v));
+        if (!fresh) return;
+        if (!line.take(v, v | as_read(fresh))) continue;   // (it moves under its owner only when another block writes it out)
+        w.st.words_read_first += static_cast<uint64_t>(__builtin_popcount(fresh));
+        return;
+      }
+      if (v == 0) {
+        if (!line.take(v, uint64_t{tag} | as_read(m))) continue;
+        w.st.words_read_first += static_cast<uint64_t>(__builtin_popcount(m));
+        return;
+      }
+      if (owner(v) == kLineByWord) return read_words(w, page->words + l * kLineWords, m);
+      return read_line_met(w, page, l, m, v);
+    }
+  }
+
+  // The words `m` of a line noted by word, for a write: the bits of those the block took just now (their bytes are to be kept).
+  [[gnu::always_inline]] uint32_t write_words(Worker& w, Page* page, uint64_t slot, uint64_t l, uint32_t m) {
+    const uint32_t tag = w.tag, mine = tag | kWrite;
+    Word* words = page->words + l * kLineWords;
+    uint32_t taken = 0;
+    for (; m; m &= m - 1) {
+      const unsigned i = static_cast<unsigned>(__builtin_ctz(m));
+      Word& word = words[i];
+      uint32_t v = word.load(std::memory_order_acquire);
+      for (;;) {
+        if (v == mine) break;
+        if (v == 0 || v == tag) {
+          if (!word.compare_exchange_weak(v, mine, std::memory_order_acq_rel)) continue;
+          ++w.st.words_written_first;
+          taken |= 1u << i;
+          break;
+        }
+        // Another block's word, or one several blocks read. The words taken in this call are still unwritten: kept or not, undoing
+        // leaves them as they are.
+        if (v != kMany && (v & kWrite)) refuse("two blocks wrote the same bytes");
+        // A reader's mark, which in a page that was first read by page state may say more than was read.
+        if (pstate[slot].load(std::memory_order_acquire) == kWordsCoarse)
+          refuse_coarse(base + (slot * kPageWords + l * kLineWords + i) * kGranule, "a block wrote what another block read");
+        refuse("a block wrote what another block read");
+      }
+    }
+    return taken;
+  }
+
+  // A write of words `m` of line `l` found the line another block's, or being written out (`v` is its record): stops the trial
+  // where a word would, else sees the line noted by word. Returns the record as it is now.
+  [[gnu::noinline]] uint64_t write_line_met(Worker& w, Page* page, uint64_t slot, uint64_t l, uint32_t m, uint64_t v) {
+    Line& line = page->lines[l];
+    const uint32_t o = owner(v);
+    if (o == kLineBusy) {
+      wait_busy(w);
+      return line.load();
+    }
+    if (v == 0 || o == w.tag || o == kLineByWord) return v;   // (cannot be: the caller saw another block's)
+    if (m & written_bits(v)) refuse("two blocks wrote the same bytes");
+    if (const uint32_t r = m & read_bits(v)) {
+      // A reader's mark, which in a page that was first read by page state may say more than was read.
+      if (pstate[slot].load(std::memory_order_acquire) == kWordsCoarse)
+        refuse_coarse(base + (slot * kPageWords + l * kLineWords + static_cast<unsigned>(__builtin_ctz(r))) * kGranule,
+                      "a block wrote what another block read");
+      refuse("a block wrote what another block read");
+    }
+    to_words(w, page, l, v);
+    return v;
   }
 
   // A block is about to write in page `slot` (`addr` is the store's, for a coarse stop): the page comes to be noted by word, or the
@@ -338,13 +490,14 @@ class MemoryManager::Spec {
         break;
       }
       if (v == tag) {
-        // The page's only reader so far. What it read was not noted by word, so every word starts as read by it; the page of
-        // words is put in place before the state says there is one (no one looks for it earlier).
-        Word* mine = fresh_page(w);
-        for (uint64_t i = 0; i < kPageWords; ++i) mine[i].store(tag, std::memory_order_relaxed);
-        Word* none = nullptr;
+        // The page's only reader so far. What it read was not noted by word, so every word starts as read by it (every line is
+        // the block's, with all sixteen read); the page of lines is put in place before the state says there is one (no one
+        // looks for it earlier).
+        Page* mine = fresh_page(w);
+        for (uint64_t i = 0; i < kPageLines; ++i) mine->lines[i].store(uint64_t{tag} | as_read(0xFFFFu));
+        Page* none = nullptr;
         if (!top[slot].compare_exchange_strong(none, mine, std::memory_order_acq_rel)) {
-          for (uint64_t i = 0; i < kPageWords; ++i) mine[i].store(0, std::memory_order_relaxed);
+          for (uint64_t i = 0; i < kPageLines; ++i) mine->lines[i].store(0);
           w.fresh.push_back(mine);
           refuse_coarse(addr, "a page read by page was found noted by word");   // (cannot happen: said, not assumed)
         }
@@ -360,7 +513,7 @@ class MemoryManager::Spec {
     word_page(w, slot);
   }
 
-  std::atomic<Word*>* top = nullptr;
+  std::atomic<Page*>* top = nullptr;
   Word* pstate = nullptr;
   uint64_t top_slots = 0;
   uint64_t base = 0, span = 0;
@@ -372,8 +525,12 @@ class MemoryManager::Spec {
   std::atomic<const char*> why{nullptr};
   std::vector<Worker> workers;
   std::mutex pool_mu;
-  std::vector<Word*> pool;   // zeroed pages
+  std::vector<Page*> pool;   // zeroed pages
   std::vector<uint64_t> coarse_at;   // under pool_mu
+  // The scout (spec_scouted): how many pieces, and bytes, at the start of worker 0's log are block 0's from before its notes were
+  // forgotten (they go back last), and the pages it had noted.
+  size_t scout_pieces = 0, scout_bytes = 0;
+  uint64_t scout_pages = 0, scout_word_pages = 0;
 };
 
 namespace {
@@ -401,6 +558,8 @@ void MemoryManager::spec_begin(unsigned workers, const SpecPlan* plan) {
   s.coarse.store(false, std::memory_order_relaxed);
   s.why.store(nullptr, std::memory_order_relaxed);
   s.coarse_at.clear();
+  s.scout_pieces = s.scout_bytes = 0;
+  s.scout_pages = s.scout_word_pages = 0;
   if (s.workers.size() != workers) {
     s.workers.clear();
     s.workers.resize(workers);
@@ -414,6 +573,59 @@ void MemoryManager::spec_enter(unsigned worker) { t_spec_worker = &spec_->worker
 void MemoryManager::spec_block(uint64_t block) { t_spec_worker->tag = static_cast<uint32_t>(block + 1); }
 
 void MemoryManager::spec_leave() { t_spec_worker = nullptr; }
+
+std::vector<std::pair<uint64_t, uint64_t>> MemoryManager::spec_scouted() {
+  Spec& s = *spec_;
+  Spec::Worker& w = s.workers[0];
+  std::vector<std::pair<uint64_t, uint64_t>> learned;
+  if (s.stopped.load(std::memory_order_acquire)) return learned;
+  {
+    // The allocations block 0 read in by page state (a page that is its reader's, or that its reader went on to write in), and
+    // those it wrote in: an allocation in both is one a block of this kernel reads and writes, where the note by page ends in a
+    // coarse stop as soon as two blocks share a page.
+    std::vector<std::pair<uint64_t, uint64_t>> read_in, wrote_in;
+    SharedGuard table_guard(table_lock_.get());
+    const auto allocations = [&](uint64_t slot, std::vector<std::pair<uint64_t, uint64_t>>& into) {
+      const uint64_t lo = s.base + slot * Spec::kPageBytes, hi = lo + Spec::kPageBytes;
+      auto it = live_.upper_bound(lo);
+      if (it != live_.begin()) --it;
+      for (; it != live_.end() && it->first < hi; ++it) {
+        const std::pair<uint64_t, uint64_t> range{it->first, it->first + it->second.size};
+        if (range.second > lo && std::find(into.begin(), into.end(), range) == into.end()) into.push_back(range);
+      }
+    };
+    for (const uint64_t slot : w.noted) {
+      const uint32_t v = s.pstate[slot].load(std::memory_order_acquire);
+      if (v == 1 || v == Spec::kWordsCoarse) allocations(slot, read_in);   // (1: block 0's reader mark)
+      if (!Spec::by_words(v)) continue;
+      const Spec::Page* page = s.top[slot].load(std::memory_order_acquire);
+      bool wrote = false;
+      for (uint64_t l = 0; page && l < Spec::kPageLines && !wrote; ++l) wrote = Spec::written_bits(page->lines[l].load()) != 0;
+      if (wrote) allocations(slot, wrote_in);
+    }
+    for (const auto& range : wrote_in)
+      if (std::find(read_in.begin(), read_in.end(), range) != read_in.end() &&
+          std::find(s.plan_words.begin(), s.plan_words.end(), range) == s.plan_words.end())
+        learned.push_back(range);
+  }
+  s.plan_words.insert(s.plan_words.end(), learned.begin(), learned.end());
+  // Block 0's notes are forgotten: the page states it set, and its lines (one block alone writes no line out to words). Its kept
+  // bytes stay in worker 0's log, and are the last to go back if the trial is stopped (spec_end).
+  for (const uint64_t slot : w.noted) s.pstate[slot].store(0, std::memory_order_relaxed);
+  for (const uint64_t slot : w.installed) {
+    Spec::Page* page = s.top[slot].exchange(nullptr, std::memory_order_acq_rel);
+    for (uint64_t l = 0; l < Spec::kPageLines; ++l) page->lines[l].store(0);
+    w.fresh.push_back(page);
+  }
+  s.scout_pages = w.noted.size();
+  s.scout_word_pages = w.installed.size();
+  s.scout_pieces = w.sealed = w.kept_at.size();
+  s.scout_bytes = w.kept.size();
+  w.noted.clear();
+  w.installed.clear();
+  w.forget();
+  return learned;
+}
 
 bool MemoryManager::spec_stopped() const { return spec_ && spec_->stopped.load(std::memory_order_relaxed); }
 
@@ -440,6 +652,8 @@ void MemoryManager::SpecStats::add(const SpecStats& o) {
   words_written_first += o.words_written_first;
   keeps += o.keeps;
   runs_known += o.runs_known;
+  lines_by_word += o.lines_by_word;
+  lines_one_block += o.lines_one_block;
 }
 
 MemoryManager::SpecOutcome MemoryManager::spec_end() {
@@ -454,12 +668,26 @@ MemoryManager::SpecOutcome MemoryManager::spec_end() {
     out.stats.add(w.st);
     out.stats.word_pages += w.installed.size();
     if (!out.committed) {
-      // Each piece is what the launch started with at bytes only this worker's blocks wrote, so the order of putting back is free.
-      uint64_t at = 0;
-      for (const auto& [addr, len] : w.kept_at) {
-        write(addr, w.kept.data() + at, len);
-        at += len;
+      // Each piece is what the blocks of the trial found at bytes only this worker's block wrote, so the order of putting back is
+      // free among them. (The pieces of a scout, the first of worker 0's, are not among them: below.)
+      const bool first = &w == s.workers.data();
+      uint64_t at = first ? s.scout_bytes : 0;
+      for (size_t i = first ? s.scout_pieces : 0; i < w.kept_at.size(); ++i) {
+        write(w.kept_at[i].first, w.kept.data() + at, w.kept_at[i].second);
+        at += w.kept_at[i].second;
       }
+    }
+  }
+  out.shadow_pages += s.scout_pages;
+  out.stats.word_pages += s.scout_word_pages;
+  if (!out.committed && s.scout_pieces) {
+    // What block 0 kept as the scout is what the launch started with; a later block that wrote the same bytes kept block 0's
+    // stores, which went back above. So these go back last.
+    const Spec::Worker& w = s.workers[0];
+    uint64_t at = 0;
+    for (size_t i = 0; i < s.scout_pieces; ++i) {
+      write(w.kept_at[i].first, w.kept.data() + at, w.kept_at[i].second);
+      at += w.kept_at[i].second;
     }
   }
   if (!out.committed && s.coarse.load(std::memory_order_acquire)) {
@@ -479,15 +707,19 @@ MemoryManager::SpecOutcome MemoryManager::spec_end() {
   for (Spec::Worker& w : s.workers) {
     for (const uint64_t slot : w.noted) s.pstate[slot].store(0, std::memory_order_relaxed);
     for (const uint64_t slot : w.installed) {
-      Spec::Word* page = s.top[slot].exchange(nullptr, std::memory_order_acq_rel);
-      if (s.pool.size() < Spec::kPoolPages) {
-        std::memset(static_cast<void*>(page), 0, Spec::kPageWords * sizeof(Spec::Word));
-        s.pool.push_back(page);
-      } else {
-        std::free(page);
+      Spec::Page* page = s.top[slot].exchange(nullptr, std::memory_order_acq_rel);
+      // Zeroed again: the records, and the words of the lines that were written out (no other word was ever touched).
+      for (uint64_t l = 0; l < Spec::kPageLines; ++l) {
+        const uint64_t v = page->lines[l].load();
+        if (v == 0) continue;
+        if (Spec::owner(v) == Spec::kLineByWord) std::memset(static_cast<void*>(page->words + l * Spec::kLineWords), 0, Spec::kLineWords * sizeof(Spec::Word));
+        else ++out.stats.lines_one_block;
       }
+      std::memset(static_cast<void*>(page->lines), 0, sizeof(page->lines));
+      if (s.pool.size() < Spec::kPoolPages) s.pool.push_back(page);
+      else std::free(page);
     }
-    for (Spec::Word* page : w.fresh) {   // zeroed and never installed
+    for (Spec::Page* page : w.fresh) {   // zeroed and never installed
       if (s.pool.size() < Spec::kPoolPages) s.pool.push_back(page);
       else std::free(page);
     }
@@ -513,7 +745,10 @@ void MemoryManager::spec_keep(uint64_t addr, uint64_t len) const {
     const size_t at = w.kept.size();
     w.kept.resize(at + len);
     read_chunks(*static_cast<const Allocation*>(w.keep_alloc), addr - w.keep_base, w.kept.data() + at, len);
-    w.kept_at.emplace_back(addr, len);
+    // (a piece that begins where the worker's last one ended is the same piece, longer: lines one after another. Not across
+    // `sealed`: the pieces before it are a scout's, which go back apart from the others.)
+    if (w.kept_at.size() > w.sealed && w.kept_at.back().first + w.kept_at.back().second == addr) w.kept_at.back().second += len;
+    else w.kept_at.emplace_back(addr, len);
     return;
   }
   SharedGuard table_guard(table_lock_.get());
@@ -559,38 +794,27 @@ void MemoryManager::spec_keep(uint64_t addr, uint64_t len) const {
       ++w.st.runs_known;
       continue;
     }
-    // A page noted by word that the worker has read in before: words that already allow the block's read need nothing more.
-    const Spec::Worker::WordPage& wp = w.pages[Spec::seen_at(slot) % Spec::kWordPages];
-    if (wp.slot == slot) {
-      const uint32_t tag = w.tag;
-      uint64_t g = g0 % Spec::kPageWords;
-      const uint64_t end = g1 % Spec::kPageWords;
-      for (; g <= end; ++g) {
-        const uint32_t v = wp.page[g].load(std::memory_order_acquire);
-        if (!(v == Spec::kMany || v == tag || v == (tag | Spec::kWrite))) break;
-      }
-      if (g > end) {
-        w.st.words_read += g1 - g0 + 1;
-        continue;
-      }
-      // One untouched word (a lane of a scattered load): taken here as its first reader. (Anything else, and a word another
-      // block took meanwhile, goes the long way.)
-      if (g0 == g1) {
-        uint32_t none = 0;
-        if (wp.page[g].compare_exchange_strong(none, tag, std::memory_order_acq_rel)) {
-          w.st.words_read += 1;
-          w.st.words_read_first += 1;
-          continue;
-        }
-      }
+    // A page noted by word: by its lines. (The worker remembers where the lines of the pages it has read in are.)
+    Spec::Worker::WordPage& wp = w.pages[Spec::seen_at(slot) % Spec::kWordPages];
+    Spec::Page* page = wp.page;
+    if (wp.slot != slot) {
+      ++w.st.page_looks;
+      page = s.read_page(w, slot);
+      if (!page) continue;   // (noted by the page's state)
+      wp = {slot, page};
     }
-    ++w.st.page_looks;
-    s.read_page(w, slot, lo, hi);
+    w.st.words_read += g1 - g0 + 1;
+    const uint64_t p0 = g0 % Spec::kPageWords, p1 = g1 % Spec::kPageWords;
+    for (uint64_t l = p0 / Spec::kLineWords; l <= p1 / Spec::kLineWords; ++l) {
+      const uint64_t first = std::max(p0, l * Spec::kLineWords), end = std::min(p1, l * Spec::kLineWords + Spec::kLineWords - 1);
+      s.read_line(w, page, l, Spec::bits_of(first % Spec::kLineWords, end % Spec::kLineWords));
+    }
+    if (g1 - g0 + 1 >= Spec::kRunWorth) Spec::learn(w.read, w.read_next, w.tag, g0, g1);
   }
 }
 
 // A block is about to write [addr, addr + len): its pages come to be noted by word, it comes to own every word of it, and the
-// bytes of the words it did not own yet are kept first.
+// bytes of the words it did not own yet are kept first (with the rest of their line, where the line is the block's alone).
 [[gnu::always_inline]] inline void MemoryManager::spec_write_in(Spec& s, void* worker, uint64_t addr, uint64_t len) const {
   const uint64_t off = addr - s.base;
   // A store the shadow has no word for (host memory another thread or process may share; an address that is no
@@ -598,68 +822,86 @@ void MemoryManager::spec_keep(uint64_t addr, uint64_t len) const {
   if (off >= s.span || len > s.span - off) spec_refuse("a block wrote outside the device's own memory");
   if (s.host_maps && host_maps_ && host_maps_->may_overlap(addr, addr + len - 1)) spec_refuse("a block wrote host-mapped memory");
   Spec::Worker& w = *static_cast<Spec::Worker*>(worker);
-  const uint32_t mine = w.tag | Spec::kWrite;
   const uint64_t g0 = off / Spec::kGranule, g1 = (off + len - 1) / Spec::kGranule;
   // Words the block holds as their writer already (a store in a loop): nothing to note.
   if (g1 - g0 + 1 >= Spec::kRunWorth && Spec::known(w.wrote, w.tag, g0, g1)) {
     ++w.st.runs_known;
     return;
   }
-  const uint64_t mine2 = uint64_t{mine} | uint64_t{mine} << 32;
-  uint64_t run = ~uint64_t{0};   // the first granule of the run of words taken just now, not kept yet
-  const auto keep = [&](uint64_t upto) {
+  // The run of words taken just now and not kept yet: [run, run_end) in granules of the range.
+  uint64_t run = ~uint64_t{0}, run_end = 0;
+  const auto keep = [&] {
     if (run == ~uint64_t{0}) return;
-    spec_keep(s.base + run * Spec::kGranule, (upto - run) * Spec::kGranule);
+    spec_keep(s.base + run * Spec::kGranule, (run_end - run) * Spec::kGranule);
     run = ~uint64_t{0};
   };
   w.st.words_written += g1 - g0 + 1;
-  for (uint64_t g = g0; g <= g1; ++g) {
+  for (uint64_t g = g0; g <= g1;) {
     const uint64_t slot = g / Spec::kPageWords;
-    // (A stop in write_page leaves the words taken in this call unkept: they are still unwritten, so undoing leaves them as they are.)
-    if (slot != w.last_slot) [[unlikely]] s.write_page(w, slot, s.base + g * Spec::kGranule);
-    Spec::Word& word = w.last_page[g % Spec::kPageWords];
-    if (!(g & 1) && g < g1) {
-      // Two words at once: both the block's already, or both free for it (untouched, or read by it alone) and taken by one
-      // compare-and-swap. (An even index: the pair is in one page.)
-      Spec::Pair* two = Spec::pair_at(&word);
-      uint64_t v2 = __atomic_load_n(two, __ATOMIC_ACQUIRE);
-      if (v2 == mine2) {
-        keep(g);
-        ++g;
-        continue;
+    // (A stop in write_page, or at a line or word below, leaves the words taken in this call unkept: they are still unwritten, so
+    // undoing leaves them as they are.)
+    if (slot != w.last_slot) [[unlikely]] {
+      // (a page of lines the worker knows already: a warp's lanes are often each in a page of their own, the rows of a matrix)
+      Spec::Worker::WordPage& wp = w.pages[Spec::seen_at(slot) % Spec::kWordPages];
+      if (wp.slot == slot) {
+        w.last_slot = slot;
+        w.last_page = wp.page;
+      } else {
+        s.write_page(w, slot, s.base + g * Spec::kGranule);
+        wp = {slot, w.last_page};
       }
-      const uint32_t a = static_cast<uint32_t>(v2), b = static_cast<uint32_t>(v2 >> 32);
-      if ((a == 0 || a == w.tag) && (b == 0 || b == w.tag) &&
-          __atomic_compare_exchange_n(two, &v2, mine2, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-        w.st.words_written_first += 2;
-        if (run == ~uint64_t{0}) run = g;
-        ++g;
-        continue;
-      }
-      // (anything else: one word at a time, below)
     }
-    uint32_t v = word.load(std::memory_order_acquire);
+    Spec::Page* page = w.last_page;
+    const uint64_t in_page = g % Spec::kPageWords, l = in_page / Spec::kLineWords;
+    const uint64_t line0 = g - in_page % Spec::kLineWords;   // the granule of the line's first word
+    const uint64_t last = std::min(g1, line0 + Spec::kLineWords - 1);
+    const uint32_t m = Spec::bits_of(g - line0, last - line0);
+    Spec::Line& line = page->lines[l];
+    uint64_t v = line.load();
+    uint32_t taken = 0;   // (words of a line noted by word that the block took just now: kept one by one, below)
     for (;;) {
-      if (v == mine) {
-        keep(g);
+      const uint32_t o = Spec::owner(v);
+      if (o == w.tag && Spec::written_bits(v)) [[likely]] {
+        // A line the block has written in before, alone: its 64 bytes are kept already.
+        const uint32_t fresh = m & ~Spec::written_bits(v);
+        if (fresh && !line.take(v, v | Spec::as_written(fresh))) continue;   // (it moves under its block only when another writes it out)
+        w.st.words_written_first += static_cast<uint64_t>(__builtin_popcount(fresh));
         break;
       }
-      if (v == 0 || v == w.tag) {
-        if (!word.compare_exchange_weak(v, mine, std::memory_order_acq_rel)) continue;
-        ++w.st.words_written_first;
-        if (run == ~uint64_t{0}) run = g;
+      if (v == 0 || o == w.tag) {
+        // The block's first write in a line nobody else has touched: the line's bytes are kept whole while the record is busy
+        // (no block can come to the line meanwhile, so the copy is of bytes nobody is writing), then the record says what the
+        // block wrote, and read.
+        // (A stop from the log, its limit, leaves the record busy: the trial is over, and a block that waits at the line sees that.)
+        if (!line.take(v, Spec::kLineBusy)) continue;
+        keep();
+        spec_keep(s.base + line0 * Spec::kGranule, Spec::kLineWords * Spec::kGranule);
+        line.store((v ? v : uint64_t{w.tag}) | Spec::as_written(m));
+        w.st.words_written_first += static_cast<uint64_t>(__builtin_popcount(m));
         break;
       }
-      // Another block's word, or one several blocks read. The words taken in this call are still unwritten: kept or not, undoing
-      // leaves them as they are.
-      if (v != Spec::kMany && (v & Spec::kWrite)) spec_refuse("two blocks wrote the same bytes");
-      // A reader's mark, which in a page that was first read by page state may say more than was read.
-      if (s.pstate[slot].load(std::memory_order_acquire) == Spec::kWordsCoarse)
-        s.refuse_coarse(s.base + g * Spec::kGranule, "a block wrote what another block read");
-      spec_refuse("a block wrote what another block read");
+      if (o == Spec::kLineByWord) {
+        taken = s.write_words(w, page, slot, l, m);
+        break;
+      }
+      v = s.write_line_met(w, page, slot, l, m, v);
     }
+    // The words taken are kept in runs (words next to one another, across lines and pages, are one piece of the log).
+    while (taken) {
+      const unsigned lo = static_cast<unsigned>(__builtin_ctz(taken));
+      const unsigned n = static_cast<unsigned>(__builtin_ctz(~(taken >> lo)));
+      if (run != ~uint64_t{0} && run_end == line0 + lo) {
+        run_end += n;
+      } else {
+        keep();
+        run = line0 + lo;
+        run_end = run + n;
+      }
+      taken &= ~(((1u << n) - 1) << lo);
+    }
+    g = last + 1;
   }
-  keep(g1 + 1);
+  keep();
   if (g1 - g0 + 1 >= Spec::kRunWorth) Spec::learn(w.wrote, w.wrote_next, w.tag, g0, g1);
 }
 

@@ -12,9 +12,12 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <functional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "vgpu/error.hpp"
@@ -217,7 +220,8 @@ struct Env {
       if (const size_t at = r.error.find(far); at != std::string::npos) r.error.replace(at, std::strlen(far), "buf+2^28");
     }
     const sass::ExactCounts after = sass::exact_counts();
-    r.counts = {after.trials - before.trials, after.committed - before.committed, after.stopped - before.stopped, after.again - before.again};
+    r.counts = {after.trials - before.trials, after.committed - before.committed, after.stopped - before.stopped, after.again - before.again,
+                after.scouted - before.scouted};
     r.words.resize(kWords);
     mem.read(buf, r.words.data(), uint64_t{kWords} * 4);
     mem.free(buf);
@@ -504,7 +508,15 @@ VTEST(blocks_may_share_what_they_only_read_and_keep_what_they_alone_write_and_a_
     mem.store_scalar(a + 12, 1, 0xEF);   // the next word after block 0's: its own
     const MemoryManager::SpecOutcome out = t.end();
     VCHECK(out.committed);
-    VCHECK_EQ(out.kept_bytes, uint64_t{4 + 2 + 4});   // a word, the two bytes the allocation has of the last word, a word
+    // A line (64 bytes of the address range) a block alone writes in is kept whole, as far as the allocation goes; a word a
+    // second block takes in such a line is kept by itself: block 0's line, the ten bytes the allocation has of the last line,
+    // and block 1's word next to block 0's.
+    const auto line_bytes = [&](uint64_t at) {
+      const uint64_t lo = at - (at - kDeviceVaBase) % 64;
+      return std::min(lo + 64, a + init.size()) - std::max(lo, a);
+    };
+    VCHECK_EQ((a + 8 - kDeviceVaBase) / 64, (a + 12 - kDeviceVaBase) / 64);
+    VCHECK_EQ(out.kept_bytes, line_bytes(a + 8) + line_bytes(a + 3 * 65536 + 9) + 4);
     init[8] = 0xAB, init[3 * 65536 + 9] = 0xCD, init[12] = 0xEF;
     VCHECK(all() == init);
   }
@@ -649,7 +661,7 @@ VTEST(a_page_that_blocks_only_read_is_noted_as_a_whole_and_a_page_a_block_writes
     VCHECK_EQ(out.stats.words_read, uint64_t{2 + 2 + 1 + 1 + 1});
   }
   VCHECK_EQ(out.stats.words_written_first, uint64_t{2});
-  VCHECK_EQ(out.kept_bytes, uint64_t{8});
+  VCHECK_EQ(out.kept_bytes, uint64_t{64 + 4});   // (block 1's line, whole; then block 0's word in it)
   VCHECK_EQ(out.shadow_pages, uint64_t{2});
   // The shadow is empty again: a block may write where two blocks read in the last trial.
   Trial again(d.mem);
@@ -846,7 +858,7 @@ VTEST(every_lane_of_a_warp_is_noted_wherever_it_lies) {
     VCHECK(d.rd(addrs[31], 1));
     const MemoryManager::SpecOutcome out = t.end();
     VCHECK(!out.committed);
-    VCHECK_EQ(out.kept_bytes, uint64_t{128 + 128 + 32});
+    VCHECK_EQ(out.kept_bytes, uint64_t{128 + 128 + 64});   // (whole lines: two, two, and the one the four lanes apart lie in)
     VCHECK(d.all() == d.init);
   }
   // Lanes scattered over one page the block may read without a note, and one lane that lies in another page, or whose last byte
@@ -1033,10 +1045,13 @@ VTEST(a_kernel_whose_blocks_share_pages_they_read_and_write_is_tried_again_by_wo
       same_counters(got.stats, ref.stats, std::string("in place, VGPU_EXACT_THREADS=") + n);
       VCHECK_EQ(got.counts.trials, uint64_t{1});
       VCHECK_EQ(got.counts.committed, uint64_t{1});
-      // The first launch meets the coarse stop and learns the buffer; a later one notes it by word from the start (when its buffer
-      // is where the learned one was: every run has a buffer of its own).
-      VCHECK_EQ(got.counts.again, static_cast<uint64_t>(pages_on() && got.buf != learned));
-      learned = got.buf;
+      // The first launch of the kernel runs block 0 alone first (300 blocks are enough for a scout at 2, 4 and 8 threads), which
+      // shows the buffer to be updated in place: no trial is thrown away. A later launch is not scouted; it notes the buffer by
+      // word from the start when it is where the learned one was (every run has a buffer of its own), and meets the coarse stop
+      // and learns it when it is not.
+      VCHECK_EQ(got.counts.scouted, static_cast<uint64_t>(pages_on() && launch == 0));
+      VCHECK_EQ(got.counts.again, static_cast<uint64_t>(pages_on() && launch > 0 && got.buf != learned));
+      if (launch == 0 || got.counts.again) learned = got.buf;
     }
   }
 }
@@ -1057,6 +1072,18 @@ VTEST(a_grid_of_a_few_blocks_is_noted_by_word_from_the_start) {
   VCHECK(more.words == ref8.words);
   VCHECK_EQ(more.counts.committed, uint64_t{1});
   VCHECK_EQ(more.counts.again, static_cast<uint64_t>(pages_on()));
+  VCHECK_EQ(more.counts.scouted, uint64_t{0});   // (too few blocks for one of them to run alone first)
+  // The scout switched off: the first trial of the 300-block launch is thrown away as before round sp58, and the bits are the same.
+  ::setenv("VGPU_EXACT_SCOUT", "0", 1);
+  in_order();
+  const Result ref300 = e.run(*e.load(in_place()), 300);
+  exact("4");
+  const Result unscouted = e.run(*e.load(in_place()), 300);
+  ::unsetenv("VGPU_EXACT_SCOUT");
+  VCHECK(unscouted.words == ref300.words);
+  same_counters(unscouted.stats, ref300.stats, "in place, no scout");
+  VCHECK_EQ(unscouted.counts.scouted, uint64_t{0});
+  VCHECK_EQ(unscouted.counts.again, static_cast<uint64_t>(pages_on()));
 }
 
 VTEST(a_chain_stopped_by_a_coarse_note_is_tried_by_word_and_then_run_in_order) {
@@ -1216,10 +1243,523 @@ VTEST(two_words_taken_at_once_are_taken_only_when_both_are_free_and_kept_like_tw
     VCHECK(d.rd(d.p + start + 40, 4));
     const MemoryManager::SpecOutcome out = t.end();
     VCHECK(!out.committed);
-    VCHECK_EQ(out.kept_bytes, uint64_t{4 + 44});
+    VCHECK_EQ(out.kept_bytes, uint64_t{64 + 64});   // (two lines the block alone wrote in: each kept whole, once)
     VCHECK_EQ(out.stats.words_written_first, uint64_t{1 + 11});
     VCHECK(d.all() == d.init);
   }
+}
+
+// ---- lines (round sp58): the sixteen words of 64 bytes are one record while one block alone has touched them ----
+
+namespace {
+const MemoryManager::SpecPlan& by_word_plan() {
+  static const MemoryManager::SpecPlan p = [] {
+    MemoryManager::SpecPlan q;
+    q.pages = false;
+    return q;
+  }();
+  return p;
+}
+}  // namespace
+
+// The adversary of the line: block 0 holds a line as its only block (some words read, some written, some untouched), and a second
+// block, on the same worker and on another, reads or writes at every byte of the line and of the words on either side of it, with
+// lengths that stay in a word, cross words and cross into the next line. It is stopped exactly where the words stop it (a read at a
+// word block 0 wrote; a write at a word block 0 read or wrote), never coarsely, and before it touched a byte; where it is not
+// stopped the line is noted by word from then on, and block 0 and block 1 go on in it by the word rules.
+VTEST(a_second_block_at_every_byte_of_a_line_another_block_holds_is_stopped_exactly_where_the_words_stop_it) {
+  Paged d(3);
+  const uint64_t line = d.p + 1024;   // (a multiple of 64 from the device's base)
+  const uint64_t read_words[] = {1, 9}, written_words[] = {4, 5, 15};
+  const auto is_read = [&](uint64_t at, uint64_t len) {
+    for (const uint64_t w : read_words)
+      if (words_meet(at, len, line + 4 * w, 4)) return true;
+    return false;
+  };
+  const auto is_written = [&](uint64_t at, uint64_t len) {
+    for (const uint64_t w : written_words)
+      if (words_meet(at, len, line + 4 * w, 4)) return true;
+    return false;
+  };
+  unsigned went_on = 0, stopped_n = 0;
+  for (const unsigned other : {0u, 1u}) {
+    for (uint64_t at = line - 8; at < line + 72; ++at) {
+      for (const uint64_t len : {uint64_t{1}, uint64_t{2}, uint64_t{4}, uint64_t{5}, uint64_t{8}, uint64_t{17}}) {
+        for (const bool writes : {false, true}) {
+          const std::string where = std::string(writes ? "write" : "read") + " at line " + (at >= line ? "+" : "-") +
+                                    std::to_string(at >= line ? at - line : line - at) + ", " + std::to_string(len) + " bytes, worker " + std::to_string(other);
+          Trial t(d.mem, &by_word_plan());
+          for (const uint64_t w : read_words) VCHECK(!d.rd(line + 4 * w, 4));
+          for (const uint64_t w : written_words) VCHECK(!d.wr(line + 4 * w, 4));
+          t.as(other, 1);
+          const bool expect = writes ? is_read(at, len) || is_written(at, len) : is_written(at, len);
+          const bool got = writes ? d.wr(at, len) : d.rd(at, len);
+          if (got != expect) throw vtest::Failure(std::string(expect ? "went on where a word stops it: " : "stopped where no word stops it: ") + where);
+          if (!got) {
+            // Both blocks go on in the line, by word now. Block 0 takes two more words (one read, one written) unless block 1 is
+            // there; block 1 is then stopped at them, and block 0 at what block 1 wrote.
+            t.as(0, 0);
+            const bool r_free = !(writes && words_meet(at, len, line + 4 * 12, 4));
+            const bool w_free = !words_meet(at, len, line + 4 * 13, 4);
+            VCHECK_EQ(d.rd(line + 4 * 12, 4), !r_free);
+            if (r_free) {
+              VCHECK_EQ(d.wr(line + 4 * 13, 4), !w_free);
+              if (w_free) {
+                t.as(other, 1);
+                VCHECK(d.rd(line + 4 * 13, 2));   // block 0's new word is its own for the rest of the trial
+              }
+            }
+          }
+          const MemoryManager::SpecOutcome out = t.end();
+          VCHECK(!out.coarse);
+          VCHECK(!out.committed);   // (every path above ends in a stop)
+          ++(got ? stopped_n : went_on);
+          if (d.all() != d.init) throw vtest::Failure("a stopped trial was not undone to the byte: " + where);
+          d.put_back();
+        }
+      }
+    }
+  }
+  VCHECK(went_on > 200);
+  VCHECK(stopped_n > 200);
+}
+
+// What the counters say of a line: one block alone leaves a record and no word; a second block that may be there has the line
+// written out once; and the words written out are zero again for the next trial (a mark left behind would stop it).
+VTEST(a_line_one_block_touched_is_a_record_and_a_line_two_blocks_touched_is_noted_by_word_and_both_are_cleared) {
+  Paged d(3);
+  const uint64_t line = d.p + 2048;
+  {
+    Trial t(d.mem, &by_word_plan());
+    VCHECK(!d.rd(line + 8, 4));
+    VCHECK(!d.wr(line + 16, 8));
+    VCHECK(!d.wr(line + 64, 4));   // the next line, block 0's alone to the end
+    VCHECK(!d.rd(line + 8, 4));    // (again: nothing new)
+    const MemoryManager::SpecOutcome solo = t.end();
+    VCHECK(solo.committed);
+    VCHECK_EQ(solo.stats.lines_by_word, uint64_t{0});
+    VCHECK_EQ(solo.stats.lines_one_block, uint64_t{2});
+    VCHECK_EQ(solo.stats.words_read_first, uint64_t{1});
+    VCHECK_EQ(solo.stats.words_written_first, uint64_t{3});
+    VCHECK_EQ(solo.kept_bytes, uint64_t{2 * 64});   // (a line the block alone writes in is kept whole, at its first write in it)
+  }
+  d.put_back();
+  {
+    Trial t(d.mem, &by_word_plan());
+    VCHECK(!d.rd(line + 8, 4));
+    VCHECK(!d.wr(line + 16, 8));
+    VCHECK(!d.wr(line + 64, 4));
+    t.as(1, 1);
+    VCHECK(!d.rd(line + 8, 4));     // a second reader of block 0's read word: several readers, by word
+    VCHECK(!d.wr(line + 40, 4));
+    VCHECK(!d.rd(line + 44, 4));
+    t.as(0, 2);                      // a third block, on the first's worker
+    VCHECK(!d.rd(line + 8, 4));
+    VCHECK(!d.rd(line + 44, 4));     // (several readers now)
+    VCHECK(!d.wr(line + 48, 4));
+    const MemoryManager::SpecOutcome out = t.end();
+    VCHECK(out.committed);
+    VCHECK_EQ(out.stats.lines_by_word, uint64_t{1});
+    VCHECK_EQ(out.stats.lines_one_block, uint64_t{1});
+    VCHECK_EQ(out.stats.words_read_shared, uint64_t{2});
+    VCHECK_EQ(out.stats.words_written_first, uint64_t{2 + 1 + 1 + 1});
+  }
+  d.put_back();
+  // The next trial finds nothing: other blocks take every word the last trial's blocks held, each in a way that mark would stop.
+  {
+    Trial t(d.mem, &by_word_plan());
+    t.as(1, 5);
+    VCHECK(!d.wr(line + 8, 4));      // (was read by three blocks)
+    VCHECK(!d.rd(line + 16, 8));     // (was block 0's, written)
+    VCHECK(!d.wr(line + 40, 8));     // (block 1's written word and its read word)
+    VCHECK(!d.rd(line + 48, 4));     // (block 2's)
+    VCHECK(!d.rd(line + 64, 4));
+    const MemoryManager::SpecOutcome out = t.end();
+    VCHECK(out.committed);
+    VCHECK_EQ(out.stats.lines_by_word, uint64_t{0});
+    VCHECK_EQ(out.stats.lines_one_block, uint64_t{2});
+  }
+}
+
+// A store over a line of which the block holds some words already, and into the next line and page: a line the block alone
+// holds is kept whole at the block's first write in it and never again; in a line another block came to first each word's bytes
+// are kept once, when it is taken; and all of them go back.
+VTEST(the_words_a_store_takes_in_a_line_are_kept_once_each_whatever_the_block_held_before) {
+  Paged d(3);
+  uint8_t b[256];
+  std::memset(b, 0x6B, sizeof b);
+  for (const uint64_t line : {d.p + 512, d.p + kPage - 64}) {   // (the second: the store ends in the next page)
+    for (const bool another_first : {false, true}) {
+      Trial t(d.mem, &by_word_plan());
+      if (another_first) {
+        // (the line is noted by word before block 0 comes: the same bytes are kept by the word rules)
+        t.as(1, 1);
+        VCHECK(!d.rd(line + 60, 4));
+        t.as(0, 0);
+      }
+      VCHECK(!d.wr(line + 8, 4));       // word 2
+      VCHECK(!d.wr(line + 24, 4));      // word 6
+      VCHECK(!d.rd(line + 36, 4));      // word 9, read: taken (and kept) by the store below
+      VCHECK(!stops([&] { d.mem.write(line + 2, b, 54); }));    // words 0 to 13: twelve new
+      VCHECK(!stops([&] { d.mem.write(line + 2, b, 54); }));    // (again: nothing new)
+      if (!another_first) {
+        VCHECK(!stops([&] { d.mem.write(line + 48, b, 40); }));   // words 12 to 21, six of them in the next line: eight new
+        t.as(1, 1);
+      } else {
+        t.as(1, 1);
+      }
+      VCHECK(d.rd(line + 1, 1));        // stopped: the trial is undone
+      const MemoryManager::SpecOutcome out = t.end();
+      VCHECK(!out.committed);
+      VCHECK_EQ(out.stats.words_written_first, uint64_t{2 + 12 + (another_first ? 0 : 8)});
+      VCHECK_EQ(out.kept_bytes, another_first ? uint64_t{4 * (2 + 12)} : uint64_t{2 * 64});
+      VCHECK(d.all() == d.init);
+      d.put_back();
+    }
+  }
+}
+
+// Random interleavings of four blocks on two workers inside three lines that straddle a page boundary, against the model of the
+// four word states: with every line met by several blocks, the records and the words written out from them must stop exactly the
+// access the model stops, and leave the bytes the model leaves.
+VTEST(random_blocks_in_three_lines_against_a_model_of_the_word_states) {
+  Paged d(3);
+  const uint64_t lo = d.p + kPage - 96, span = 192;   // a line and a half on each side of the boundary
+  uint64_t seed = 0xD1B54A32D192ED03ull;
+  const auto rnd = [&](uint64_t n) {
+    seed ^= seed << 13, seed ^= seed >> 7, seed ^= seed << 17;
+    return seed % n;
+  };
+  unsigned kept = 0, stopped_n = 0, by_word_lines = 0;
+  for (int round = 0; round < 1500; ++round) {
+    const bool apart = rnd(3) != 0;   // mostly each block writes the words of its own residue: the blocks' words interleave in every line
+    const unsigned mode = static_cast<unsigned>(rnd(3));   // by word from the start; by page; the allocation by word
+    MemoryManager::SpecPlan plan;
+    if (mode == 0) plan.pages = false;
+    if (mode == 2) plan.by_word.push_back({d.a, d.a + d.size});
+    std::vector<uint32_t> state(span / 4, 0);
+    std::vector<uint8_t> expect = d.init;
+    Trial t(d.mem, &plan);
+    const size_t n_ops = 4 + rnd(24);
+    int stopped_at = -1;
+    bool early = false;
+    for (size_t i = 0; i < n_ops && stopped_at < 0; ++i) {
+      const unsigned block = static_cast<unsigned>(rnd(4));
+      const uint32_t tag = block + 1;
+      const bool writes = rnd(3) == 0;
+      uint64_t at, len;
+      if (apart && (writes || rnd(2))) {
+        at = lo + 4 * (block + 4 * rnd(span / 16));   // a word of the block's own residue
+        len = 1 + rnd(4);
+        at += rnd(5 - len);
+      } else {
+        len = 1 + rnd(writes ? 12 : 24);
+        at = lo + rnd(span - len);
+      }
+      bool model_stop = false;
+      for (uint64_t g = (at - lo) / 4; g <= (at + len - 1 - lo) / 4 && !model_stop; ++g) {
+        uint32_t& st = state[g];
+        if (writes) {
+          if (st == 0 || st == tag || st == (tag | 0x80000000u)) st = tag | 0x80000000u;
+          else model_stop = true;
+        } else {
+          if (st == 0) st = tag;
+          else if (st == tag || st == ~0u || st == (tag | 0x80000000u)) {}
+          else if (st & 0x80000000u) model_stop = true;
+          else st = ~0u;
+        }
+      }
+      t.as(block % 2, block);
+      std::vector<uint8_t> buf(len, static_cast<uint8_t>(0x30 + i));
+      const bool got = writes ? stops([&] { d.mem.write(at, buf.data(), len); }) : stops([&] { d.mem.read(at, buf.data(), len); });
+      if (model_stop && !got) throw vtest::Failure("round " + std::to_string(round) + ", op " + std::to_string(i) + ": the model stops this access and the shadow let it through");
+      if (got && !model_stop) {
+        if (mode != 1) throw vtest::Failure("round " + std::to_string(round) + ", op " + std::to_string(i) + ": noted by word, the shadow stopped an access the model lets through");
+        early = true;
+      }
+      if (got) stopped_at = static_cast<int>(i);
+      else if (writes) std::fill(expect.begin() + (at - d.a), expect.begin() + (at - d.a) + len, static_cast<uint8_t>(0x30 + i));
+    }
+    const MemoryManager::SpecOutcome out = t.end();
+    VCHECK_EQ(out.committed, stopped_at < 0);
+    if (early) VCHECK(out.coarse);
+    if (mode != 1) VCHECK(!out.coarse);
+    if (d.all() != (stopped_at < 0 ? expect : d.init)) throw vtest::Failure("round " + std::to_string(round) + ": the bytes are not the model's");
+    d.put_back();
+    ++(stopped_at < 0 ? kept : stopped_n);
+    by_word_lines += static_cast<unsigned>(out.stats.lines_by_word);
+  }
+  VCHECK(kept >= 60);
+  VCHECK(stopped_n >= 100);
+  VCHECK(by_word_lines >= 300);   // (the lines were met by several blocks: the test is of that)
+}
+
+// A line being written out to its words while its block goes on in it. Thread A (block 0) takes the even words of a line one by
+// one, as their writer; thread B (block 1) takes the odd ones, so that its first access finds the line block 0's and writes its
+// marks out at some moment between two of A's. No mark of either may be lost: afterwards a third block is stopped at every word
+// of the line, and the stopped trial puts back every byte both threads stored.
+VTEST(a_line_written_out_to_words_while_its_block_writes_in_it_loses_no_mark) {
+  Paged d(3);
+  const uint64_t line = d.p + 1024;
+  std::atomic<int> go{0};
+  for (int round = 0; round < 800; ++round) {
+    d.mem.spec_begin(2, &by_word_plan());
+    go.store(0);
+    std::atomic<bool> a_stopped{false}, b_stopped{false};
+    const bool reads = round % 4 == 3;   // every fourth round A reads its words first (the record holds read and written bits)
+    const auto body = [&](unsigned worker, std::atomic<bool>& stopped) {
+      d.mem.spec_enter(worker);
+      d.mem.spec_block(worker);
+      while (go.load(std::memory_order_acquire) == 0) {
+      }
+      const uint32_t v = 0xA0A0A0A0u + worker;
+      try {
+        for (uint64_t w = worker; w < 16; w += 2) {
+          uint32_t was;
+          if (reads && worker == 0) d.mem.read(line + 4 * w, &was, 4);
+          d.mem.write(line + 4 * w, &v, 4);
+        }
+        // (and the next line, which the other thread never comes to: a record to the end)
+        if (worker == 0) d.mem.write(line + 64, &v, 4);
+      } catch (const MemoryManager::SpecStop&) {
+        stopped.store(true);
+      }
+      d.mem.spec_leave();
+    };
+    std::thread a(body, 0u, std::ref(a_stopped)), b(body, 1u, std::ref(b_stopped));
+    go.store(1, std::memory_order_release);
+    a.join();
+    b.join();
+    VCHECK(!a_stopped.load());
+    VCHECK(!b_stopped.load());
+    // A third block at word `round % 16`: a read of it is stopped (it is A's or B's, written).
+    d.mem.spec_enter(0);
+    d.mem.spec_block(2);
+    VCHECK(d.rd(line + 4 * static_cast<uint64_t>(round % 16), 4));
+    d.mem.spec_leave();
+    const MemoryManager::SpecOutcome out = d.mem.spec_end();
+    VCHECK(!out.committed);
+    VCHECK(out.kept_bytes >= uint64_t{4 * 17});   // (whole lines for the thread that came first, words for the other)
+    VCHECK_EQ(out.stats.words_written_first, uint64_t{17});
+    VCHECK_EQ(out.stats.lines_by_word, uint64_t{1});   // (whichever thread came second wrote the first's record out)
+    if (d.all() != d.init) throw vtest::Failure("round " + std::to_string(round) + ": a stopped trial left bytes of the blocks behind");
+  }
+}
+
+// The same race with a real conflict in it: A writes the sixteen words upwards while B reads them downwards. Whichever comes
+// second to a word must be stopped, whatever the line's record was doing at that moment, so the trial is never kept.
+VTEST(a_conflict_inside_a_line_that_is_being_written_out_is_never_missed) {
+  Paged d(3);
+  const uint64_t line = d.p + 2048;
+  std::atomic<int> go{0};
+  unsigned a_n = 0, b_n = 0;
+  for (int round = 0; round < 800; ++round) {
+    d.mem.spec_begin(2, &by_word_plan());
+    go.store(0);
+    std::atomic<bool> a_stopped{false}, b_stopped{false};
+    std::thread a([&] {
+      d.mem.spec_enter(0);
+      d.mem.spec_block(0);
+      while (go.load(std::memory_order_acquire) == 0) {
+      }
+      const uint32_t v = 0x0B0B0B0Bu;
+      try {
+        for (uint64_t w = 0; w < 16; ++w) d.mem.write(line + 4 * w, &v, 4);
+      } catch (const MemoryManager::SpecStop&) {
+        a_stopped.store(true);
+      }
+      d.mem.spec_leave();
+    });
+    std::thread b([&] {
+      d.mem.spec_enter(1);
+      d.mem.spec_block(1);
+      while (go.load(std::memory_order_acquire) == 0) {
+      }
+      uint32_t was;
+      try {
+        for (uint64_t w = 16; w-- > 0;) d.mem.read(line + 4 * w, &was, 4);
+      } catch (const MemoryManager::SpecStop&) {
+        b_stopped.store(true);
+      }
+      d.mem.spec_leave();
+    });
+    go.store(1, std::memory_order_release);
+    a.join();
+    b.join();
+    if (!a_stopped.load() && !b_stopped.load()) throw vtest::Failure("round " + std::to_string(round) + ": one block wrote sixteen words another read, and neither was stopped");
+    a_n += a_stopped.load(), b_n += b_stopped.load();
+    const MemoryManager::SpecOutcome out = d.mem.spec_end();
+    VCHECK(!out.committed);
+    VCHECK(!out.coarse);
+    if (d.all() != d.init) throw vtest::Failure("round " + std::to_string(round) + ": a stopped trial left bytes behind");
+  }
+  std::printf("  (the writer was stopped in %u rounds, the reader in %u)\n", a_n, b_n);
+}
+
+// ---- the scout (round sp58): block 0 run alone first, its notes forgotten, its kept bytes the last to go back ----
+
+VTEST(what_the_first_block_did_alone_is_what_the_other_blocks_start_from_and_is_undone_last) {
+  Paged d(3);
+  const std::pair<uint64_t, uint64_t> whole{d.a, d.a + d.size};
+  const uint64_t x = d.p + 100, y = d.p + kPage + 200;   // what block 0 reads (a page it only reads) and what it writes (another page)
+  const uint32_t v0 = 0x11111111u, v1 = 0x22222222u;
+  for (const bool keep : {false, true}) {
+    for (const bool by_word : {false, true}) {
+      MemoryManager::SpecPlan plan;
+      plan.pages = !by_word;
+      Trial t(d.mem, &plan);
+      VCHECK(!d.rd(x, 4));
+      VCHECK(!d.rd(y, 4));
+      VCHECK(!stops([&] { d.mem.write(y, &v0, 4); }));
+      VCHECK(!stops([&] { d.mem.write(y + 64, &v0, 4); }));
+      d.mem.spec_leave();
+      const std::vector<std::pair<uint64_t, uint64_t>> learned = d.mem.spec_scouted();
+      // Noted by page, block 0 read in the allocation by page state and wrote in it: it is noted by word from here on. (Noted by
+      // word from the start there is nothing to learn.)
+      if (by_word) VCHECK(learned.empty());
+      else VCHECK(learned == (std::vector<std::pair<uint64_t, uint64_t>>{whole}));
+      // Block 1, on another worker and then block 2 on block 0's: what block 0 read and wrote is theirs to read and write.
+      t.as(1, 1);
+      uint32_t got = 0;
+      VCHECK(!stops([&] { d.mem.read(y, &got, 4); }));
+      VCHECK_EQ(got, v0);                                        // it sees block 0's store, as it does in order
+      VCHECK(!stops([&] { d.mem.write(y, &v1, 4); }));           // and writes over it
+      VCHECK(!d.wr(x, 4));                                       // and over what block 0 read
+      t.as(0, 2);
+      VCHECK(!d.rd(y + 64, 4));                                  // (block 0's other word: nobody's now)
+      VCHECK(!d.rd(d.p + 300, 4));                               // block 0's page of reads, in a word nobody wrote: by word, no stop
+      if (!keep) VCHECK(d.rd(y, 4));                             // block 1's now: stopped
+      const MemoryManager::SpecOutcome out = t.end();
+      VCHECK_EQ(out.committed, keep);
+      VCHECK(!out.coarse);
+      if (keep) {
+        std::vector<uint8_t> expect = d.init;
+        std::memcpy(expect.data() + (y - d.a), &v1, 4);
+        std::memcpy(expect.data() + (y + 64 - d.a), &v0, 4);
+        const uint8_t b[4] = {0xA1, 0xA2, 0xA3, 0xA4};
+        std::memcpy(expect.data() + (x - d.a), b, 4);
+        VCHECK(d.all() == expect);
+      } else {
+        // Block 1 kept block 0's store at y (with the rest of the line), block 0 what the launch started with: the second goes
+        // back last. (Four lines kept: y's and the next by block 0, y's and x's by block 1.)
+        VCHECK_EQ(out.kept_bytes, uint64_t{4 * 64});
+        if (d.all() != d.init) throw vtest::Failure("a stopped trial with a scout did not put back what the launch started with");
+      }
+      d.put_back();
+    }
+  }
+}
+
+VTEST(a_scout_learns_only_what_it_read_by_page_and_wrote_and_a_stopped_scout_learns_nothing) {
+  MemoryManager mem{1 << 24};
+  // (four pages each, and every access in a page that lies inside its allocation whole: a page two allocations share counts for both)
+  const uint64_t in = mem.alloc(4 * kPage), out_a = mem.alloc(4 * kPage), both = mem.alloc(4 * kPage);
+  std::vector<uint8_t> zeros(4 * kPage, 0x5C);
+  for (const uint64_t a : {in, out_a, both}) mem.write(a, zeros.data(), zeros.size());
+  const uint32_t v = 7;
+  uint32_t got;
+  const auto scout = [&](bool stop) {
+    Trial t(mem);
+    mem.read(in + kPage + 8, &got, 4);            // read only
+    mem.write(out_a + kPage + 8, &v, 4);          // written only
+    mem.read(both + kPage + 8, &got, 4);          // read ...
+    mem.write(both + 2 * kPage + 520, &v, 4);     // ... and written, in another page of the allocation
+    if (stop) mem.spec_stop("a test");
+    mem.spec_leave();
+    const std::vector<std::pair<uint64_t, uint64_t>> learned = mem.spec_scouted();
+    mem.spec_enter(1);
+    mem.spec_block(1);
+    // After a scout that learned `both`: a block reading in it is noted by word, so another block's write beside it goes on.
+    bool beside = false;
+    if (!stop) {
+      VCHECK(!stops([&] { mem.read(both + kPage + 2048, &got, 4); }));
+      mem.spec_enter(0);
+      mem.spec_block(2);
+      beside = stops([&] { mem.write(both + kPage + 2064, &v, 4); });
+    }
+    const MemoryManager::SpecOutcome o = t.end();
+    VCHECK_EQ(o.committed, !stop && !beside);
+    return std::make_pair(learned, beside);
+  };
+  const auto [learned, beside] = scout(false);
+  if (pages_on()) VCHECK(learned == (std::vector<std::pair<uint64_t, uint64_t>>{{both, both + 4 * kPage}}));
+  else VCHECK(learned.empty());
+  VCHECK(!beside);
+  mem.write(both, zeros.data(), zeros.size());
+  mem.write(out_a, zeros.data(), zeros.size());
+  const auto [none, unused] = scout(true);
+  VCHECK(none.empty());
+  (void)unused;
+  // (the stopped scout was undone)
+  std::vector<uint8_t> now(4 * kPage);
+  mem.read(both, now.data(), now.size());
+  VCHECK(now == zeros);
+  mem.read(out_a, now.data(), now.size());
+  VCHECK(now == zeros);
+}
+
+// What worker 0 remembered while it ran the scout is of marks that are gone: a page it may read with no note, where a page's
+// lines are, the runs of words its block took.
+VTEST(a_worker_remembers_nothing_of_the_scout_s_marks) {
+  Paged d(4);
+  uint8_t b[256] = {};
+  const uint64_t q = d.p + kPage, r = d.p + 2 * kPage;
+  // Where block 2, on worker 0 after the scout, comes to a word block 1 wrote meanwhile, and whether it writes there. (The runs
+  // are asked for accesses of sixteen words or more, so those places are 128 bytes over block 1's word.)
+  struct At {
+    uint64_t at, len;
+    bool writes;
+  };
+  const At places_[] = {{d.p + 40, 4, false}, {q + 40, 4, false}, {q + 128, 128, true}, {q + 128, 128, false}, {q + 512, 128, false}, {r + 8, 4, true}};
+  for (const bool by_word : {false, true}) {
+    MemoryManager::SpecPlan plan;
+    plan.pages = !by_word;
+    for (const At& place : places_) {
+      Trial t(d.mem, &plan);
+      VCHECK(!d.rd(d.p + 40, 4));                                  // a page block 0 may read with no further note (by page)
+      VCHECK(!d.rd(q + 40, 4));                                    // (so that the next line is a write in a page it read)
+      VCHECK(!stops([&] { d.mem.write(q + 128, b, 128); }));       // a run of 32 words, remembered as written
+      VCHECK(!stops([&] { d.mem.read(q + 512, b, 128); }));        // ... and one remembered as read
+      VCHECK(!d.wr(r + 8, 4));                                     // the last page it wrote in
+      d.mem.spec_leave();
+      d.mem.spec_scouted();
+      // Block 1, on the other worker, takes a word in each of them as its writer.
+      t.as(1, 1);
+      VCHECK(!d.wr(d.p + 40, 4));
+      VCHECK(!d.wr(q + 40, 4));
+      VCHECK(!d.wr(q + 128 + 64, 4));
+      VCHECK(!d.wr(q + 512 + 64, 4));
+      VCHECK(!d.wr(r + 8, 4));
+      t.as(0, 2);
+      const bool stopped = place.writes ? stops([&] { d.mem.write(place.at, b, place.len); }) : stops([&] { d.mem.read(place.at, b, place.len); });
+      if (!stopped) throw vtest::Failure("worker 0 went by what it remembered of the scout's marks, at page offset " + std::to_string(place.at - d.p));
+      const MemoryManager::SpecOutcome out = t.end();
+      VCHECK(!out.committed);
+      VCHECK(d.all() == d.init);
+      d.put_back();
+    }
+  }
+}
+
+// A piece a later block keeps on the scout's worker is not joined to the scout's last piece, though it begins where that one
+// ended: the scout's pieces go back last, and this one holds the scout's own stores.
+VTEST(a_later_block_s_kept_bytes_are_not_joined_to_the_scout_s) {
+  Paged d(3);
+  const uint64_t line = d.p + 1024;
+  const uint32_t v0 = 0x33333333u, v2 = 0x44444444u;
+  Trial t(d.mem, &by_word_plan());
+  VCHECK(!stops([&] { d.mem.write(line + 64, &v0, 4); }));   // the scout's first piece: the second line
+  VCHECK(!stops([&] { d.mem.write(line, &v0, 4); }));        // its last: the first line, which ends where the second begins
+  d.mem.spec_leave();
+  VCHECK(d.mem.spec_scouted().empty());
+  t.as(0, 2);
+  VCHECK(!stops([&] { d.mem.write(line + 64, &v2, 4); }));   // block 2 keeps the second line: the scout's store is in it
+  t.as(1, 1);
+  VCHECK(d.rd(line + 64, 4));
+  const MemoryManager::SpecOutcome out = t.end();
+  VCHECK(!out.committed);
+  VCHECK_EQ(out.kept_bytes, uint64_t{3 * 64});
+  VCHECK(d.all() == d.init);
 }
 
 VTEST_MAIN

@@ -44,6 +44,37 @@ compare-and-swap, and a block makes an access only after the word allows it:
   made (`MemoryManager::SpecStop`, thrown from the access);
 * the first write of a block to a word copies the bytes that are there into the block's undo log, then writes.
 
+**By line.** Blocks mostly keep to bytes of their own: a warp's 32 lanes one after another are 128 bytes, and nobody else comes
+there. So the sixteen words of 64 bytes (a *line*) are not kept as sixteen marks while one block alone has touched them, but as
+one 64-bit record:
+
+| line record | meaning |
+|---|---|
+| 0 | no block has touched the line's sixteen words |
+| `b + 1`, read bits, written bits | block `b` alone has touched them: a bit for each word it read, a bit for each word it wrote |
+| by word | the sixteen words (above) say what was done to their bytes; final for the trial |
+| busy | a block is writing the sixteen marks out from the record (for the length of sixteen stores) |
+
+A record of block `b` is exactly sixteen word marks, each of them 0, `b + 1` or "written by `b`", written down in 64 bits. The
+block moves it by one compare-and-swap that sets the bits of the words it is about to read or write, which is the word moves
+"untouched to its reader" and "untouched or its own reader mark to its writer" made for several of its words at the same instant.
+At its first write in the line the block copies the line's 64 bytes to its undo log, with the record "busy" for the length of
+the copy, and only then sets its written bits; its later writes in the line keep nothing more. A second block that comes to
+the line reads from the record which words the first read and which it wrote:
+
+* if its access may not be made by the word rules (it reads a word whose written bit is set; it writes a word whose read or
+  written bit is set), it stops the trial there, before the access;
+* otherwise it takes the record to "busy" by compare-and-swap (which fails, and is tried again from a fresh look, if the first
+  block noted more in between), stores the sixteen marks the record stood for into the line's words, and sets the record to
+  "by word". From then on both blocks, and any other, go by the words of that line (and keep, word by word, the bytes of the
+  words they take there). A block that finds "busy" waits: for the sixteen stores, or for the other block's copy of 64 bytes.
+
+Nothing is noted that the words would not note, and nothing the words would note is left out, so a line never stops a trial by
+itself and there is no "coarse" case for it. What it saves is the compare-and-swaps (one for sixteen words instead of sixteen, or
+eight with the pairs of round sp55, which lines replace), host memory that is written (8 bytes of record per 64 bytes of device
+memory instead of 64, the words being touched only in lines that two blocks came to), and pieces of the undo log (one of 64 bytes
+for a line a block fills a word at a time, where there were sixteen of four).
+
 **By page.** Most of what a kernel touches it only reads, and a compare-and-swap per word for bytes nobody writes is
 the larger part of what a trial costs. So each 4 KiB page of the range has a state of its own, and a page is noted by word only
 once a block writes in it:
@@ -53,14 +84,14 @@ once a block writes in it:
 | 0 | no block has touched the page |
 | `b + 1` | block `b` has read in it; no other block has touched it; nothing is noted by word |
 | all ones | more than one block has read in it; none has written in it; nothing is noted by word |
-| by word | the page's words (above) say what was done to its bytes |
-| by word, coarse | the same, after the page's only reader went on to write in it: its reads had not been noted by word, so every word of the page started as "read by that block" |
+| by word | the page's lines and words (above) say what was done to its bytes |
+| by word, coarse | the same, after the page's only reader went on to write in it: its reads had not been noted by word, so every word of the page started as "read by that block" (every line a record of that block with all sixteen read bits) |
 
 A page moves untouched, one reader, several readers by compare-and-swap, as a word does. It becomes "by word" in two ways only:
 from untouched, by the first block that writes in it (or by the first block that touches it at all, where the trial's plan says so,
 below); and from one reader, by that reader itself when it writes in the page, after it has put a page of words in place in which
-every word carries its reader mark. "Several readers", "by word" and "by word, coarse" are final for the trial. A write is only
-ever made in a page that is noted by word, after the word allows it; so:
+every line is that block's record with every read bit set. "Several readers", "by word" and "by word, coarse" are final for the trial. A write is only
+ever made in a page that is noted by word, after the line's record or the word allows it; so:
 
 * a write in a page that another block has read by page state, or that several have, stops the trial before the write is made;
 * a read in a page noted by word goes by the words.
@@ -69,8 +100,7 @@ Every method of the memory manager that reads or writes device bytes makes this 
 batch forms in `src/core/memory.cpp`; with no trial on, each is one null test). The methods that hand out a pointer for the caller
 to use later (`batch_window`, `atomic_word_ptrs`) decline during a trial, and the caller takes the path that is noted.
 
-Four things make the note cheaper without changing what is noted. Each is a memory a worker keeps for itself, or a wider
-compare-and-swap; none adds a state:
+Three memories a worker keeps for itself make the note cheaper without changing what is noted; none adds a state:
 
 * **Pages a worker has seen.** Each worker remembers up to 256 pages its block may read with no further note: pages whose state
   was the block's own reader mark, valid for that block only, and pages with several readers, valid for the rest of the trial
@@ -85,14 +115,11 @@ compare-and-swap; none adds a state:
   nothing to note: the store of `tmp[i] += ...` in a loop is one range compare instead of 32 loads and compares. Two runs of
   one block that touch are remembered as one; a run is asked the block. (One lane's few words neither enter the memory nor ask
   it: the runs of 32 lanes would push one another out, and the asking cost each of them.)
-* **Pages of words a worker has read in.** The worker remembers where the words of 64 such pages are; a read whose words all
-  allow it already (looked at one by one, every time) needs no call and no compare-and-swap, and a lone untouched word (a
-  lane of a scattered load) is taken as its first reader where it is found.
-* **Two words at once.** Two neighbouring words (the first at an even index) are read as one 64-bit value, and taken by one
-  64-bit compare-and-swap when both are free for the block (both untouched for a read; each untouched or the block's own reader
-  mark for a write). When either holds anything else the words are handled one at a time as before, so no state is entered
-  that the single-word rules do not allow: the 64-bit compare-and-swap succeeds only if both words still hold exactly the values
-  that were judged free.
+* **Pages of lines a worker has read in.** The worker remembers where the lines and words of 64 such pages are; a read whose
+  record or words allow it already (looked at every time) needs no call and no compare-and-swap.
+
+(Round sp55 also took two neighbouring words by one 64-bit compare-and-swap; the line record does that for sixteen, and the
+words of a line that several blocks share are taken one at a time again.)
 
 The undo log of a worker keeps its memory from one trial to the next (up to 64 MiB; a launch that writes much writes as much the
 next time).
@@ -126,8 +153,25 @@ writer. The other block made its note either
 The same holds for a block that goes by a remembered run of words instead of the words: a word in a run the block wrote holds the
 block's writer mark for the rest of the trial; a word in a run it noted for reading held a mark that allows the block's read, and
 every state such a word can move to still stops another block's write of it (another block's reader mark on it makes it "several
-readers"; the block's own write makes it the block's). Taking two words by one compare-and-swap is taking each of them by the
-single-word rule at the same instant, or not at all.
+readers"; the block's own write makes it the block's).
+
+And it holds for words kept as a line's record. Say "the mark of word `i`" for what the record says of it while the line is one
+block's (0, `b + 1`, or written by `b`, from its two bits) and for the word itself once the line is by word. Then:
+
+* *One block's moves are word moves.* The owner's compare-and-swap adds read bits (untouched to its reader, or nothing for a
+  word it already holds) and written bits (untouched or its own reader mark to its writer) and takes none away; it succeeds
+  only on the record it looked at, so each word moves from the mark that was judged.
+* *Writing out changes no mark.* The block that writes a record out first takes it to "busy" by compare-and-swap from the very
+  value it then writes out, so the owner cannot add a bit that is lost (its compare-and-swap fails on "busy", it waits, and
+  goes by the words, where its earlier marks are). The words of a line are zero until then and are looked at by nobody before
+  the record says "by word"; while it says "busy" every other block waits, and the block that holds it does sixteen stores and
+  nothing that can throw or wait. So every access sees each word's mark either from the record or from the word, never half
+  of one and half of the other.
+* *The second block decides from the marks.* It stops where a mark forbids its access by the word rules and writes the record
+  out where none does, then makes its own note in the words as any block does.
+
+So a line is the note by word, written down differently while one block is alone in it, and the argument above (whichever of two
+blocks came second to a word found a state it may not enter) goes through with "the mark of the word" in place of "the word".
 
 So in a trial that was not stopped, no byte was written by one block and touched by another. Each block therefore read, for every
 byte, either what the launch started with or what the block itself stored, and that is also what it reads when the blocks run in
@@ -163,8 +207,18 @@ A block writes a byte only after its word is the block's own writer mark, and it
 the mark and the first store. No other block writes a word that carries the mark, so what was copied is what the launch started
 with, and no byte the trial wrote is outside a word some block marked and copied. Writing the copies back, in any order, gives
 the memory of before the launch. Bytes of a marked word that lie outside every allocation (the tail of an allocation whose size is
-no multiple of four) are not copied and cannot be written. Two words taken at once are kept like two taken one after the other
-(they join the run of words taken in the call, which is copied before the call returns). When a word in the middle of a store's
+no multiple of four) are not copied and cannot be written.
+
+In a line a block alone holds, the copy is of the whole line and is made once, at the block's first write in it. The record is
+"busy" from before the copy to after it, and was untouched or the block's own until then: no other block had a mark in the line, so
+none had written in it, and none can get a mark there (and so write there) while the copy is made. The copy is therefore what
+the trial started with in all sixteen words, whichever of them the block goes on to write. A block that comes to the line later
+and writes other words of it keeps those words by the word rule, which are again the bytes the trial started with; so every
+piece that covers a byte holds the same value for it, and the order of putting back stays free. (More is copied than is written,
+which is harmless: putting back bytes nobody changed changes nothing. Bytes of the line outside every allocation are not
+copied.)
+
+When a word in the middle of a store's
 range is another block's, the trial stops with the words before it marked and not yet copied, and no byte of the store has been
 written (the note comes before the store), so there is nothing of theirs to put back. A store inside a remembered run of the
 block's own words keeps nothing: those words were kept when the block took them. The page states hold no bytes and are cleared
@@ -198,6 +252,33 @@ blocks is noted by word from the start and has no coarse stop.
 `VGPU_EXACT_PAGES=0` notes every page by word from its first touch (the note the mode began with), for measurements and as the
 fourth form of the test.
 
+### The scout: the first block alone
+
+A coarse stop finds one allocation out and throws the trial away. The first trial of a kernel does better where the grid has
+blocks enough: it runs block 0 alone first, on the launching thread, under the shadow like any block of the trial, and only then
+starts the others (`Runner::run_exact`, `MemoryManager::spec_scouted`). Between the two:
+
+* the allocations in which block 0 read by page state and also wrote are added to what the trial, and the kernel's later
+  trials, note by word from the first touch (all of them at once, where coarse stops find them one at a time);
+* **block 0's notes are forgotten**: its page states, its lines, and what its worker remembered of them. Its undo log is kept.
+
+Forgetting them is sound because of where block 0 stands in the order. The run in order runs block 0 first, alone, on the memory
+the launch started with; the scout did exactly that. So after it the memory is the memory every later block finds in order, and
+whether a later block reads or overwrites what block 0 read or wrote is no conflict at all: in order it does the same, after
+block 0. The proof for the rest is the proof above with "the memory after block 0" in place of "what the launch started with":
+the blocks 1 to n - 1 are noted against one another, and if none touched what another wrote, each ran as it does in order after
+block 0. Block 0 itself ran in order by construction (and counted its counters, which are added to the launch's as any
+worker's are).
+
+A stopped trial must put back what the launch started with, and a later block may have written a word block 0 wrote. That block
+kept what it found (block 0's store) and block 0 kept what the launch started with, so the pieces block 0 kept as the scout go back
+last, after every other piece (among which the order stays free, as before). If block 0 itself fails or stops the trial, nothing
+is learned or forgotten and the launch runs in order as after any stop.
+
+The scout costs the launch one block's time on one thread instead of on all of them, once per kernel. That is left to launches of
+at least 32 blocks per thread of the trial (about 3 % of such a launch at most); smaller grids learn by coarse stops as before.
+`VGPU_EXACT_SCOUT=0` turns it off (for measurements).
+
 ### A kernel that keeps being stopped
 
 A stopped trial costs the work done before the stop. A kernel whose trial was stopped is run in order for the next launch, then
@@ -205,7 +286,23 @@ tried again; after each further stop it waits twice as long (2, 4, ... 4096 laun
 launches are tried moves time only.
 
 The width rule of ordinary launches (`LaunchWidth`, `src/exec/worker_pool.cpp`) applies too: a launch too small to pay for a
-hand-off to the pool stays on one thread and is not tried.
+hand-off to the pool stays on one thread and is not tried. For a trial the rule is stricter in two ways, because what a trial
+competes with is the run in order without the shadow, and because a trial's launches scatter more (each sets the shadow up and
+takes it down on every thread):
+
+* **What a block costs is measured on one thread.** The rule's figure for a kernel comes from the time its threads spent in
+  blocks, and under a trial that time holds the proof's cost: a small launch looked large enough for the pool, went to the pool,
+  and was measured there again, for as long as the program ran. A figure that no launch on one thread has given now counts for
+  half, a launch it does not carry to the full width runs in order (which measures it), and a figure one thread gave is not
+  replaced by a pool's, unless the pool's is under three quarters of it (a block under the proof costs no less than a block in
+  order, so the figure was too high: the kernel's first launch in order, a thread the host took away).
+* **A small launch goes wide on trial only while most launches win.** The ordinary rule widens a small kernel for eight launches
+  and keeps the width if the best of them took under 70 % of one thread's time. Under a trial the width is kept only if at least
+  four of the seven counted launches took under 85 % of one thread's time and the seven together took no longer than one thread
+  would have (a single launch counted as four times that at most); otherwise the kernel runs in order for 256 launches (twice
+  as many after each further loss) and is tried again.
+
+Both move time only: which launches are tried never changes a result.
 
 ## What is not the same
 
@@ -220,21 +317,23 @@ hand-off to the pool stays on one thread and is not tried.
 While a trial runs, each access of a warp to global memory makes one call of the note on top of the access. For a page the block
 may read without a note (read by it, or by several blocks, and written by none) that is a compare in the worker's memory per page
 the warp touches; for a page noted by word, a range compare when the block is remembered to have noted the words, else a load
-and a compare per word when the block has been there and a compare-and-swap per two words the first time, and for a store a
-copy of the old bytes. The page states take four bytes of host memory per 4 KiB
-of device memory the launch touches; the words 4 KiB per 4 KiB page a block writes in (or that the plan notes by word); both are
-cleared after each trial. The undo log holds the bytes the launch wrote for the first time, at most 1 GiB per worker (more stops
+and a compare per line (64 bytes) when the block has been there and a compare-and-swap per line the first time (per word in a
+line two blocks share), and for a block's first store in a line a copy of the line's bytes. The page states take four bytes of host memory per 4 KiB
+of device memory the launch touches; a page a block writes in (or that the plan notes by word) takes 4.5 KiB that is set aside
+and 512 bytes of it that are written, plus 64 bytes for each line that two blocks came to; all are cleared after each trial. The undo log holds the bytes the launch wrote for the first time, at most 1 GiB per worker (more stops
 the trial). A kernel with a coarse stop pays for the part of the trial before the stop once per learned allocation. Measurements:
 Round sp47 and Round sp55 in [the performance log](perf-design/rounds/README.md).
 
 ## Seeing what happened
 
 `VGPU_EXACT_LOG=<file>` appends a line per launch the variable applied to: kernel, blocks, threads, then `committed`, `stopped`
-or `in order`, the reason, the bytes kept for undoing and the 4 KiB pages touched; a trial that was stopped coarsely and tried again
-has a line of its own before it, with `again`. `VGPU_EXACT_STATS=<file>` appends a line per trial with what its notes cost
+or `in order`, the reason, the bytes kept for undoing, the 4 KiB pages touched and the microseconds the trial took; a trial that was
+stopped coarsely and tried again has a line of its own before it, with `again`. `VGPU_EXACT_STATS=<file>` appends a line per trial with what its notes cost
 (`MemoryManager::SpecStats`): calls of the hooks, pages taken by one reader, by several, noted by word, made coarse, words looked at
-and taken by compare-and-swap for reads and for writes, pieces and bytes kept, accesses answered by a remembered run.
-`sass::exact_counts()` gives the process's totals to a test (`again`: the trials run a second time).
+and taken by compare-and-swap for reads and for writes, pieces and bytes kept, accesses answered by a remembered run, lines that a
+second block came to (`lines_by_word`) and lines one block alone had touched at the end (`lines_one_block`).
+`sass::exact_counts()` gives the process's totals to a test (`again`: the trials run a second time; `scouted`: the trials whose
+first block ran alone first).
 
 ## Tests
 

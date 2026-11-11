@@ -1,0 +1,60 @@
+diff --git a/src/core/memory_spec.cpp b/src/core/memory_spec.cpp
+index 4d65a38f..77b85d90 100644
+--- a/src/core/memory_spec.cpp
++++ b/src/core/memory_spec.cpp
+@@ -36,6 +36,7 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+ #include <mutex>
+@@ -474,6 +475,47 @@ MemoryManager::SpecOutcome MemoryManager::spec_end() {
+       if (addr < range.second && std::find(out.by_word.begin(), out.by_word.end(), range) == out.by_word.end()) out.by_word.push_back(range);
+     }
+   }
++  // VGPU_EXACT_CENSUS=<file> (round sp58's measurement, not kept in the tree): of the pages noted by word, and of their 64-byte
++  // lines, how many were touched by exactly one block.
++  if (const char* census = std::getenv("VGPU_EXACT_CENSUS"); census && *census) {
++    uint64_t pages = 0, pages_one = 0, pages_w = 0, pages_w_one = 0, lines = 0, lines_one = 0, lines_w = 0, lines_w_one = 0;
++    for (Spec::Worker& w : s.workers)
++      for (const uint64_t slot : w.installed) {
++        const Spec::Word* page = s.top[slot].load(std::memory_order_acquire);
++        uint32_t pfirst = 0;
++        bool pmany = false, pwr = false, ptouched = false;
++        for (uint64_t l = 0; l < 64; ++l) {
++          uint32_t first = 0;
++          bool many = false, wr = false, touched = false;
++          for (uint64_t i = 0; i < 16; ++i) {
++            const uint32_t v = page[l * 16 + i].v;
++            if (v == 0) continue;
++            touched = true;
++            if (v == Spec::kMany) {
++              many = true;
++              continue;
++            }
++            if (v & Spec::kWrite) wr = true;
++            const uint32_t b = v & ~Spec::kWrite;
++            if (first == 0) first = b;
++            else if (first != b) many = true;
++          }
++          if (!touched) continue;
++          ++lines, lines_one += !many, lines_w += wr, lines_w_one += wr && !many;
++          ptouched = true, pwr |= wr, pmany |= many;
++          if (pfirst == 0) pfirst = first;
++          else if (first != 0 && first != pfirst) pmany = true;
++        }
++        if (!ptouched) continue;
++        ++pages, pages_one += !pmany, pages_w += pwr, pages_w_one += pwr && !pmany;
++      }
++    if (FILE* f = std::fopen(census, "a")) {
++      std::fprintf(f, "%d %llu %llu %llu %llu %llu %llu %llu %llu\n", out.committed ? 1 : 0, (unsigned long long)pages, (unsigned long long)pages_one,
++                   (unsigned long long)pages_w, (unsigned long long)pages_w_one, (unsigned long long)lines, (unsigned long long)lines_one,
++                   (unsigned long long)lines_w, (unsigned long long)lines_w_one);
++      std::fclose(f);
++    }
++  }
+   // The shadow goes back to nothing: every page state is cleared, every installed page is zeroed and pooled, its slot cleared.
+   std::lock_guard<std::mutex> g(s.pool_mu);
+   for (Spec::Worker& w : s.workers) {

@@ -348,15 +348,21 @@ bool pool_trial_allows(PoolTrial& t) {
   return false;
 }
 
-void pool_trial_note(PoolTrial& t, uint64_t wall_ns, uint64_t solo_ns) {
+void pool_trial_note(PoolTrial& t, uint64_t wall_ns, uint64_t solo_ns, bool proved) {
   if (solo_ns == 0) return;
   // (the first launch of a trial wakes workers that were asleep: it says nothing about a hot pool)
   if (t.n > 0) {
     const uint64_t permille = wall_ns >= solo_ns ? 1000000 : wall_ns * 1000 / solo_ns;
     if (permille < t.best) t.best = static_cast<uint32_t>(permille);
+    if (proved) {
+      const uint64_t exact = wall_ns / solo_ns >= kProvedWorstPermille / 1000 ? kProvedWorstPermille : wall_ns * 1000 / solo_ns;
+      t.wins += exact < kProvedPaysBelowPermille;
+      t.sum += static_cast<uint32_t>(exact);
+    }
   }
   if (++t.n < kTrialLaunches) return;
-  if (t.best < kTrialPaysBelowPermille) {
+  const bool pays = proved ? t.wins * 2 > kTrialLaunches - 1 && t.sum <= (kTrialLaunches - 1) * 1000 : t.best < kTrialPaysBelowPermille;
+  if (pays) {
     t.backoff = kTrialBackoffMin;   // it pays: keep the wide width, and judge again after the next kTrialLaunches
   } else {
     t.hold = t.backoff;
@@ -364,6 +370,7 @@ void pool_trial_note(PoolTrial& t, uint64_t wall_ns, uint64_t solo_ns) {
   }
   t.n = 0;
   t.best = ~0u;
+  t.wins = t.sum = 0;
 }
 
 namespace {
@@ -374,14 +381,17 @@ struct CostSlot {
   std::atomic<uintptr_t> key{0};
   std::atomic<uint64_t> ns_per_unit{0};
   // The wide-width trial of this kernel (PoolTrial); torn reads give one wrong verdict.
-  std::atomic<uint32_t> hold{0}, backoff{kTrialBackoffMin}, n{0}, best{~0u};
+  std::atomic<uint32_t> hold{0}, backoff{kTrialBackoffMin}, n{0}, best{~0u}, wins{0}, sum{0};
+  // Whether ns_per_unit was measured by a launch on one thread (read for proved launches only: LaunchWidth).
+  std::atomic<bool> solo{false};
   PoolTrial trial() const {
     return {hold.load(std::memory_order_relaxed), backoff.load(std::memory_order_relaxed), n.load(std::memory_order_relaxed),
-            best.load(std::memory_order_relaxed)};
+            best.load(std::memory_order_relaxed), wins.load(std::memory_order_relaxed), sum.load(std::memory_order_relaxed)};
   }
   void set_trial(const PoolTrial& t) {
     hold.store(t.hold, std::memory_order_relaxed), backoff.store(t.backoff, std::memory_order_relaxed);
     n.store(t.n, std::memory_order_relaxed), best.store(t.best, std::memory_order_relaxed);
+    wins.store(t.wins, std::memory_order_relaxed), sum.store(t.sum, std::memory_order_relaxed);
   }
 };
 constexpr size_t kCostSlots = 256;
@@ -415,17 +425,24 @@ uint64_t now_ns() {
 
 }  // namespace
 
-LaunchWidth::LaunchWidth(const void* key, uint64_t units, unsigned& threads)
-    : key_(key), units_(units), used_(threads), begin_ns_(0) {
+LaunchWidth::LaunchWidth(const void* key, uint64_t units, unsigned& threads, bool proved)
+    : key_(key), units_(units), used_(threads), begin_ns_(0), proved_(proved) {
   bool by_hand = false;
   const uint64_t floor_ns = min_work_ns(&by_hand);
   if (threads <= 1 || units <= 1 || floor_ns == 0) return;
   CostSlot& s = cost_slot(key);
   const bool mine = s.key.load(std::memory_order_relaxed) == reinterpret_cast<uintptr_t>(key);
   const uint64_t known = mine ? s.ns_per_unit.load(std::memory_order_relaxed) : 0;
-  threads = cap_threads(threads, units, known, floor_ns);
+  // (proved launches: the class comment. A figure no launch on one thread has given counts for half, and a launch it does not carry
+  // to the full width runs in order.)
+  const bool measured = !proved || (mine && s.solo.load(std::memory_order_relaxed));
+  if (measured) {
+    threads = cap_threads(threads, units, known, floor_ns);
+  } else if (known && cap_threads(threads, units, known / 2 ? known / 2 : 1, floor_ns) < threads) {
+    threads = 1;
+  }
   // A launch the cap holds to few threads goes wider on trial (PoolTrial), unless the figure was set by hand.
-  if (!by_hand && mine && known) {
+  if (!by_hand && mine && known && measured) {
     unsigned wide = cap_threads(used_, units, known, kTrialMinWorkNs);
     if (wide > threads) {
       PoolTrial t = s.trial();
@@ -455,7 +472,7 @@ LaunchWidth::~LaunchWidth() {
     PoolTrial t = s.trial();
     const uint32_t before = t.n;
     const uint32_t best = t.best;
-    pool_trial_note(t, end_ns - begin_ns_, solo_ns_);
+    pool_trial_note(t, end_ns - begin_ns_, solo_ns_, proved_);
     s.set_trial(t);
     // VGPU_POOL_TRIAL_LOG=1: each verdict, on stderr (what a trial of a kernel decided and the best ratio it saw)
     if (before + 1 >= kTrialLaunches)
@@ -463,10 +480,17 @@ LaunchWidth::~LaunchWidth() {
         std::fprintf(stderr, "[vgpu] pool trial: kernel %p, %u threads, best %u permille of one thread (solo %llu ns, last wall %llu ns): %s, hold %u\n", key_, used_,
                      best, static_cast<unsigned long long>(solo_ns_), static_cast<unsigned long long>(end_ns - begin_ns_), t.hold ? "does not pay" : "pays", t.hold);
   }
-  s.ns_per_unit.store(used_ > 1 && busy > 0 ? unit_cost_from_busy(units_, busy)
-                                            : blend_unit_cost(old, units_, used_, end_ns - begin_ns_),
-                      std::memory_order_relaxed);
-  if (s.key.load(std::memory_order_relaxed) != k) s.set_trial(PoolTrial{});   // (a slot taken over by another kernel starts fresh)
+  const bool mine = s.key.load(std::memory_order_relaxed) == k;
+  const uint64_t cost = used_ > 1 && busy > 0 ? unit_cost_from_busy(units_, busy) : blend_unit_cost(old, units_, used_, end_ns - begin_ns_);
+  // A proved launch on several threads leaves a figure that one thread measured as it is: its threads' time holds the proof's cost.
+  // Unless that time is well under the figure: a block under the proof costs no less than a block in order, so the figure was too
+  // high (the one launch that gave it was the kernel's first in order, or the host took the thread away), and the pool's is nearer.
+  const bool keep = proved_ && used_ > 1 && mine && old && s.solo.load(std::memory_order_relaxed) && cost >= old - old / 4;
+  if (!keep) {
+    s.ns_per_unit.store(cost, std::memory_order_relaxed);
+    s.solo.store(used_ <= 1, std::memory_order_relaxed);
+  }
+  if (!mine) s.set_trial(PoolTrial{});   // (a slot taken over by another kernel starts fresh)
   s.key.store(k, std::memory_order_relaxed);
 }
 

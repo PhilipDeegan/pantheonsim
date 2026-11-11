@@ -59,6 +59,7 @@ LaunchEnv read_launch_env() {
         take(e.exact_threads, is(s, "EXACT_THREADS"));
         take(e.exact_log, is(s, "EXACT_LOG"));
         take(e.exact_pages, is(s, "EXACT_PAGES"));
+        take(e.exact_scout, is(s, "EXACT_SCOUT"));
         take(e.exact_stats, is(s, "EXACT_STATS"));
         break;
       case 'M': take(e.max_steps, is(s, "MAX_STEPS")); break;
@@ -76,6 +77,7 @@ LaunchEnv read_launch_env() {
   e.exact_threads = std::getenv("VGPU_EXACT_THREADS");
   e.exact_log = std::getenv("VGPU_EXACT_LOG");
   e.exact_pages = std::getenv("VGPU_EXACT_PAGES");
+  e.exact_scout = std::getenv("VGPU_EXACT_SCOUT");
   e.exact_stats = std::getenv("VGPU_EXACT_STATS");
   e.lockstep = std::getenv("VGPU_LOCKSTEP");
   e.trace = std::getenv("VGPU_TRACE");

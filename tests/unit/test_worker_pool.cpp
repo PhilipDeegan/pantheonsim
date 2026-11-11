@@ -433,4 +433,196 @@ VTEST(a_cheap_kernel_goes_wide_on_trial_and_stays_only_if_the_pool_pays) {
   VCHECK(fixed_rule);
 }
 
+// ---- launches under a proof (exact parallel launches): what one thread costs is measured on one thread, and a stricter verdict ----
+
+VTEST(a_proved_trial_pays_only_if_most_launches_win_and_all_together_are_not_slower_than_one_thread) {
+  using namespace vgpu::exec;
+  const auto judge = [](const std::vector<uint64_t>& walls) {
+    PoolTrial t;
+    for (const uint64_t w : walls) pool_trial_note(t, w, 48'000, true);
+    VCHECK_EQ(t.n, 0u);
+    VCHECK_EQ(t.wins, 0u);
+    VCHECK_EQ(t.sum, 0u);
+    return t.hold == 0;
+  };
+  // (the first launch of a trial is not counted, here or without a proof)
+  VCHECK(judge({400'000, 30'000, 30'000, 30'000, 30'000, 30'000, 30'000, 30'000}));
+  // One fast launch among slow ones: the verdict without a proof (the best launch) says it pays; with one it does not.
+  VCHECK(!judge({400'000, 20'000, 60'000, 60'000, 60'000, 60'000, 60'000, 60'000}));
+  {
+    PoolTrial t;
+    for (const uint64_t w : {400'000, 20'000, 60'000, 60'000, 60'000, 60'000, 60'000, 60'000}) pool_trial_note(t, static_cast<uint64_t>(w), 48'000);
+    VCHECK_EQ(t.hold, 0u);
+  }
+  // Four of seven under 850 permille and the seven together under one thread's time: pays. Three of seven: not.
+  VCHECK(judge({0, 40'000, 40'000, 40'000, 40'000, 50'000, 50'000, 50'000}));
+  VCHECK(!judge({0, 40'000, 40'000, 40'000, 50'000, 50'000, 50'000, 50'000}));
+  // 850 permille itself is not a win (40'800 of 48'000).
+  VCHECK(!judge({0, 40'800, 40'800, 40'800, 40'800, 47'000, 47'000, 47'000}));
+  VCHECK(judge({0, 40'799, 40'799, 40'799, 40'799, 47'000, 47'000, 47'000}));
+  // Most launches win, and three stragglers make the seven slower than one thread: not.
+  VCHECK(!judge({0, 30'000, 30'000, 30'000, 30'000, 80'000, 80'000, 80'000}));
+  VCHECK(judge({0, 30'000, 30'000, 30'000, 30'000, 72'000, 72'000, 72'000}));     // (4 x 625 + 3 x 1500 = 7000 permille: no slower)
+  VCHECK(!judge({0, 30'000, 30'000, 30'000, 30'000, 72'000, 72'000, 72'100}));
+  // A launch counts for four times one thread at most (one stall does not outweigh a whole trial by itself; two do).
+  VCHECK(judge({0, 20'000, 20'000, 20'000, 20'000, 20'000, 20'000, 10'000'000}));
+  VCHECK(!judge({0, 20'000, 20'000, 20'000, 20'000, 20'000, 10'000'000, 10'000'000}));
+  // A trial that does not pay holds the kernel off, and doubles the hold, as without a proof.
+  PoolTrial t;
+  for (uint32_t i = 0; i < kTrialLaunches; ++i) pool_trial_note(t, 60'000, 48'000, true);
+  VCHECK_EQ(t.hold, kTrialBackoffMin);
+  VCHECK_EQ(t.backoff, 2 * kTrialBackoffMin);
+}
+
+// A kernel under a proof whose first launch (no figure yet) ran on the pool: its threads' time holds the proof's cost, here twice
+// the work. Without the rule that figure keeps every later launch on the pool; with it the second launch runs on one thread, which
+// measures the block, and the figure one thread gave is not replaced by a pool's.
+VTEST(a_proved_kernel_is_measured_on_one_thread_before_its_small_launches_go_wide) {
+  using vgpu::exec::LaunchWidth;
+  ::setenv("VGPU_POOL_MIN_WORK_US", "100", 1);   // (the cap alone: no trial of a wider width)
+  const auto spin_us = [](int us) {
+    const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(us);
+    while (std::chrono::steady_clock::now() < until) {
+    }
+  };
+  // 64 blocks, 40 us of work in all on one thread: not enough for two threads at 100 us each. On the pool under the proof each
+  // block is made to take 4 us of a thread's time: 256 us, enough for two (and at half, 128 us, not). (The margins are wide on
+  // purpose: the one-thread launch is a busy wait, which a loaded host stretches.)
+  const uint64_t kBlocks = 64;
+  for (const bool proved : {false, true}) {
+    static int keys[2];
+    std::vector<unsigned> used;
+    for (int launch = 0; launch < 6; ++launch) {
+      unsigned threads = 2;
+      {
+        LaunchWidth width(&keys[proved], kBlocks, threads, proved);
+        used.push_back(threads);
+        if (threads > 1) {
+          for (unsigned t = 0; t < threads; ++t) vgpu::exec::note_busy_ns(kBlocks * 4000 / threads);
+        } else {
+          spin_us(40);
+        }
+      }
+    }
+    VCHECK_EQ(used[0], 2u);   // no figure: as asked
+    if (proved) {
+      for (size_t i = 1; i < used.size(); ++i) VCHECK_EQ(used[i], 1u);   // measured on one thread, and too small from then on
+    } else {
+      for (size_t i = 1; i < used.size(); ++i) VCHECK_EQ(used[i], 2u);   // (the figure of the pool's threads: what a launch without a proof goes by)
+    }
+  }
+  // A kernel whose blocks are heavy even at half the pool's figure keeps its threads, proved or not.
+  for (const bool proved : {false, true}) {
+    static int keys[2];
+    for (int launch = 0; launch < 4; ++launch) {
+      unsigned threads = 8;
+      LaunchWidth width(&keys[proved], 512, threads, proved);
+      VCHECK_EQ(threads, 8u);
+      for (unsigned t = 0; t < threads; ++t) vgpu::exec::note_busy_ns(512 * 40000 / threads);
+    }
+  }
+  // A figure one thread gave is kept when a later launch of the kernel runs on the pool under the proof: 64 blocks are measured
+  // on one thread (launch 1, after the pool's inflated figure of launch 0), then 8192 blocks of the same kernel go to the pool
+  // with an inflated time, and 64 blocks after that are still too small for two threads.
+  {
+    static int key;
+    std::vector<unsigned> used;
+    const uint64_t blocks[] = {64, 64, 8192, 64, 64};
+    for (const uint64_t n : blocks) {
+      unsigned threads = 2;
+      {
+        LaunchWidth width(&key, n, threads, true);
+        used.push_back(threads);
+        if (threads > 1) {
+          for (unsigned t = 0; t < threads; ++t) vgpu::exec::note_busy_ns(n * 4000 / threads);
+        } else {
+          spin_us(40);
+        }
+      }
+    }
+    VCHECK_EQ(used[0], 2u);
+    VCHECK_EQ(used[1], 1u);
+    VCHECK_EQ(used[2], 2u);   // 8192 blocks at the 0.6 us or so one thread measured: 5 ms of work
+    VCHECK_EQ(used[3], 1u);   // (the pool's 4 us a block would have made this 256 us: two threads)
+    VCHECK_EQ(used[4], 1u);
+  }
+  // A figure one thread gave that was far too high (the launch was the kernel's first in order, or the host took the thread away:
+  // here 400 us for 40 us of work) sends the next launch to the pool; the pool's threads then report less than three quarters of
+  // it, which no proof's cost explains, so the figure is dropped and the launch after is measured on one thread again.
+  {
+    static int key;
+    std::vector<unsigned> used;
+    for (int launch = 0; launch < 6; ++launch) {
+      unsigned threads = 2;
+      {
+        LaunchWidth width(&key, 64, threads, true);
+        used.push_back(threads);
+        if (threads > 1) {
+          for (unsigned t = 0; t < threads; ++t) vgpu::exec::note_busy_ns(64 * 1000 / threads);
+        } else {
+          spin_us(launch == 1 ? 400 : 40);
+        }
+      }
+    }
+    VCHECK_EQ(used[0], 2u);   // no figure
+    VCHECK_EQ(used[1], 1u);   // half the pool's figure is too little for two threads: one thread, which takes 400 us
+    VCHECK_EQ(used[2], 2u);   // 400 us looks like enough for two
+    VCHECK_EQ(used[3], 1u);   // the pool said 64 us: the figure is the pool's again, and half of it is too little
+    VCHECK_EQ(used[4], 1u);   // measured: 40 us
+    VCHECK_EQ(used[5], 1u);
+  }
+  ::unsetenv("VGPU_POOL_MIN_WORK_US");
+}
+
+// The whole road of a small kernel under a proof: 16 blocks, 48 us on one thread, and on the pool each block made to take twice a
+// block's time (the proof's cost). Its first launch has no figure and is wide; its second runs on one thread, which measures it;
+// then it goes wide on trial. With one fast launch among slow ones (15 us, the others 60 us) the trial does not pay and the
+// kernel is held to one thread; without the proof the same launches keep the pool (the best launch decides, and against a figure
+// that the pool's own threads gave).
+VTEST(a_small_proved_kernel_goes_wide_on_trial_after_one_thread_measured_it_and_stays_only_if_most_launches_win) {
+  using vgpu::exec::LaunchWidth;
+  ::unsetenv("VGPU_POOL_MIN_WORK_US");
+  const uint64_t kBlocks = 16, kBlockNs = 3000;
+  const auto spin_us = [](int us) {
+    const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(us);
+    while (std::chrono::steady_clock::now() < until) {
+    }
+  };
+  const auto launches = [&](int* key, int count, bool proved, bool mostly_slow) {
+    std::vector<unsigned> used;
+    for (int launch = 0; launch < count; ++launch) {
+      unsigned threads = 4;
+      LaunchWidth width(key, kBlocks, threads, proved);
+      used.push_back(threads);
+      if (threads > 1) {
+        spin_us(mostly_slow && launch % 8 != 5 ? 60 : 15);
+        for (unsigned t = 0; t < threads; ++t) vgpu::exec::note_busy_ns(kBlocks * 2 * kBlockNs / threads);
+      } else {
+        spin_us(48);
+      }
+    }
+    return used;
+  };
+  // (as above: a launch the host preempts is noise, so each rule may show itself on any of a few fresh kernels)
+  constexpr int kAttempts = 5;
+  static int keys[3][kAttempts];
+  const auto holds = [&](int rule, const auto& check) {
+    for (int attempt = 0; attempt < kAttempts; ++attempt)
+      if (check(&keys[rule][attempt])) return true;
+    return false;
+  };
+  const auto shape = [](const std::vector<unsigned>& u, unsigned second, size_t wide_until) {
+    if (u[0] != 4u || u[1] != second) return false;
+    for (size_t i = 2; i < u.size(); ++i)
+      if (u[i] != (i < wide_until ? 4u : 1u)) return false;
+    return true;
+  };
+  // Proved, the pool fast every time: wide, one launch on one thread, then wide to the end.
+  VCHECK(holds(0, [&](int* key) { return shape(launches(key, 40, true, false), 1u, 40); }));
+  // Proved, one fast launch in eight: the trial of kTrialLaunches launches (the third to the tenth) is wide, then one thread.
+  VCHECK(holds(1, [&](int* key) { return shape(launches(key, 40, true, true), 1u, 2 + vgpu::exec::kTrialLaunches); }));
+  // Not proved, the same launches: the pool's figure (twice the work) and the best launch keep it wide throughout.
+  VCHECK(holds(2, [&](int* key) { return shape(launches(key, 40, false, true), 4u, 40); }));
+}
+
 VTEST_MAIN
