@@ -9,13 +9,13 @@ gm = lambda v: math.exp(sum(math.log(x) for x in v) / len(v)) if v else float("n
 print()
 print("Seconds in trials that a coarse stop threw away (first run, this round's build; programs with any):")
 print()
-print("| program | wall s at 2 / 4 / 8 exact threads | thrown away s at 2 / 4 / 8 | trials thrown away at 2 / 4 / 8 | first blocks run alone? |")
-print("|---|---|---|---|---|")
+print("| program | wall s at 2 / 4 / 8 exact threads | thrown away s at 2 / 4 / 8 | trials thrown away at 2 / 4 / 8 |")
+print("|---|---|---|---|")
 for r in rows:
     th = r.get("thrown", {})
     if not any(th.get("b.x%d" % n, [0])[0] > 0 for n in (2, 4, 8)):
         continue
-    print("| %s | %s | %s | %s | |" % (r["name"], " / ".join("%.2f" % r["b.x%d" % n] for n in (2, 4, 8)),
+    print("| %s | %s | %s | %s |" % (r["name"], " / ".join("%.2f" % r["b.x%d" % n] for n in (2, 4, 8)),
                                      " / ".join("%.4f" % th.get("b.x%d" % n, [0])[0] for n in (2, 4, 8)),
                                      " / ".join("%d" % r["trials"].get("b.x%d" % n, [0, 0, 0])[2] for n in (2, 4, 8))))
 print()
