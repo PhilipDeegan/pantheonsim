@@ -46,6 +46,13 @@ VTEST(exact_set_refuses_what_differed_in_the_spike) {
   VCHECK(!exact_opcode_allowed("RED", {"E", "ADD", "F64"}));
   VCHECK(!exact_opcode_allowed("RED", {"E", "CAS"}));
   VCHECK(!exact_opcode_allowed("RED", {"E", "EXCH"}));
+  // ... in the decoder's own spelling, where the type and its rounding are one modifier (src/sass/decode.cpp kAtomType, dec_atom_f)
+  VCHECK(!exact_opcode_allowed("RED", {"E", "ADD", "F32.FTZ.RN", "STRONG", "GPU"}));
+  VCHECK(!exact_opcode_allowed("RED", {"E", "ADD", "F64.RN", "STRONG", "GPU"}));
+  VCHECK(!exact_opcode_allowed("RED", {"E", "ADD", "F16x2.RN"}));
+  VCHECK(!exact_opcode_allowed("RED", {"ADD", "F32x4.FTZ.RN"}) && !exact_opcode_allowed("RED", {"MAX", "BF16x2.RN"}));
+  VCHECK(!exact_opcode_allowed("RED", {"E.ADD.FTZ"}) && !exact_opcode_allowed("RED", {"S32.CAS"}) && exact_opcode_allowed("RED", {"E.ADD.S32"}));   // every part of a joined modifier is read
+  VCHECK(exact_opcode_allowed("RED", {"E", "ADD", "S32", "STRONG", "GPU"}) && exact_opcode_allowed("RED", {"E", "MIN", "64"}) && exact_opcode_allowed("RED", {"E", "OR", "S64", "WEAK", "SYS"}));
   VCHECK(!exact_opcode_allowed("", {}));
   VCHECK(!exact_opcode_allowed("imad", {}));   // names are SASS's, upper case; an unknown spelling is unknown
 }
@@ -853,6 +860,10 @@ VTEST(relaxed_classes_every_kind_of_instruction) {
   VCHECK(relaxed_class("REDG", {"E", "ADD", "F32x2.FTZ.RN"}) == C::FloatRed);
   VCHECK(relaxed_class("REDG", {"E", "MAX", "BF16x4.RN"}) == C::FloatRed);
   VCHECK(relaxed_class("RED", {"E", "ADD", "F32", "FTZ", "RN"}) == C::FloatRed);   // and split
+  // the two modes agree on what a float reduction is: exact refuses exactly the reductions relaxed does not class as exact
+  for (const std::vector<std::string>& mods : std::vector<std::vector<std::string>>{{"E", "ADD", "F32.FTZ.RN"}, {"E", "ADD", "F64.RN"}, {"ADD", "F16x2.RN"}, {"E", "INC"}, {"E", "EXCH"},
+                                                                                     {"E", "ADD"}, {"E", "MAX", "S32"}, {"E", "AND", "64"}})
+    VCHECK_EQ(exact_opcode_allowed("RED", mods), relaxed_class("RED", mods) == C::Exact);
   VCHECK(relaxed_class("REDG", {"E", "ADD", "STRONG", "GPU"}) == C::Extra);
   VCHECK(relaxed_class("RED", {"E", "INC"}) == C::AtomInt);
   VCHECK(relaxed_class("RED", {"E", "EXCH"}) == C::AtomSwap);

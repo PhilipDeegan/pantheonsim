@@ -95,8 +95,10 @@ Two bugs of exact mode's scan were found on the way:
   time. Fixed for both modes.
 * `exact_mods_allowed` looks for the modifiers `F32`, `F64`, `F16` on a `RED`, but the decoder prints a float reduction's type as one
   modifier, `F32.FTZ.RN`. So exact mode admits float reductions on sm_75 to sm_89 (on sm_90 and later the mnemonic is `REDG`, which exact
-  mode does not name). The fix is a separate commit, so that it can be judged apart from relaxed mode; relaxed mode's own classification
-  reads the parts of joined modifiers and is not affected.
+  mode does not name). Fixed in a commit of its own, so that it can be judged apart from relaxed mode: exact mode now refuses them, which
+  is the one change to exact mode's set, and it is a change towards what the set was written to be. Relaxed mode admits them as its
+  `float-red` class. Whether a card run had ever offloaded such a kernel in exact mode was not checked; sp42's verify runs found no
+  exact-set kernel that differed, which says the programs sampled there hold none, or that their sums happened to agree.
 
 ## 4. Verify by tolerance
 

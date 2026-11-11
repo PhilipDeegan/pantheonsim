@@ -88,12 +88,20 @@ inline bool exact_mnemonic_allowed(const std::string& m) {
 
 // Modifiers that turn an allowed mnemonic into an order- or implementation-dependent one: a floating-point reduction adds in
 // whatever order the blocks arrive, and a reduction on a float is not the integer one.
+// The decoder prints a float type and its rounding as ONE modifier ("F32.FTZ.RN", "F16x2.RN", "F32x2.FTZ.RN"), so the dot-separated parts are
+// looked at, and a type by how it starts. (Until relaxed mode was added this compared whole modifiers with "F32", "F64" and "F16", which the decoder
+// never prints alone: a float reduction passed as an integer one on sm_75 to sm_89. On sm_90 and later the mnemonic is REDG, which is not in the set.)
 inline bool exact_mods_allowed(const std::string& mnemonic, const std::vector<std::string>& mods) {
   if (mnemonic == "RED") {
     for (const std::string& m : mods)
-      if (m == "F16" || m == "F32" || m == "F64" || m == "BF16" || m == "FTZ" || m == "CAS" || m == "EXCH" || m == "INC" || m == "DEC" || m == "SPIN" ||
-          m == "CAST" || m == "POPC")
-        return false;
+      for (size_t at = 0; at <= m.size();) {
+        const size_t dot = std::min(m.find('.', at), m.size());
+        const std::string p = m.substr(at, dot - at);
+        at = dot + 1;
+        if (p.rfind("F16", 0) == 0 || p.rfind("F32", 0) == 0 || p.rfind("F64", 0) == 0 || p.rfind("BF16", 0) == 0 || p == "FTZ" || p == "CAS" || p == "EXCH" ||
+            p == "INC" || p == "DEC" || p == "SPIN" || p == "CAST" || p == "POPC")
+          return false;
+      }
   }
   return true;
 }
@@ -259,7 +267,7 @@ inline InsnClass relaxed_class(const std::string& mnemonic, const std::vector<st
     return false;
   };
   if (mnemonic.empty() || mods_undecoded(mods)) return C::Never;
-  // Reductions and atomics first, by what they do: the exact set's own check of RED does not see the joined float types.
+  // Reductions and atomics first, by what they do.
   if (is_one_of({"RED", "REDG"})) {
     if (mods_have(mods, "CAS") || mods_have(mods, "CAST") || mods_have(mods, "SPIN") || mods_have(mods, "EXCH")) return C::AtomSwap;
     if (mods_float_typed(mods)) return C::FloatRed;
