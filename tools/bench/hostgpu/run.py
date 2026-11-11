@@ -22,7 +22,8 @@ than --long-secs gets --long-runs runs of each.
 exact prints its machine-readable lines only with VGPU_HOST_GPU_LOG, which
 also prints a line per launch, so the timed exact runs go without it and ONE
 extra, untimed exact run with the log collects card_s, sim_s and the refusal
-classes (--no-exact-stats skips it).  verify is one untimed run.
+classes (--no-exact-stats skips it; a program cut to --long-runs does not
+get it either).  verify is one untimed run.
 
 Output comparison, against the first sim run: stdout and stderr with the
 lines that carry timings and the simulator's own lines dropped, and for
@@ -344,7 +345,7 @@ def bench(a):
         rec = {}
         for f in timed:
             rec[f] = summarise(f, runs[f], None if f == "sim" else ref, a)
-        if "exact" in forms and not a.no_exact_stats and "exact" not in dead:
+        if "exact" in forms and not a.no_exact_stats and "exact" not in dead and nruns == a.runs:   # (not for a long program: one more run of it)
             env = form_env("exact", a)
             env["VGPU_HOST_GPU_LOG"] = "1"
             r = run_program(argv, cwd, copy_cwd, env, base_env, a.timeout)
