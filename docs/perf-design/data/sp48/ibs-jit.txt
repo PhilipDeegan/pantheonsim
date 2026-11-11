@@ -1,0 +1,375 @@
+== hecbench/black-scholes-cuda jit ibs_op cnt_ctl=1 (1: micro-ops, 0: cycles)
+samples 638808 (other processes on the cpu: 67)
+  loop        39.54 %
+  aluh         3.91 %
+  kernel       3.21 %
+  gen         19.29 %
+  memh         0.85 %
+  memsys       5.86 %
+  sim-other   15.92 %
+  libc         6.27 %
+  program      3.40 %
+  os           1.76 %
+instruction-level split (% of all samples):
+  aluh     lanes  0.03  rows  0.33  scalar  3.56  unknown  0.00
+  kernel   lanes  2.05  rows  0.40  scalar  0.75  unknown  0.00
+  gen      lanes  8.05  rows  3.40  scalar  7.84  unknown  0.00
+  loop     lanes  8.23  rows  2.89  scalar 28.42  unknown  0.00
+  memh     lanes  0.04  rows  0.06  scalar  0.75  unknown  0.00
+  memsys   lanes  1.07  rows  0.18  scalar  4.61  unknown  0.00
+top symbols:
+   26.87 %  loop      vgpu::sass::(anonymous namespace)::Runner::tier_run_jit(vgpu::sass::(anonymous namespace)::Block&, vgpu::sass::(anonymous namespace)::Warp&, unsigned 
+    5.78 %  loop      vgpu::exec::sasslanes::(anonymous namespace)::pick_group_avx2(unsigned long const*, unsigned int, unsigned long&)
+    4.83 %  loop      vgpu::sass::(anonymous namespace)::jit_run_region(vgpu::sass::(anonymous namespace)::JitFrame&, vgpu::sass::jit::Unit&, unsigned int, vgpu::sass::(ano
+    4.41 %  gen       8f940df9b2c8d23e10a6e53b3f7baaec.so:vgpu_jit_r35
+    3.42 %  libc      [unknown]
+    3.17 %  sim-other vgpu::sass::(anonymous namespace)::Runner::tier_ctl(vgpu::sass::(anonymous namespace)::Block&, vgpu::sass::(anonymous namespace)::Warp&, vgpu::sass::t
+    2.99 %  sim-other vgpu::sass::(anonymous namespace)::Runner::fast_float(vgpu::sass::(anonymous namespace)::Warp&, vgpu::sass::Instr const&, unsigned int)
+    2.85 %  memsys    vgpu::MemoryManager::load_batch(unsigned long const*, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+    2.83 %  libc      exp2
+    2.69 %  sim-other vgpu::exec::sasslanes::(anonymous namespace)::set_pcs_avx2(unsigned long*, unsigned int, unsigned long)
+    2.60 %  sim-other vgpu::sass::(anonymous namespace)::(anonymous namespace)::ftz(float)
+    2.09 %  gen       8f940df9b2c8d23e10a6e53b3f7baaec.so:vgpu_jit_r34
+    1.95 %  gen       8f940df9b2c8d23e10a6e53b3f7baaec.so:vgpu_jit_r14
+    1.76 %  os        [unknown]
+    1.38 %  kernel    vgpu::simd::avx2_impl::mufu_k(unsigned int, unsigned int*, unsigned int const*)
+    1.10 %  sim-other vgpu::sass::(anonymous namespace)::Runner::fast_float(vgpu::sass::(anonymous namespace)::Warp&, vgpu::sass::Instr const&, unsigned int)::{lambda(unsig
+== hecbench/black-scholes-cuda jit ibs_op cnt_ctl=0 (1: micro-ops, 0: cycles)
+samples 225069 (other processes on the cpu: 65)
+  loop        31.29 %
+  aluh         3.93 %
+  kernel       2.51 %
+  gen         23.59 %
+  memh         0.68 %
+  memsys       4.03 %
+  sim-other   12.73 %
+  libc         7.79 %
+  program      8.43 %
+  os           5.03 %
+instruction-level split (% of all samples):
+  aluh     lanes  0.02  rows  0.32  scalar  3.59  unknown  0.00
+  kernel   lanes  1.45  rows  0.36  scalar  0.71  unknown  0.00
+  gen      lanes  9.06  rows  4.63  scalar  9.90  unknown  0.00
+  loop     lanes  5.44  rows  2.53  scalar 23.32  unknown  0.00
+  memh     lanes  0.03  rows  0.07  scalar  0.58  unknown  0.00
+  memsys   lanes  0.72  rows  0.13  scalar  3.19  unknown  0.00
+top symbols:
+   21.52 %  loop      vgpu::sass::(anonymous namespace)::Runner::tier_run_jit(vgpu::sass::(anonymous namespace)::Block&, vgpu::sass::(anonymous namespace)::Warp&, unsigned 
+    5.66 %  libc      [unknown]
+    5.25 %  gen       8f940df9b2c8d23e10a6e53b3f7baaec.so:vgpu_jit_r35
+    5.03 %  os        [unknown]
+    4.11 %  loop      vgpu::sass::(anonymous namespace)::jit_run_region(vgpu::sass::(anonymous namespace)::JitFrame&, vgpu::sass::jit::Unit&, unsigned int, vgpu::sass::(ano
+    3.80 %  loop      vgpu::exec::sasslanes::(anonymous namespace)::pick_group_avx2(unsigned long const*, unsigned int, unsigned long&)
+    3.09 %  sim-other vgpu::sass::(anonymous namespace)::Runner::fast_float(vgpu::sass::(anonymous namespace)::Warp&, vgpu::sass::Instr const&, unsigned int)
+    2.86 %  program   initBlackCalcVarsCpu(blackCalcStruct&, payoffStruct)
+    2.68 %  gen       8f940df9b2c8d23e10a6e53b3f7baaec.so:vgpu_jit_r14
+    2.68 %  sim-other vgpu::sass::(anonymous namespace)::Runner::tier_ctl(vgpu::sass::(anonymous namespace)::Block&, vgpu::sass::(anonymous namespace)::Warp&, vgpu::sass::t
+    2.24 %  program   getOutValOptionCpu(optionInputStruct*, float*, int, int) [clone .part.0]
+    2.19 %  gen       8f940df9b2c8d23e10a6e53b3f7baaec.so:vgpu_jit_r34
+    2.11 %  libc      exp2
+    1.95 %  memsys    vgpu::MemoryManager::load_batch(unsigned long const*, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+    1.83 %  sim-other vgpu::sass::(anonymous namespace)::(anonymous namespace)::ftz(float)
+    1.66 %  program   runBlackScholesAnalyticEngine(int)
+
+301796363842,,instructions:u,19980290291,100.00,3.36,insn per cycle
+89882495473,,cycles:u,19980290291,100.00,,
+== polybench/LU jit ibs_op cnt_ctl=1 (1: micro-ops, 0: cycles)
+samples 890339 (other processes on the cpu: 68)
+  loop        38.68 %
+  aluh         0.01 %
+  kernel       0.01 %
+  gen         18.77 %
+  memh         7.83 %
+  memsys      15.76 %
+  sim-other   13.80 %
+  libc         3.76 %
+  program      1.26 %
+  os           0.13 %
+instruction-level split (% of all samples):
+  aluh     lanes  0.00  rows  0.00  scalar  0.01  unknown  0.00
+  kernel   lanes  0.00  rows  0.00  scalar  0.00  unknown  0.00
+  gen      lanes  3.88  rows  4.23  scalar 10.66  unknown  0.00
+  loop     lanes  3.08  rows  2.08  scalar 33.52  unknown  0.00
+  memh     lanes  0.18  rows  0.23  scalar  7.41  unknown  0.00
+  memsys   lanes  1.79  rows  0.27  scalar 13.70  unknown  0.00
+top symbols:
+   16.72 %  loop      vgpu::sass::(anonymous namespace)::Runner::tier_run_jit(vgpu::sass::(anonymous namespace)::Block&, vgpu::sass::(anonymous namespace)::Warp&, unsigned 
+   11.73 %  gen       3c30bf31fa290866bb45ad71b783e8a4.so:vgpu_jit_r0
+    7.94 %  sim-other vgpu::sass::(anonymous namespace)::Runner::init_block(vgpu::sass::(anonymous namespace)::Block&, unsigned long)
+    7.17 %  loop      vgpu::sass::(anonymous namespace)::jit_run_region(vgpu::sass::(anonymous namespace)::JitFrame&, vgpu::sass::jit::Unit&, unsigned int, vgpu::sass::(ano
+    7.03 %  gen       3c30bf31fa290866bb45ad71b783e8a4.so:vgpu_jit_r1
+    6.36 %  loop      vgpu::sass::(anonymous namespace)::Runner::step_warp(vgpu::sass::(anonymous namespace)::Block&, vgpu::sass::(anonymous namespace)::Warp&)
+    5.89 %  memh      void vgpu::sass::(anonymous namespace)::h_global<false>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+    3.45 %  libc      [unknown]
+    3.05 %  memsys    vgpu::MemoryManager::run_allocation(unsigned long, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+    2.90 %  loop      vgpu::sass::(anonymous namespace)::jit_sreg(vgpu::sass::jit::Ctx*, unsigned int, unsigned int*, unsigned int)
+    2.78 %  loop      vgpu::sass::(anonymous namespace)::Runner::tier_sreg_fill(vgpu::sass::(anonymous namespace)::Block const&, vgpu::sass::(anonymous namespace)::Warp con
+    2.51 %  memsys    vgpu::(anonymous namespace)::run_out(unsigned char const*, unsigned char*, unsigned long, unsigned int)
+    2.19 %  memsys    vgpu::simd::avx2_impl::warp_run_k(unsigned int const*, unsigned int const*, unsigned int)
+    2.18 %  memsys    vgpu::sass::(anonymous namespace)::count_run(vgpu::exec::LaunchStats&, bool, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int)
+    1.93 %  memh      void vgpu::sass::(anonymous namespace)::h_global<true>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+    1.70 %  loop      vgpu::sass::(anonymous namespace)::Runner::block_round(vgpu::sass::(anonymous namespace)::Block&, int) [clone .constprop.0]
+== polybench/LU jit ibs_op cnt_ctl=0 (1: micro-ops, 0: cycles)
+samples 256073 (other processes on the cpu: 67)
+  loop        36.69 %
+  aluh         0.01 %
+  kernel       0.00 %
+  gen         19.01 %
+  memh         6.99 %
+  memsys      12.80 %
+  sim-other   14.62 %
+  libc         7.37 %
+  program      2.04 %
+  os           0.46 %
+instruction-level split (% of all samples):
+  aluh     lanes  0.00  rows  0.00  scalar  0.01  unknown  0.00
+  kernel   lanes  0.00  rows  0.00  scalar  0.00  unknown  0.00
+  gen      lanes  3.00  rows  4.74  scalar 11.28  unknown  0.00
+  loop     lanes  2.39  rows  1.79  scalar 32.51  unknown  0.00
+  memh     lanes  0.13  rows  0.21  scalar  6.65  unknown  0.00
+  memsys   lanes  1.31  rows  0.24  scalar 11.25  unknown  0.00
+top symbols:
+   17.28 %  loop      vgpu::sass::(anonymous namespace)::Runner::tier_run_jit(vgpu::sass::(anonymous namespace)::Block&, vgpu::sass::(anonymous namespace)::Warp&, unsigned 
+   12.48 %  gen       3c30bf31fa290866bb45ad71b783e8a4.so:vgpu_jit_r0
+    9.70 %  sim-other vgpu::sass::(anonymous namespace)::Runner::init_block(vgpu::sass::(anonymous namespace)::Block&, unsigned long)
+    7.45 %  loop      vgpu::sass::(anonymous namespace)::jit_run_region(vgpu::sass::(anonymous namespace)::JitFrame&, vgpu::sass::jit::Unit&, unsigned int, vgpu::sass::(ano
+    6.96 %  libc      [unknown]
+    6.51 %  gen       3c30bf31fa290866bb45ad71b783e8a4.so:vgpu_jit_r1
+    5.44 %  memh      void vgpu::sass::(anonymous namespace)::h_global<false>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+    5.04 %  loop      vgpu::sass::(anonymous namespace)::Runner::step_warp(vgpu::sass::(anonymous namespace)::Block&, vgpu::sass::(anonymous namespace)::Warp&)
+    2.31 %  loop      vgpu::sass::(anonymous namespace)::Runner::tier_sreg_fill(vgpu::sass::(anonymous namespace)::Block const&, vgpu::sass::(anonymous namespace)::Warp con
+    2.10 %  memsys    vgpu::MemoryManager::run_allocation(unsigned long, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+    2.08 %  loop      vgpu::sass::(anonymous namespace)::jit_sreg(vgpu::sass::jit::Ctx*, unsigned int, unsigned int*, unsigned int)
+    2.07 %  memsys    vgpu::(anonymous namespace)::run_out(unsigned char const*, unsigned char*, unsigned long, unsigned int)
+    1.84 %  program   lu(int, float (*) [2048])
+    1.74 %  memsys    vgpu::simd::avx2_impl::warp_run_k(unsigned int const*, unsigned int const*, unsigned int)
+    1.68 %  memsys    vgpu::sass::(anonymous namespace)::count_run(vgpu::exec::LaunchStats&, bool, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int)
+    1.55 %  memh      void vgpu::sass::(anonymous namespace)::h_global<true>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+
+379564525797,,instructions:u,24199153483,100.00,3.39,insn per cycle
+112021858265,,cycles:u,24199153483,100.00,,
+== polybench/SYRK jit ibs_op cnt_ctl=1 (1: micro-ops, 0: cycles)
+samples 223920 (other processes on the cpu: 65)
+  loop         0.12 %
+  aluh         0.00 %
+  kernel       0.00 %
+  gen          8.64 %
+  memh        21.02 %
+  memsys      61.45 %
+  sim-other    0.04 %
+  libc         0.02 %
+  program      8.50 %
+  os           0.21 %
+instruction-level split (% of all samples):
+  aluh     lanes  0.00  rows  0.00  scalar  0.00  unknown  0.00
+  kernel   lanes  0.00  rows  0.00  scalar  0.00  unknown  0.00
+  gen      lanes  2.42  rows  1.90  scalar  4.33  unknown  0.00
+  loop     lanes  0.01  rows  0.01  scalar  0.10  unknown  0.00
+  memh     lanes  0.71  rows  1.32  scalar 18.99  unknown  0.00
+  memsys   lanes  6.41  rows  1.64  scalar 53.39  unknown  0.00
+top symbols:
+   29.85 %  memsys    vgpu::MemoryManager::load_batch(unsigned long const*, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+   14.49 %  memh      void vgpu::sass::(anonymous namespace)::h_global<false>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+    8.61 %  gen       0dbcbb8507ed65ec09ed3a09ff5f76bb.so:vgpu_jit_r2
+    8.45 %  program   syrk(int, int, float, float, float (*) [1024], float (*) [1024])
+    6.52 %  memh      void vgpu::sass::(anonymous namespace)::h_global<true>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+    5.48 %  memsys    vgpu::(anonymous namespace)::run_in(unsigned char*, unsigned char const*, unsigned long, unsigned int)
+    5.40 %  memsys    vgpu::simd::avx2_impl::warp_rows_k(unsigned int const*, unsigned int const*, unsigned long, unsigned long, unsigned long*, vgpu::simd::WarpRowsInfo&)
+    4.85 %  memsys    vgpu::MemoryManager::load_broadcast(unsigned long, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+    3.88 %  memsys    vgpu::simd::avx2_impl::warp_run_k(unsigned int const*, unsigned int const*, unsigned int)
+    3.53 %  memsys    vgpu::MemoryManager::run_allocation(unsigned long, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+    2.51 %  memsys    vgpu::sass::(anonymous namespace)::count_run(vgpu::exec::LaunchStats&, bool, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int)
+    2.33 %  memsys    vgpu::MemoryManager::store_run(unsigned long, void const*, unsigned long, unsigned int, unsigned char*)
+    1.67 %  memsys    vgpu::sass::(anonymous namespace)::count_global(vgpu::exec::LaunchStats&, bool, unsigned long, unsigned int, unsigned long)
+    1.26 %  memsys    vgpu::MemoryManager::batch_faults_clear(bool) const
+    0.23 %  memsys    vgpu::MemoryManager::batch_faults_clear(bool) const@plt
+    0.21 %  os        [unknown]
+== polybench/SYRK jit ibs_op cnt_ctl=0 (1: micro-ops, 0: cycles)
+samples 57068 (other processes on the cpu: 57)
+  loop         0.26 %
+  aluh         0.00 %
+  kernel       0.00 %
+  gen         10.90 %
+  memh        18.91 %
+  memsys      55.11 %
+  sim-other    0.07 %
+  libc         0.08 %
+  program     14.03 %
+  os           0.63 %
+instruction-level split (% of all samples):
+  aluh     lanes  0.00  rows  0.00  scalar  0.00  unknown  0.00
+  kernel   lanes  0.00  rows  0.00  scalar  0.00  unknown  0.00
+  gen      lanes  2.93  rows  3.24  scalar  4.73  unknown  0.00
+  loop     lanes  0.01  rows  0.00  scalar  0.25  unknown  0.00
+  memh     lanes  0.57  rows  1.46  scalar 16.88  unknown  0.00
+  memsys   lanes  4.64  rows  1.31  scalar 49.16  unknown  0.00
+top symbols:
+   30.45 %  memsys    vgpu::MemoryManager::load_batch(unsigned long const*, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+   13.84 %  program   syrk(int, int, float, float, float (*) [1024], float (*) [1024])
+   13.15 %  memh      void vgpu::sass::(anonymous namespace)::h_global<false>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+   10.87 %  gen       0dbcbb8507ed65ec09ed3a09ff5f76bb.so:vgpu_jit_r2
+    5.76 %  memh      void vgpu::sass::(anonymous namespace)::h_global<true>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+    4.12 %  memsys    vgpu::(anonymous namespace)::run_in(unsigned char*, unsigned char const*, unsigned long, unsigned int)
+    3.87 %  memsys    vgpu::simd::avx2_impl::warp_rows_k(unsigned int const*, unsigned int const*, unsigned long, unsigned long, unsigned long*, vgpu::simd::WarpRowsInfo&)
+    3.57 %  memsys    vgpu::MemoryManager::load_broadcast(unsigned long, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+    3.14 %  memsys    vgpu::MemoryManager::run_allocation(unsigned long, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+    3.10 %  memsys    vgpu::simd::avx2_impl::warp_run_k(unsigned int const*, unsigned int const*, unsigned int)
+    1.81 %  memsys    vgpu::sass::(anonymous namespace)::count_run(vgpu::exec::LaunchStats&, bool, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int)
+    1.77 %  memsys    vgpu::MemoryManager::store_run(unsigned long, void const*, unsigned long, unsigned int, unsigned char*)
+    1.56 %  memsys    vgpu::sass::(anonymous namespace)::count_global(vgpu::exec::LaunchStats&, bool, unsigned long, unsigned int, unsigned long)
+    0.89 %  memsys    vgpu::MemoryManager::batch_faults_clear(bool) const
+    0.63 %  os        [unknown]
+    0.37 %  memsys    vgpu::MemoryManager::store_run(unsigned long, void const*, unsigned long, unsigned int, unsigned char*)@plt
+
+96872021522,,instructions:u,4901142080,100.00,4.17,insn per cycle
+23204763456,,cycles:u,4901142080,100.00,,
+== rodinia/gaussian jit ibs_op cnt_ctl=1 (1: micro-ops, 0: cycles)
+samples 158033 (other processes on the cpu: 69)
+  loop        27.18 %
+  aluh         0.03 %
+  kernel       0.02 %
+  gen         13.23 %
+  memh        10.61 %
+  memsys      24.88 %
+  sim-other   19.12 %
+  libc         4.37 %
+  program      0.46 %
+  os           0.10 %
+instruction-level split (% of all samples):
+  aluh     lanes  0.00  rows  0.00  scalar  0.02  unknown  0.00
+  kernel   lanes  0.01  rows  0.00  scalar  0.01  unknown  0.00
+  gen      lanes  4.24  rows  1.42  scalar  7.57  unknown  0.00
+  loop     lanes  1.64  rows  0.48  scalar 25.06  unknown  0.00
+  memh     lanes  0.99  rows  0.30  scalar  9.32  unknown  0.00
+  memsys   lanes  1.66  rows  0.25  scalar 22.97  unknown  0.00
+top symbols:
+   11.06 %  loop      vgpu::sass::(anonymous namespace)::Runner::tier_run_jit(vgpu::sass::(anonymous namespace)::Block&, vgpu::sass::(anonymous namespace)::Warp&, unsigned 
+    8.22 %  sim-other vgpu::sass::(anonymous namespace)::Runner::init_block(vgpu::sass::(anonymous namespace)::Block&, unsigned long)
+    8.02 %  memh      void vgpu::sass::(anonymous namespace)::h_global<false>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+    6.62 %  memsys    vgpu::exec::memcount::detail::sectors_hash(unsigned long const*, unsigned long, unsigned long, unsigned long&) [clone .part.0]
+    6.00 %  memsys    vgpu::MemoryManager::load_batch(unsigned long const*, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+    5.66 %  gen       92b4ab3e18ceace2f7c4d162c61504bd.so:vgpu_jit_r0
+    4.90 %  loop      vgpu::sass::(anonymous namespace)::Runner::tier_sreg_fill(vgpu::sass::(anonymous namespace)::Block const&, vgpu::sass::(anonymous namespace)::Warp con
+    4.70 %  memsys    vgpu::exec::memcount::detail::sectors_fast(unsigned long const*, unsigned long, unsigned long, unsigned long&)
+    4.65 %  sim-other vgpu::sass::(anonymous namespace)::tier_global_addresses(unsigned int const*, unsigned int const*, unsigned long, unsigned int, unsigned long*)
+    4.51 %  gen       92b4ab3e18ceace2f7c4d162c61504bd.so:vgpu_jit_r2
+    4.48 %  loop      vgpu::sass::(anonymous namespace)::jit_run_region(vgpu::sass::(anonymous namespace)::JitFrame&, vgpu::sass::jit::Unit&, unsigned int, vgpu::sass::(ano
+    3.36 %  libc      [unknown]
+    3.01 %  gen       92b4ab3e18ceace2f7c4d162c61504bd.so:vgpu_jit_r1
+    2.59 %  memh      void vgpu::sass::(anonymous namespace)::h_global<true>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+    2.42 %  loop      vgpu::sass::(anonymous namespace)::Runner::step_warp(vgpu::sass::(anonymous namespace)::Block&, vgpu::sass::(anonymous namespace)::Warp&)
+    2.40 %  sim-other vgpu::exec::LaunchStats::add(vgpu::exec::LaunchStats const&)
+== rodinia/gaussian jit ibs_op cnt_ctl=0 (1: micro-ops, 0: cycles)
+samples 38908 (other processes on the cpu: 68)
+  loop        26.48 %
+  aluh         0.02 %
+  kernel       0.02 %
+  gen         13.66 %
+  memh        10.74 %
+  memsys      20.57 %
+  sim-other   20.75 %
+  libc         6.98 %
+  program      0.41 %
+  os           0.38 %
+instruction-level split (% of all samples):
+  aluh     lanes  0.00  rows  0.00  scalar  0.02  unknown  0.00
+  kernel   lanes  0.01  rows  0.01  scalar  0.00  unknown  0.00
+  gen      lanes  4.49  rows  1.70  scalar  7.47  unknown  0.00
+  loop     lanes  1.59  rows  0.37  scalar 24.51  unknown  0.00
+  memh     lanes  0.90  rows  0.23  scalar  9.61  unknown  0.00
+  memsys   lanes  1.21  rows  0.14  scalar 19.23  unknown  0.00
+top symbols:
+   11.10 %  loop      vgpu::sass::(anonymous namespace)::Runner::tier_run_jit(vgpu::sass::(anonymous namespace)::Block&, vgpu::sass::(anonymous namespace)::Warp&, unsigned 
+    9.90 %  sim-other vgpu::sass::(anonymous namespace)::Runner::init_block(vgpu::sass::(anonymous namespace)::Block&, unsigned long)
+    7.21 %  memh      void vgpu::sass::(anonymous namespace)::h_global<false>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+    6.02 %  libc      [unknown]
+    5.56 %  gen       92b4ab3e18ceace2f7c4d162c61504bd.so:vgpu_jit_r2
+    5.46 %  memsys    vgpu::exec::memcount::detail::sectors_hash(unsigned long const*, unsigned long, unsigned long, unsigned long&) [clone .part.0]
+    5.46 %  sim-other vgpu::sass::(anonymous namespace)::tier_global_addresses(unsigned int const*, unsigned int const*, unsigned long, unsigned int, unsigned long*)
+    5.16 %  loop      vgpu::sass::(anonymous namespace)::jit_run_region(vgpu::sass::(anonymous namespace)::JitFrame&, vgpu::sass::jit::Unit&, unsigned int, vgpu::sass::(ano
+    4.88 %  memsys    vgpu::MemoryManager::load_batch(unsigned long const*, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+    4.75 %  gen       92b4ab3e18ceace2f7c4d162c61504bd.so:vgpu_jit_r0
+    3.96 %  loop      vgpu::sass::(anonymous namespace)::Runner::tier_sreg_fill(vgpu::sass::(anonymous namespace)::Block const&, vgpu::sass::(anonymous namespace)::Warp con
+    3.53 %  memsys    vgpu::exec::memcount::detail::sectors_fast(unsigned long const*, unsigned long, unsigned long, unsigned long&)
+    3.52 %  memh      void vgpu::sass::(anonymous namespace)::h_global<true>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+    3.26 %  gen       92b4ab3e18ceace2f7c4d162c61504bd.so:vgpu_jit_r1
+    2.30 %  loop      vgpu::sass::(anonymous namespace)::Runner::step_warp(vgpu::sass::(anonymous namespace)::Block&, vgpu::sass::(anonymous namespace)::Warp&)
+    1.97 %  sim-other vgpu::exec::LaunchStats::add(vgpu::exec::LaunchStats const&)
+
+60877539608,,instructions:u,3282933675,100.00,3.85,insn per cycle
+15818744441,,cycles:u,3282933675,100.00,,
+== rodinia/hotspot jit ibs_op cnt_ctl=1 (1: micro-ops, 0: cycles)
+samples 39102 (other processes on the cpu: 66)
+  loop        23.67 %
+  aluh         9.89 %
+  kernel      18.36 %
+  gen         10.36 %
+  memh        15.96 %
+  memsys      12.84 %
+  sim-other    7.09 %
+  libc         1.63 %
+  program      0.07 %
+  os           0.14 %
+instruction-level split (% of all samples):
+  aluh     lanes  0.06  rows  0.52  scalar  9.31  unknown  0.00
+  kernel   lanes 11.93  rows  1.40  scalar  5.04  unknown  0.00
+  gen      lanes  2.55  rows  2.37  scalar  5.44  unknown  0.00
+  loop     lanes  2.72  rows  1.57  scalar 19.39  unknown  0.00
+  memh     lanes  3.84  rows  1.19  scalar 10.93  unknown  0.00
+  memsys   lanes  2.75  rows  0.53  scalar  9.55  unknown  0.00
+top symbols:
+   15.17 %  loop      vgpu::sass::(anonymous namespace)::Runner::tier_run_jit(vgpu::sass::(anonymous namespace)::Block&, vgpu::sass::(anonymous namespace)::Warp&, unsigned 
+   10.77 %  memh      void vgpu::sass::(anonymous namespace)::h_shared<false>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+    4.31 %  kernel    void vgpu::simd::avx2_impl::dop_avx2_t<2u, false>(unsigned int const*, unsigned int const*, unsigned int*, unsigned int*, unsigned int const*, unsigne
+    3.91 %  memsys    vgpu::simd::avx2_impl::bank_offsets_k(vgpu::exec::memcount::BankMemo&, unsigned int const*, unsigned long, unsigned int, unsigned char*)
+    3.53 %  memh      void vgpu::sass::(anonymous namespace)::h_shared<true>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+    3.32 %  loop      vgpu::sass::(anonymous namespace)::jit_run_region(vgpu::sass::(anonymous namespace)::JitFrame&, vgpu::sass::jit::Unit&, unsigned int, vgpu::sass::(ano
+    2.67 %  kernel    void vgpu::simd::avx2_impl::dop_avx2_t<0u, true>(unsigned int const*, unsigned int const*, unsigned int*, unsigned int*, unsigned int const*, unsigned
+    2.51 %  kernel    vgpu::simd::avx2_impl::blend_m_k(unsigned int*, unsigned int const*, unsigned int)
+    2.45 %  kernel    void vgpu::simd::avx2_impl::dop_avx2_t<0u, false>(unsigned int const*, unsigned int const*, unsigned int*, unsigned int*, unsigned int const*, unsigne
+    2.36 %  gen       1aeacbd3aa1b33675aca4d05c394c210.so:vgpu_jit_r9
+    2.18 %  memsys    vgpu::MemoryManager::load_batch(unsigned long const*, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+    2.08 %  loop      vgpu::sass::(anonymous namespace)::Runner::step_warp(vgpu::sass::(anonymous namespace)::Block&, vgpu::sass::(anonymous namespace)::Warp&)
+    2.07 %  memsys    vgpu::sass::(anonymous namespace)::count_shared_offsets(vgpu::exec::LaunchStats&, bool, unsigned int const*, unsigned int, unsigned int, unsigned char
+    1.98 %  aluh      vgpu::sass::(anonymous namespace)::h_dop(void*, vgpu::sass::tier::MOp const&, unsigned int)
+    1.77 %  kernel    vgpu::simd::avx2_impl::f2f_widen_k(unsigned int const*, unsigned int, unsigned int*, unsigned int*)
+    1.74 %  gen       1aeacbd3aa1b33675aca4d05c394c210.so:vgpu_jit_r2
+== rodinia/hotspot jit ibs_op cnt_ctl=0 (1: micro-ops, 0: cycles)
+samples 10413 (other processes on the cpu: 59)
+  loop        25.69 %
+  aluh         8.95 %
+  kernel      16.45 %
+  gen         14.95 %
+  memh        13.30 %
+  memsys      10.28 %
+  sim-other    7.73 %
+  libc         2.00 %
+  program      0.11 %
+  os           0.55 %
+instruction-level split (% of all samples):
+  aluh     lanes  0.05  rows  0.61  scalar  8.30  unknown  0.00
+  kernel   lanes 10.92  rows  1.10  scalar  4.43  unknown  0.00
+  gen      lanes  3.74  rows  4.07  scalar  7.14  unknown  0.00
+  loop     lanes  2.42  rows  2.19  scalar 21.08  unknown  0.00
+  memh     lanes  3.03  rows  1.13  scalar  9.14  unknown  0.00
+  memsys   lanes  2.05  rows  0.45  scalar  7.78  unknown  0.00
+top symbols:
+   16.12 %  loop      vgpu::sass::(anonymous namespace)::Runner::tier_run_jit(vgpu::sass::(anonymous namespace)::Block&, vgpu::sass::(anonymous namespace)::Warp&, unsigned 
+    8.23 %  memh      void vgpu::sass::(anonymous namespace)::h_shared<false>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+    4.40 %  kernel    void vgpu::simd::avx2_impl::dop_avx2_t<2u, false>(unsigned int const*, unsigned int const*, unsigned int*, unsigned int*, unsigned int const*, unsigne
+    4.22 %  gen       1aeacbd3aa1b33675aca4d05c394c210.so:vgpu_jit_r9
+    3.67 %  loop      vgpu::sass::(anonymous namespace)::jit_run_region(vgpu::sass::(anonymous namespace)::JitFrame&, vgpu::sass::jit::Unit&, unsigned int, vgpu::sass::(ano
+    3.57 %  memh      void vgpu::sass::(anonymous namespace)::h_shared<true>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+    2.98 %  memsys    vgpu::simd::avx2_impl::bank_offsets_k(vgpu::exec::memcount::BankMemo&, unsigned int const*, unsigned long, unsigned int, unsigned char*)
+    2.81 %  gen       1aeacbd3aa1b33675aca4d05c394c210.so:vgpu_jit_r2
+    2.44 %  kernel    void vgpu::simd::avx2_impl::dop_avx2_t<0u, true>(unsigned int const*, unsigned int const*, unsigned int*, unsigned int*, unsigned int const*, unsigned
+    2.30 %  kernel    void vgpu::simd::avx2_impl::dop_avx2_t<0u, false>(unsigned int const*, unsigned int const*, unsigned int*, unsigned int*, unsigned int const*, unsigne
+    2.00 %  loop      vgpu::sass::(anonymous namespace)::Runner::step_warp(vgpu::sass::(anonymous namespace)::Block&, vgpu::sass::(anonymous namespace)::Warp&)
+    1.86 %  kernel    vgpu::simd::avx2_impl::f2f_widen_k(unsigned int const*, unsigned int, unsigned int*, unsigned int*)
+    1.73 %  sim-other vgpu::sass::(anonymous namespace)::Runner::tier_ctl(vgpu::sass::(anonymous namespace)::Block&, vgpu::sass::(anonymous namespace)::Warp&, vgpu::sass::t
+    1.70 %  memsys    vgpu::MemoryManager::load_batch(unsigned long const*, unsigned long, unsigned int, unsigned long*, unsigned char*) const
+    1.66 %  gen       1aeacbd3aa1b33675aca4d05c394c210.so:vgpu_jit_r4
+    1.63 %  gen       1aeacbd3aa1b33675aca4d05c394c210.so:vgpu_jit_r1
+
+14542140429,,instructions:u,866371332,100.00,3.45,insn per cycle
+4209457662,,cycles:u,866371332,100.00,,

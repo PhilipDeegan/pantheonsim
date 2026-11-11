@@ -1,0 +1,416 @@
+{
+ "hecbench/black-scholes-cuda": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 25.652809801998956,
+     "rc": 0,
+     "timeout": false,
+     "hash": "beec8b8114ac",
+     "load": 2.373046875,
+     "jit": {
+      "compiles": 1,
+      "compile_ms": 4059.6,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 115612635,
+      "region_insts": 910840043,
+      "generated": 798352088,
+      "units": 1,
+      "regions": 40,
+      "declined": 0,
+      "accepted": 1
+     }
+    },
+    {
+     "wall": 28.20580807600345,
+     "rc": 0,
+     "timeout": false,
+     "hash": "beec8b8114ac",
+     "load": 1.9716796875,
+     "jit": {
+      "compiles": 1,
+      "compile_ms": 11111.9,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 67181361,
+      "region_insts": 1120210033,
+      "generated": 878044691,
+      "units": 1,
+      "regions": 25,
+      "declined": 0,
+      "accepted": 1
+     }
+    }
+   ]
+  }
+ },
+ "polybench/LU": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 27.78377602600085,
+     "rc": 0,
+     "timeout": false,
+     "hash": "975bb9f20d39",
+     "load": 1.5361328125,
+     "jit": {
+      "compiles": 2,
+      "compile_ms": 2097.3,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 136622223,
+      "region_insts": 1594076261,
+      "generated": 1456381153,
+      "units": 2,
+      "regions": 8,
+      "declined": 0,
+      "accepted": 2
+     }
+    },
+    {
+     "wall": 26.245445977998315,
+     "rc": 0,
+     "timeout": false,
+     "hash": "975bb9f20d39",
+     "load": 1.32421875,
+     "jit": {
+      "compiles": 2,
+      "compile_ms": 2122.9,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 91815606,
+      "region_insts": 1639194203,
+      "generated": 1456507895,
+      "units": 2,
+      "regions": 5,
+      "declined": 0,
+      "accepted": 2
+     }
+    }
+   ]
+  }
+ },
+ "rodinia/gaussian": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 5.653025660998537,
+     "rc": 0,
+     "timeout": false,
+     "hash": "48bd2c5aca76",
+     "load": 1.4345703125,
+     "jit": {
+      "compiles": 2,
+      "compile_ms": 2053.9,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 15445319,
+      "region_insts": 146246043,
+      "generated": 137624280,
+      "units": 2,
+      "regions": 10,
+      "declined": 0,
+      "accepted": 2
+     }
+    },
+    {
+     "wall": 5.8028868659966975,
+     "rc": 0,
+     "timeout": false,
+     "hash": "48bd2c5aca76",
+     "load": 1.3994140625,
+     "jit": {
+      "compiles": 2,
+      "compile_ms": 2476.5,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 8489392,
+      "region_insts": 153248326,
+      "generated": 137656037,
+      "units": 2,
+      "regions": 4,
+      "declined": 0,
+      "accepted": 2
+     }
+    }
+   ]
+  }
+ },
+ "rodinia/hotspot": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 3.1795619299955433,
+     "rc": 0,
+     "timeout": false,
+     "hash": "ba24272985e3",
+     "load": 3.97265625,
+     "jit": {
+      "compiles": 1,
+      "compile_ms": 2276.4,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 3354983,
+      "region_insts": 47161306,
+      "generated": 38342515,
+      "units": 1,
+      "regions": 12,
+      "declined": 0,
+      "accepted": 1
+     }
+    },
+    {
+     "wall": 5.175056335996487,
+     "rc": 0,
+     "timeout": false,
+     "hash": "ba24272985e3",
+     "load": 3.734375,
+     "jit": {
+      "compiles": 1,
+      "compile_ms": 4359.8,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 1917252,
+      "region_insts": 64862806,
+      "generated": 45163308,
+      "units": 1,
+      "regions": 5,
+      "declined": 0,
+      "accepted": 1
+     }
+    }
+   ]
+  }
+ },
+ "polybench/SYRK": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 7.948646046999784,
+     "rc": 0,
+     "timeout": false,
+     "hash": "975bb9f20d39",
+     "load": 2.63916015625,
+     "jit": {
+      "compiles": 1,
+      "compile_ms": 2949.7,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 98239,
+      "region_insts": 194178695,
+      "generated": 91276043,
+      "units": 1,
+      "regions": 4,
+      "declined": 0,
+      "accepted": 1
+     }
+    },
+    {
+     "wall": 7.48723916200106,
+     "rc": 0,
+     "timeout": false,
+     "hash": "975bb9f20d39",
+     "load": 2.587890625,
+     "jit": {
+      "compiles": 1,
+      "compile_ms": 2520.9,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 65494,
+      "region_insts": 194174636,
+      "generated": 91241398,
+      "units": 1,
+      "regions": 2,
+      "declined": 0,
+      "accepted": 1
+     }
+    }
+   ]
+  }
+ },
+ "hecbench/bilateral-cuda": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 11.259265503998904,
+     "rc": 0,
+     "timeout": false,
+     "hash": "2f9acb02faa1",
+     "load": 1.919921875,
+     "jit": {
+      "compiles": 3,
+      "compile_ms": 10119.0,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 4566620,
+      "region_insts": 64666509,
+      "generated": 56161965,
+      "units": 3,
+      "regions": 65,
+      "declined": 0,
+      "accepted": 3
+     }
+    },
+    {
+     "wall": 19.88696294100373,
+     "rc": 0,
+     "timeout": false,
+     "hash": "2f9acb02faa1",
+     "load": 1.81298828125,
+     "jit": {
+      "compiles": 3,
+      "compile_ms": 18881.5,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 2447076,
+      "region_insts": 78827416,
+      "generated": 63047523,
+      "units": 3,
+      "regions": 45,
+      "declined": 0,
+      "accepted": 3
+     }
+    }
+   ]
+  }
+ },
+ "hecbench/bh-cuda": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 3.844006626000919,
+     "rc": 0,
+     "timeout": false,
+     "hash": "6bde291205ee",
+     "load": 1.63232421875,
+     "jit": {
+      "compiles": 2,
+      "compile_ms": 3173.4,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 4138419,
+      "region_insts": 40469007,
+      "generated": 31138172,
+      "units": 9,
+      "regions": 107,
+      "declined": 1,
+      "accepted": 5
+     }
+    },
+    {
+     "wall": 6.7427439439998125,
+     "rc": 0,
+     "timeout": false,
+     "hash": "6bde291205ee",
+     "load": 1.58154296875,
+     "jit": {
+      "compiles": 3,
+      "compile_ms": 6118.6,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 2046155,
+      "region_insts": 42259517,
+      "generated": 31157850,
+      "units": 9,
+      "regions": 95,
+      "declined": 1,
+      "accepted": 5
+     }
+    }
+   ]
+  }
+ },
+ "hecbench/silu-cuda": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 7.200605256002746,
+     "rc": 0,
+     "timeout": false,
+     "hash": "dc58fe022bac",
+     "load": 1.49609375,
+     "jit": {
+      "compiles": 5,
+      "compile_ms": 6788.5,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 2063697,
+      "region_insts": 24177814,
+      "generated": 20370341,
+      "units": 5,
+      "regions": 50,
+      "declined": 0,
+      "accepted": 5
+     }
+    },
+    {
+     "wall": 11.163599371997407,
+     "rc": 0,
+     "timeout": false,
+     "hash": "dc58fe022bac",
+     "load": 1.46630859375,
+     "jit": {
+      "compiles": 5,
+      "compile_ms": 10784.1,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 1105215,
+      "region_insts": 27429933,
+      "generated": 21660451,
+      "units": 5,
+      "regions": 25,
+      "declined": 0,
+      "accepted": 5
+     }
+    }
+   ]
+  }
+ },
+ "polybench/JACOBI2D": {
+  "cold": {
+   "runs": [
+    {
+     "wall": 2.479347961998428,
+     "rc": 0,
+     "timeout": false,
+     "hash": "9ba334da29ea",
+     "load": 1.20947265625,
+     "jit": {
+      "compiles": 2,
+      "compile_ms": 1951.9,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 2540191,
+      "region_insts": 29856775,
+      "generated": 26047379,
+      "units": 2,
+      "regions": 4,
+      "declined": 0,
+      "accepted": 2
+     }
+    },
+    {
+     "wall": 1.8821525690000271,
+     "rc": 0,
+     "timeout": false,
+     "hash": "9ba334da29ea",
+     "load": 1.1923828125,
+     "jit": {
+      "compiles": 2,
+      "compile_ms": 1393.7,
+      "hits": 0,
+      "failures": 0,
+      "region_calls": 1351360,
+      "region_insts": 31062306,
+      "generated": 26060896,
+      "units": 2,
+      "regions": 2,
+      "declined": 0,
+      "accepted": 2
+     }
+    }
+   ]
+  }
+ }
+}

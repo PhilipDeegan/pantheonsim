@@ -1,0 +1,10 @@
+# VGPU_JIT_MUTANT=escape_outline build/test_jit_resid rows (the build of the two fixes, before the loop rule): the helpers of the generated file static inline as before
+  rows: the object with linking holds 0 string instructions
+  rows: the object with linking calls run_op out of line from 6 places
+  rows: the object without linking holds 0 string instructions
+  rows: the object without linking calls run_op out of line from 11 places
+[ FAIL ] jit_generated_code_copies_rows_with_vector_moves_not_string_instructions
+tests/unit/test_jit_resid.cpp:1617: VCHECK_EQ(outlined, 0u) failed
+  left:  17
+  right: 0
+0/1 tests passed
