@@ -1,0 +1,55 @@
+# verify.py, the final build, reference the tier: linking in the full form (residence and specialisation), the same with VGPU_JIT_LINK_BSYNC=1, and the full form with the bug of part 0 put back (VGPU_JIT_MUTANT=res_stop_keep).
+# The run was stopped in bh-cuda: its first run with the bug put back did not end (8 minutes where the program takes 0.6 s). aop-cuda was not reached.
+rodinia/hotspot                    thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 cold  same
+rodinia/hotspot                    thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 warm  same
+rodinia/hotspot                    thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 cold  same
+rodinia/hotspot                    thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 warm  same
+rodinia/hotspot                    thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1;VGPU_JIT_MUTANT=res_stop_keep cold  same
+rodinia/hotspot                    thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1;VGPU_JIT_MUTANT=res_stop_keep warm  same
+rodinia/hotspot                    thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 cold  same
+rodinia/hotspot                    thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 warm  same
+rodinia/hotspot                    thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 cold  same
+rodinia/hotspot                    thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 warm  same
+rodinia/hotspot                    thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1;VGPU_JIT_MUTANT=res_stop_keep cold  same
+rodinia/hotspot                    thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1;VGPU_JIT_MUTANT=res_stop_keep warm  same
+rodinia/lud                        thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 cold  same
+rodinia/lud                        thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 warm  same
+rodinia/lud                        thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 cold  same
+rodinia/lud                        thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 warm  same
+rodinia/lud                        thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1;VGPU_JIT_MUTANT=res_stop_keep cold  same
+rodinia/lud                        thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1;VGPU_JIT_MUTANT=res_stop_keep warm  same
+rodinia/lud                        thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 cold  same
+rodinia/lud                        thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 warm  same
+rodinia/lud                        thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 cold  same
+rodinia/lud                        thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 warm  same
+rodinia/lud                        thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1;VGPU_JIT_MUTANT=res_stop_keep cold  same
+rodinia/lud                        thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1;VGPU_JIT_MUTANT=res_stop_keep warm  same
+rodinia/pathfinder                 thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 cold  same
+rodinia/pathfinder                 thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 warm  same
+rodinia/pathfinder                 thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 cold  same
+rodinia/pathfinder                 thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 warm  same
+rodinia/pathfinder                 thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1;VGPU_JIT_MUTANT=res_stop_keep cold  same
+rodinia/pathfinder                 thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1;VGPU_JIT_MUTANT=res_stop_keep warm  same
+rodinia/pathfinder                 thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 cold  same
+rodinia/pathfinder                 thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 warm  same
+rodinia/pathfinder                 thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 cold  same
+rodinia/pathfinder                 thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 warm  same
+rodinia/pathfinder                 thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1;VGPU_JIT_MUTANT=res_stop_keep cold  same
+rodinia/pathfinder                 thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1;VGPU_JIT_MUTANT=res_stop_keep warm  same
+hecbench/bilateral-cuda            thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 cold  same
+hecbench/bilateral-cuda            thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 warm  same
+hecbench/bilateral-cuda            thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 cold  same
+hecbench/bilateral-cuda            thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 warm  same
+hecbench/bilateral-cuda            thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1;VGPU_JIT_MUTANT=res_stop_keep cold  DIFFERENT out:425305e25df9/2f9acb02faa1 cnt:False dig:False rc:0/0
+hecbench/bilateral-cuda            thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1;VGPU_JIT_MUTANT=res_stop_keep warm  DIFFERENT out:425305e25df9/2f9acb02faa1 cnt:False dig:False rc:0/0
+hecbench/bilateral-cuda            thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 cold  same
+hecbench/bilateral-cuda            thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 warm  same
+hecbench/bilateral-cuda            thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 cold  same
+hecbench/bilateral-cuda            thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 warm  same
+hecbench/bilateral-cuda            thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1;VGPU_JIT_MUTANT=res_stop_keep cold  DIFFERENT out:425305e25df9/2f9acb02faa1 cnt:False dig:False rc:0/0
+hecbench/bilateral-cuda            thr=4 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1;VGPU_JIT_MUTANT=res_stop_keep warm  DIFFERENT out:425305e25df9/2f9acb02faa1 cnt:False dig:False rc:0/0
+hecbench/bh-cuda                   thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 cold  same
+hecbench/bh-cuda                   thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 warm  same
+hecbench/bh-cuda                   thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 cold  same
+hecbench/bh-cuda                   thr=1 d:jit:VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_RESIDENCE=1;VGPU_JIT_SPECIALIZE=1 warm  same
+done

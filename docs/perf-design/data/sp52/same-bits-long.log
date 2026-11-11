@@ -1,0 +1,26 @@
+hecbench/black-scholes-cuda        thr=1 b:jit                      cold  same
+hecbench/black-scholes-cuda        thr=1 b:jit                      warm  same
+hecbench/black-scholes-cuda        thr=1 b:jit:VGPU_JIT_LINK=1      cold  same
+hecbench/black-scholes-cuda        thr=1 b:jit:VGPU_JIT_LINK=1      warm  same
+hecbench/black-scholes-cuda        thr=4 b:jit                      cold  same
+hecbench/black-scholes-cuda        thr=4 b:jit                      warm  same
+hecbench/black-scholes-cuda        thr=4 b:jit:VGPU_JIT_LINK=1      cold  same
+hecbench/black-scholes-cuda        thr=4 b:jit:VGPU_JIT_LINK=1      warm  same
+polybench/LU                       thr=1 b:jit                      cold  same
+polybench/LU                       thr=1 b:jit                      warm  same
+polybench/LU                       thr=1 b:jit:VGPU_JIT_LINK=1      cold  same
+polybench/LU                       thr=1 b:jit:VGPU_JIT_LINK=1      warm  same
+polybench/LU                       thr=4 b:jit                      cold  same
+polybench/LU                       thr=4 b:jit                      warm  same
+polybench/LU                       thr=4 b:jit:VGPU_JIT_LINK=1      cold  same
+polybench/LU                       thr=4 b:jit:VGPU_JIT_LINK=1      warm  same
+polybench/SYR2K                    thr=1 b:jit                      cold  same
+polybench/SYR2K                    thr=1 b:jit                      warm  same
+polybench/SYR2K                    thr=1 b:jit:VGPU_JIT_LINK=1      cold  same
+polybench/SYR2K                    thr=1 b:jit:VGPU_JIT_LINK=1      warm  same
+polybench/SYR2K                    thr=4 b:jit                      cold  same
+polybench/SYR2K                    thr=4 b:jit                      warm  same
+polybench/SYR2K                    thr=4 b:jit:VGPU_JIT_LINK=1      cold  same
+polybench/SYR2K                    thr=4 b:jit:VGPU_JIT_LINK=1      warm  same
+DIFFERENCES: 0
+SAME_DONE

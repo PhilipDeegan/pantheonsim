@@ -1,0 +1,40 @@
+# stepcount.so, SYR2K, the build of the two fixes (cprow, always_inline helpers): unlinked STEP_SKIP=960 STEP_CALLS=48 (16 warps: 3 region calls a warp), linked STEP_SKIP=640 STEP_CALLS=32
+# (9 warps: with linking a warp makes a third region call, at the final EXIT, that runs nothing). Instructions executed, by function (unlinked, linked, difference of the raw windows):
+total 75205754 42582683 (-32623071)
+30375936 17086464 -13289472  vgpu::MemoryManager::load_batch(unsigned long const*, unsigned long, unsigned int, unsigned long*, unsigned ch
+13437824 7559696 -5878128  void vgpu::sass::(anonymous namespace)::h_global<false>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+6813136 4111345 -2701791  generated code
+4718592 2654208 -2064384  vgpu::MemoryManager::load_broadcast(unsigned long, unsigned long, unsigned int, unsigned long*, unsigned char*
+4620288 2598912 -2021376  vgpu::simd::avx2_impl::warp_rows_k(unsigned int const*, unsigned int const*, unsigned long, unsigned long, uns
+3017600 1697584 -1320016  void vgpu::sass::(anonymous namespace)::h_global<true>(void*, vgpu::sass::tier::MOp const&, unsigned int)
+2968400 1669906 -1298494  vgpu::(anonymous namespace)::run_in(unsigned char*, unsigned char const*, unsigned long, unsigned int)
+2459200 1383600 -1075600  vgpu::simd::avx2_impl::warp_run_k(unsigned int const*, unsigned int const*, unsigned int)
+1805760 1016400 -789360  vgpu::MemoryManager::run_allocation(unsigned long, unsigned long, unsigned int, unsigned long*, unsigned char*
+1376256 774144 -602112  vgpu::MemoryManager::batch_faults_clear(bool) const
+1114112 626688 -487424  vgpu::sass::(anonymous namespace)::count_global(vgpu::exec::LaunchStats&, bool, unsigned long, unsigned int, u
+1017792 572880 -444912  vgpu::sass::(anonymous namespace)::count_run(vgpu::exec::LaunchStats&, bool, unsigned long, unsigned int, unsi
+1016800 572012 -444788  vgpu::MemoryManager::store_run(unsigned long, void const*, unsigned long, unsigned int, unsigned char*)
+328056 184592 -143464  _init
+ 82730  41492 -41238  libc.so.6
+ 20384   8893 -11491  vgpu::sass::(anonymous namespace)::Runner::tier_run_jit(vgpu::sass::(anonymous namespace)::Block&, vgpu::sass:
+
+# the generated code a warp (unlinked / 16, linked / 9), by the kind of operand and by mnemonic:
+generated code, instructions a warp: unlinked 425821 linked 456816 (+30995)
+  branch/call/ret            30819     31399     +580
+  other memory operand      177102    177043      -59
+  register only             210043    210765     +722
+  stack operand               7857     37608   +29751
+  mov              58289     88363   +30074
+  test              8596      9262     +666
+  vmovaps           5640      5004     -636
+  je               20525     21067     +542
+  vmovdqu          50792     50466     -326
+  vmovdqa           3497      3776     +279
+  add              13092     12855     -237
+  cmp               7074      7228     +154
+  jle                  0       136     +136
+  subl                 5       136     +131
+  movslq               1       131     +130
+  jne               1157      1028     -129
+  imul                 0       128     +128
+  setne                0       128     +128
