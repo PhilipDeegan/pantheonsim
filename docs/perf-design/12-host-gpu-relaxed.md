@@ -1,8 +1,9 @@
 # Host-GPU mode, relaxed: kernels whose result is the card's own
 
-Status: experimental, opt-in (`VGPU_HOST_GPU=relaxed`), built without a card: the unit tests ran, the stand-in-driver test needs nvcc and
-runs in CI, and nothing in this file has been measured on a GPU yet. The card measurements are *Round sp59* in
-[rounds/11-rounds-sp36-sp41.md](rounds/11-rounds-sp36-sp41.md#round-sp59-relaxed-host-gpu-mode-card-measurements-to-follow).
+Status: experimental, opt-in (`VGPU_HOST_GPU=relaxed`). Measured on one A10G in *Round sp59*
+([rounds/11-rounds-sp36-sp41.md](rounds/11-rounds-sp36-sp41.md#round-sp59-relaxed-host-gpu-mode-on-an-a10g)): over 59 programs of PolyBench/GPU, Rodinia
+and HeCBench the geometric mean speed-up is 1.23x against 1.12x for exact mode (summed wall time 1.75x against 1.20x), every program's output is the
+simulator's, and no kernel was refused for an instruction of no class. Sections 5 and 8 say what the card confirmed and what it changed.
 Tracking issue: pantheonsim #587. Read [09-host-gpu-spike.md](09-host-gpu-spike.md) first: this mode is the same machinery with a wider
 door.
 
@@ -103,7 +104,10 @@ Two bugs of exact mode's scan were found on the way:
 ## 4. Verify by tolerance
 
 `VGPU_HOST_GPU_VERIFY=1` (or `all`) runs each launch on the card and then in the simulator, as in exact mode. The simulator's result is the
-one the program gets, so a difference does not carry into the next launch: verify measures each kernel alone. Without verify the program
+one the program gets, and the card copy is given up before the simulator runs, so the next launch on the card starts from the simulator's
+memory again: a difference does not carry into the next launch, and verify measures each kernel alone. (Until Round sp59 the card copy was
+kept through the simulator's launch, in both modes: the card then ran on its own earlier results, and the simulator's atomics lost updates
+in the gate. The price of the fix is that a verify run pushes all live memory before every launch.) Without verify the program
 gets the card's values and differences can compound over launches; that is the mode, and only an end-to-end comparison of the program's
 output (the benchmark harness, section 6) says what it amounts to.
 
@@ -173,20 +177,21 @@ Memory has no types, so the compare guesses, and these are the guesses that can 
   evidence of anything; compare the card with itself first.
 * **Registers and shared memory are not compared**, only device memory in the allocation table, as in exact mode.
 
-## 5. What a card has to say
+## 5. What the card said (Round sp59, one A10G, nvcc 13.0)
 
-Nothing here has run on a GPU. In order of how much depends on it:
-
-1. `nvidia/tests/e2e/run_host_gpu.sh` and `tools/card-ci/run-card-ci.sh`: the expf kernel runs on the card in relaxed mode, verify finds
-   no word outside the default tolerance, the output without verify differs only in the fields that hash expf results, exact unchanged.
-2. `tools/probes/hostgpu_relaxed_card_probes.sh sfu <out>`: `sin`, `cos`, `tanh` over all 2^32 patterns (count, share, largest distance),
-   beside sp44's five. The simulator side models `sin.approx` as a float product by 1/(2 pi) and `MUFU.SIN` in turns; a share above one
-   half would point at that model, not the card.
-3. `tools/probes/hostgpu_relaxed_card_probes.sh atomics <out>`: which kinds of atomic the card repeats run to run. Decides whether
-   `atomic-int` and `float-red` deserve their default, and how bad the opt-in classes are.
-4. `tools/probes/hostgpu_relaxed_card_probes.sh tensor <out> <build>`: `HMMA`, `IMMA`, `DMMA` kernels under verify, at the default rtol,
-   at 2e-3, and at 2e-3 read as halves.
-5. `tools/bench/hostgpu/run.py` (section 6) over the three corpora: speed-up, coverage, verify counts, end-to-end output.
+1. `nvidia/tests/e2e/run_host_gpu.sh`, `run_host_gpu_stub.sh` and `tools/card-ci/run-card-ci.sh` pass: the expf kernel runs on the card in relaxed mode,
+   verify finds no word outside the default tolerance (2.1 M of 132 M words differ, by at most 1.2e-7 relative), exact is unchanged.
+2. `tools/probes/hostgpu_relaxed_card_probes.sh sfu <out>`: `tanh` differs on 5.6% of all float patterns and is outside the default tolerance on 86,770 of
+   them (largest difference 8e-6). `sin` and `cos` are another matter: the card's are fixed-point, about 3.6e-7 absolute error, so a sine near zero is far
+   outside a relative tolerance (37.6% of the inputs of ordinary size are outside the default for `sin`, 0.3% for `cos`), and for arguments of many turns
+   the simulator's own value is not the card's at all. **A kernel that takes `sinf` or `cosf` needs `VGPU_HOST_GPU_ATOL=1e-6` to verify clean**, and its
+   results near zero differ from the simulator's by up to 3.6e-7 in a plain run.
+3. `... atomics <out>`: integer atomics leave the same memory in 7 of 7 repeats and return other values every time; float sums differ by up to 23 ulp
+   from run to run; compare-and-swap and exchange never repeat. The defaults stand.
+4. `... tensor <out> <build>`: `HMMA`, `IMMA`, `DMMA` (and `BMMA`, not yet named) gave the simulator's bits in 394 launches, on inputs whose products
+   are exact; an accumulation that rounds was not tested.
+5. `tools/bench/hostgpu/run.py` (section 6) over the three corpora: the round's tables. Relaxed adds five programs to exact's (one of them 78x); the
+   `never` class refused nothing; `extra` was met in one kernel, which verified clean. What limits both modes is the first-launch rule, not the classes.
 
 ## 6. The benchmark harness
 
@@ -196,6 +201,7 @@ layout, arguments and scratch directories) as sim, exact and relaxed, `--runs` t
 on the card and in the simulator, launches kept in the simulator by reason, verify's counts, and the program's output against the sim
 run's: identical, numeric (the same words, every number with a fraction or exponent within `atol + rtol * |sim|`; integers and hashes
 must be equal), or different, with the largest numeric difference. A run past `--timeout` is killed (its own process group) and recorded.
+The form `exactdiv` is exact with `VGPU_HOST_GPU_DIV=1`; a program slower than `--long-secs` in the simulator gets `--long-runs` runs of each form.
 `--dry-run` is a self-test that needs no card; it is the ctest `hostgpu_bench_selftest`.
 
 ```
@@ -209,6 +215,13 @@ python3 tools/bench/hostgpu/run.py --build build --corp /path/to/corp --gpu nvid
 |---|---|---|
 | `test_host_gpu_logic` | every CI job | the mode names; exact's set against a frozen copy and every decoder mnemonic; each class; joined modifiers; calls; the switches and the off list |
 | `test_host_gpu_tol` | every CI job | the rule, the three readings, NaN, infinity, denormals, signed zero, range ends, the float-array hole, parsing of the tolerances |
-| `e2e_host_gpu_stub` | CI jobs with nvcc (a stand-in driver, no card) | relaxed reaches the card path for expf, rcp and division beside expf; exact does not; the lines for scripts; the atomics opt-in and the off list; unreadable values; verify against a card that computes nothing; the timeout |
+| `e2e_host_gpu_stub` | CI jobs with nvcc (a stand-in driver, no card) | relaxed reaches the card path for expf, rcp and division beside expf; exact does not; the lines for scripts; the atomics opt-in and the off list; unreadable values; verify against a card that computes nothing; the timeout; a contended reduction under verify |
 | `hostgpu_bench_selftest` | every CI job | the harness: parsing, output classes, the table, a hang that is killed |
-| `e2e_host_gpu`, `tools/card-ci/run-card-ci.sh` | a machine with a card only | section 5, item 1 |
+| `e2e_host_gpu`, `tools/card-ci/run-card-ci.sh` | a machine with a card only (passed on an A10G, Round sp59) | section 5, item 1 |
+
+## 8. What is next
+
+From Round sp59, in order of what it would buy: a first-launch rule whose estimate sees the kernel's loop (2MM, COVAR, CORR, SYR2K, SYRK and
+black-scholes keep their one long launch in the simulator, in both modes); a start-cost account that weighs the gain (short programs lose 0.1 to 0.2 s);
+the card's fixed-point `MUFU.SIN` / `MUFU.COS` in the simulator; `BMMA` in the tensor class and a tensor probe whose sums round; other cards and toolkits.
+

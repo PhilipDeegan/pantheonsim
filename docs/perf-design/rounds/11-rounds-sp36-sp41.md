@@ -1396,12 +1396,202 @@ The A/B compares the normalised output of every run of every side: equal on all 
 * Deviations from the round's rules: one hold of the machine lock ran 26 minutes (a build and sixteen test legs; the limit was about 20) and two others about 20; `cmake` was configured once outside the lock (2 s); a disassembly was written to `/tmp` and removed in the same command.
 * Cleanup: the scratch tree of the round on server3 (`~/.cache/sp53`) was removed by exact path.
 
-## Round sp59 (relaxed host-GPU mode): card measurements to follow
+## Round sp59 (relaxed host-GPU mode on an A10G)
 
-Branch `hostgpu-relaxed`, built and tested on base `origin/main` 5f880163. `VGPU_HOST_GPU=relaxed` ([design](../12-host-gpu-relaxed.md), pantheonsim #587)
-was built and unit tested on server3, which has no card and no nvcc. This section is a stub: the tables are to be filled from the card runs.
+Branch `hostgpu-relaxed`. `VGPU_HOST_GPU=relaxed` ([design](../12-host-gpu-relaxed.md), pantheonsim #587) on one real A10G: the card CI, the probes, and
+PolyBench/GPU, Rodinia and the reduced HeCBench list as plain simulator, `exact`, `exact` with `VGPU_HOST_GPU_DIV=1` and `relaxed`. Data, commands and the
+rig: [`data/sp59/`](../data/sp59/README.md). One rig, single runs for the long programs, one toolkit (13.0): read the caveats.
 
-### What ran without a card (server3, GCC 13.3, `Release`, `-Werror`, no LTO; every build and run under the machine lock, `-j3`, `nice 19`)
+### Headline
+
+* **Speed.** Over the 59 programs with a simulator time: geometric mean 1.12x for `exact`, 1.12x for `exact` + DIV, 1.23x for `relaxed`; summed wall time
+  1172 s in the simulator, 978 s, 972 s and 669 s (1.20x, 1.21x, 1.75x). Four more programs pass 300 s in the simulator: three finish in 8 to 14 s in
+  every card form, and `binomial` in 7.5 s in `relaxed` only.
+* **Coverage.** Launches on the card: 21,279 of 57,014 (`exact`), 21,290 (`exact` + DIV), 25,221 of 58,014 (`relaxed`); programs with at least one: 13, 13, 22
+  of 64. No launch was refused for an instruction of no class. What keeps launches in the simulator in relaxed mode is the size rule (30,812 launches too
+  small), the shared safety checks (1,499), the atomics opt-in (209), and the first-launch rule, which is not counted and which holds most of the time left.
+* **Correctness.** The output of every program that can be compared is the simulator's in every card form: 58 of 59 identical, none merely within
+  tolerance, none different. The 59th, Rodinia `particlefilter_float`, does not print the same output twice in the simulator. Verify (52 programs, after the
+  fix below): 8 programs have words that differ, 2 have words outside the default tolerance (`aobench`: a byte of an image; `bh`: forces of 1e-3 that differ
+  by 4e-7), both explained, neither a fault of the mode.
+* **A bug of verify, in both modes, found and fixed.** Under `VGPU_HOST_GPU_VERIFY` the simulator ran its launch while the card copy was still valid, and
+  its atomics lost updates between host threads: HeCBench `atomicAggregate` printed FAIL under verify and PASS without.
+* **The probes changed two claims.** The card's `MUFU.SIN`/`COS` is accurate to about 3.6e-7 absolute, not to a unit in the last place, and for arguments
+  beyond ordinary size the simulator's own sine is not the card's at all. Tensor-core kernels (`HMMA`, `IMMA`, `DMMA`, and `BMMA`) gave the simulator's
+  bits in all 394 launches.
+
+### A. Card CI (`tools/card-ci/run-card-ci.sh`)
+
+Passed on the first run, with nothing changed: unit tests, `e2e_host_gpu` (the relaxed steps: the expf kernel on the card, verify with 2,139,207 words
+different and none outside tolerance, largest relative difference 1.19e-7), `e2e_host_gpu_stub` (steps 10 to 15, their first run anywhere), the division
+check, the sp44 `MUFU` lines (the same shares as sp44). Passed again on the final sources.
+
+### B. Probes
+
+`sin.approx`, `cos.approx`, `tanh.approx` over all 2^32 float patterns against the simulator (`hostgpu_sfu_exhaustive`, about 2 minutes each):
+
+| op | differ of 2^32 | share | outside atol 1e-8 + rtol 1e-5 | largest difference | inputs of ordinary size (2^-20 <= abs(x) < 2^10, 503 M): outside tolerance | largest difference there |
+|---|---:|---:|---:|---:|---:|---:|
+| sin | 4,100,660,130 | 95.5% | 1,973,810,306 | 1 | 189,088,948 (37.6%) | 3.58e-7 |
+| cos | 1,959,021,478 | 45.6% | 1,361,487,864 | 2 | 1,553,340 (0.3%) | 3.58e-7 |
+| tanh | 239,361,664 | 5.6% | 86,770 | 7.99e-6 | 86,770 | 7.99e-6 |
+
+Reading: nvcc compiles `sin.approx` as `FMUL.RZ` by 1/(2 pi) and `MUFU.SIN` on turns (read from the kernel's SASS with `VGPU_HOST_GPU_LOG=2`; the first model
+in the probe, a product rounded to nearest, was wrong and is corrected, which moved the share from 96.7% to 95.5%, so the model was not the cause). The
+card's sine and cosine are fixed-point: about 3.6e-7 absolute error whatever the size of the result, so a sine near zero is far outside a relative
+tolerance (the first difference is the card's 0 against the simulator's 7e-38), and for an argument of many turns the card gives sin 0 and cos 1 where the
+simulator, which multiplies by 2 pi in double, gives a value anywhere in [-1, 1]. For programs: a result of `sinf` or `cosf` near zero differs from the
+simulator's by up to 3.6e-7, which the default `atol` of 1e-8 does not cover. The simulator's `MUFU.SIN` and `MUFU.COS` are not the card's beyond ordinary
+arguments; that is a finding about the simulator, not about this mode, and nothing was changed for it.
+
+Atomics, 8 runs of each kernel on the card from the same memory (`hostgpu_atomic_repeat`, 4,194,304 threads onto 256 words):
+
+| kind | SASS class | the target words repeat | what each thread got back repeats |
+|---|---|---|---|
+| integer max, no value used (control) | exact | 7 of 7 | (nothing returned) |
+| integer add, old value used | atomic-int | 7 of 7 | 0 of 7 (4,170,784 of 4,194,304 words differ) |
+| float add, no value used | float-red | 0 of 7 (242 of 256 sums differ, up to 17 ulp) | (nothing returned) |
+| float add, old value used | atomic-float | 0 of 7 (up to 13 ulp) | 0 of 7 |
+| double add, no value used | float-red | 0 of 7 (246 of 256, up to 23 ulp) | (nothing returned) |
+| compare-and-swap | atomic-swap | 0 of 7 | 0 of 7 |
+| exchange | atomic-swap | 0 of 7 | 0 of 7 |
+
+As designed: integer atomics leave the same memory and return order-dependent values; float sums differ in their last places from run to run; swaps have
+no single answer.
+
+Tensor instructions under `VGPU_HOST_GPU_VERIFY=all` (`wmma_gemm`, `wmma_types`, `mma_forms`; 4 + 21 + 369 launches, each at rtol 1e-5, 2e-3, and 2e-3 read as
+halves): 0 words different in every run, the 18 + 2 `BMMA` launches (not admitted, run by `all`) included. These programs feed values that are exact in
+every format, so this shows that layouts and exact products agree; it says nothing about the rounding of an accumulation that is not exact.
+
+### C. The three suites
+
+`tools/bench/hostgpu/run.py`, 3 runs a form (1 for a program over 30 s in the simulator), per-run limit 1200 s (PolyBench, Rodinia) or 300 s (HeCBench), median
+wall seconds of the whole process. Tables per program: `data/sp59/{rodinia,polybench,hecbench}.md`.
+
+| suite | programs | `exact` | `exact` + DIV | `relaxed` | summed wall: sim, exact, DIV, relaxed (s) | launches on card: exact, relaxed, of | programs with a card launch: exact, relaxed |
+|---|---:|---:|---:|---:|---|---|---|
+| Rodinia | 12 | 1.17x | 1.18x | 1.25x | 17, 13, 13, 12 | 1,632, 2,433 of 3,971 | 3, 5 |
+| PolyBench/GPU | 20 | 1.30x | 1.30x | 1.30x | 786, 595, 589, 582 | 4,965, 4,967 of 34,109 | 6, 6 |
+| HeCBench (reduced) | 27 of 32 | 0.99x | 0.98x | 1.18x | 370, 370, 370, 75 | 14,682 of 18,934; 17,821 of 19,934 | 4, 11 |
+| all | 59 of 64 | 1.12x | 1.12x | 1.23x | 1172, 978, 972, 669 | 21,279 of 57,014; 25,221 of 58,014 | 13, 22 |
+
+The programs whose time moved (the rest are within 15% of the simulator in every form):
+
+| program | sim s | exact | exact + DIV | relaxed | launches on card: exact, relaxed, of |
+|---|---:|---:|---:|---:|---|
+| HeCBench atomicReduction | 297.0 | 1.00x | 1.00x | 78.0x (3.81 s) | 0, 2090 of 2100 |
+| PolyBench FDTD-2D | 106.1 | 22.9x | 21.7x | 22.9x | 1494, 1494 of 1500 |
+| Rodinia gaussian | 4.13 | 4.47x | 4.51x | 4.49x | 495, 495 of 1022 |
+| PolyBench LU | 30.7 | 2.76x | 2.76x | 2.75x | 1405, 1405 of 4096 |
+| HeCBench atomicAggregate | 3.58 | 1.00x | 1.00x | 2.46x | 0, 4 of 6 |
+| Rodinia hotspot | 1.18 | 0.99x | 0.99x | 2.30x | 0, 789 of 1000 |
+| PolyBench 2MM | 251.2 | 1.66x | 1.68x | 1.65x | 1, 1 of 2 |
+| Rodinia sc_gpu | 1.03 | 1.32x | 1.32x | 1.39x | 1087, 1053 of 1432 |
+| PolyBench 3MM | 2.42 | 1.33x | 1.32x | 1.35x | 2, 2 of 3 |
+| Rodinia lud | 3.52 | 1.19x | 1.30x | 1.23x | 50, 95 of 190 |
+| HeCBench bh | 0.88 | 0.99x | 0.98x | 1.25x | 0, 1 of 17 |
+| PolyBench GRAMSCHM | 228.6 | 0.83x | 0.85x | 0.87x | 2041, 2043 of 6144 |
+| Rodinia backprop | 0.61 | 0.99x | 0.99x | 0.86x | 0, 1 of 2 |
+| HeCBench atomicPerf | 1.13 | 1.00x | 1.00x | 0.84x | 0, 1 of 18 |
+| HeCBench axpby | 0.47 | 0.73x | 0.73x | 0.73x | 6, 5 of 35 |
+| HeCBench bitonic-sort | 0.32 | 0.99x | 1.00x | 0.62x | 0, 22 of 136 |
+| HeCBench aligned-types | over 300 | 8.37 s | 8.31 s | 8.44 s | 12974 of 13000 |
+| HeCBench babelstream | over 300 | 13.46 s | 13.50 s | 13.47 s | 1188 of 1214 |
+| HeCBench base64e | over 300 | 8.75 s | 8.75 s | 8.76 s | 514 of 516 |
+| HeCBench binomial | over 300 | over 300 | over 300 | 7.45 s | 998 of 1000 |
+
+What relaxed adds over exact is five programs: `atomicReduction` (78x), `binomial` (from over 300 s to 7.5 s), `atomicAggregate`, `hotspot`, `bh`. On
+PolyBench it adds nothing: no PolyBench launch that exact refuses for its code is large enough to go. `exact` + DIV adds 45 launches of Rodinia `lud`. The
+losses are short programs that pay the driver start for a launch or two (`bitonic-sort` 0.32 s to 0.52 s, `backprop`, `atomicPerf`, `axpby` in every form):
+the start-cost rule lets them through because their kernels' time adds up to the 0.25 s account while the gain does not.
+
+Not in the table: `fpdc` and `zerocopy` were skipped (known simulator timeouts of `tools/bench/real`); `aidw` passed 300 s in every form; `atomicCost` was killed
+(status -9, not by the harness) after about 22 s in every form, the plain simulator included, which was not looked into.
+
+With the atomics opt-in (`VGPU_HOST_GPU_ATOMICS=1`, the three programs that had launches refused for it, 3 runs): `aop` 1.86 s to 0.83 s (2.25x, 291 of 301
+launches on the card), `atomicPerf` 1.12 s to 0.78 s (1.44x), `bh` unchanged at 1.25x (one more kernel admitted, too small to go). The outputs are the
+simulator's in all three. Verify: `aop` 32,785 words different and none outside tolerance; `bh` as below.
+
+#### Where the simulator's time is left under relaxed mode
+
+Not in refused instructions: `host_gpu_refused` named 12 kernels in all (5 of `aop`, 6 of `atomicPerf`, 1 of `bh`), every one for `ATOMS.CAST.SPIN` or
+`ATOMG.CAS` (the opt-in), none for the `never` class. The time is in launches the size rule keeps:
+
+| program | relaxed s | launches on card | seconds in the simulator's launches | why |
+|---|---:|---|---:|---|
+| PolyBench 2MM | 152.0 | 1 of 2 | 29.1 | the first kernel's only launch is not sent |
+| PolyBench COVAR, CORR | 62.9, 62.7 | 0 of 3, 0 of 4 | 23.3 | every kernel launches once |
+| HeCBench black-scholes | 24.9 | 0 of 1 | 19.7 | one launch, admitted (`mufu`, `call`), not sent |
+| PolyBench SYR2K, SYRK | 9.8, 5.2 | 0 of 1 | 7.7 | one launch |
+| PolyBench GRAMSCHM | 261.8 | 2043 of 6144 | 1.3 | the rest is the program's CPU reference |
+
+A kernel's first launch goes to the card only when the static estimate of its simulator time beats the card path with the driver start charged (sp43), and
+that estimate is far too low for a kernel with a loop: SYR2K's launch is estimated at 45 ms and takes 7.7 s. With `VGPU_HOST_GPU_START_COST=0` (one run, 28
+PolyBench and Rodinia programs, `data/sp59/start-cost-0.md`): SYR2K 9.78 s to 2.30 s, SYRK 5.19 s to 1.28 s, GEMM 1.3x, JACOBI2D 1.7x, 3MM 1.6x, hotspot 3.6x
+in relaxed, and the geometric mean of the 28 goes from 1.27x (exact) and 1.30x (relaxed) to 1.47x in both, with identical outputs; it also brings back
+the losses the start cost was made for (`pathfinder` 0.85x, `srad_v2` 0.06 s to 0.44 s in relaxed). This rule is shared by both modes and was not changed.
+
+One more thing that is not the mode: the plain simulator is slower than a host-GPU run that sends nothing to the card (SYRK 6.48 s against 5.19 s with
+0 launches on the card, CORR 78 s against 63 s). `runtime.cpp` switches launch-level result caching on only when `VGPU_HOST_GPU` is unset; that is the likely
+cause, and it was not measured apart. It flatters every speed-up above by up to 1.25x on such programs, and may be what makes GRAMSCHM read 0.83x (one run).
+
+### D. Differences, by cause
+
+| program | what differs | cause |
+|---|---|---|
+| Rodinia particlefilter_float | the printed result, in every form | the simulator does not repeat itself on this program (its 3 sim runs differ); every launch stays in the simulator (module variables) |
+| HeCBench aobench | verify: 4 words different, 2 outside | the kernel writes an image of bytes; one byte is `0xf5` on the card and `0xf4` in the simulator: a float one or two ulp apart (`mufu`) rounded to the other byte. The compare reads bytes as floats and doubles (hence a "largest difference" of 1e242). Output identical |
+| HeCBench bh, ForceCalculationKernel | verify: about 8,500 words different and 12 outside per launch, largest 4.2e-7 absolute, 3.2e-4 relative | forces of about 1e-3 summed over many bodies from `MUFU.RSQ` results one or two ulp apart: cancellation. Inside tolerance with `VGPU_HOST_GPU_ATOL=1e-6`. Output identical |
+| HeCBench bh, TreeBuildingKernel | verify: about 6,000 words outside per launch | compare-and-swap tree building (not admitted; run by `VERIFY=all`): node indices in another order, as the atomics probe says |
+| HeCBench atomicAggregate, atomicPerf, atomicIntrinsics | the verify run printed FAIL, or other lines, where the simulator prints PASS (first pass only) | the bug of verify below; identical after the fix |
+
+No difference was traced to the mode sending a kernel it should not have, and no class was switched off. The six other programs with words that differ
+under verify have none outside tolerance.
+
+#### The bug of verify (both modes)
+
+Under `VGPU_HOST_GPU_VERIFY` the card copy of each allocation stayed valid while the simulator ran the same launch, so the simulator's accesses went through
+the gate's slow path, where an atomic of one host thread could lose the update of another. `atomicAggregate` under `VERIFY=all`: FAIL in
+each of 4 runs with 4 host threads (3 in exact mode, 1 in relaxed), PASS in 2 of 2 with `VGPU_THREADS=1`; after the fix PASS in 6 of 6 with 4 threads (3 and 3). It also
+meant that the next launch on the card started from the card's own earlier results, so in relaxed mode differences carried from launch to launch on the
+card's side, which is not what the design said. Fix: the copy is given up before the simulator runs (nothing is pulled: the simulator's memory is the
+truth), so a verify run now pushes all live memory before every launch. Plain runs are not touched. The verify numbers of this section are from a second
+pass with the fix (52 programs; the long ones were not repeated). A step was added to the stand-in-driver test (a contended integer reduction under verify);
+it passes, but it also passed on the library before the fix in 10 runs, so it does not reproduce the bug and the evidence is `atomicAggregate` on the card.
+
+### What changed in the tree because of the card
+
+* The verify fix above (`src/runtime/host_gpu.cpp`), with the test step.
+* The probe's model of `sin.approx` / `cos.approx` (`FMUL.RZ`), and its RESULT lines now also count results outside the default tolerance and give the
+  largest absolute difference, over all inputs and over those of ordinary size.
+* The harness: a form `exactdiv`, and `--long-secs` / `--long-runs`.
+* Defaults: none. `tensor` and `extra` stay on (`tensor`: 394 launches bit-identical; `extra`: `atomicAggregate`'s kernel holds one and verifies clean, which is
+  thin). The atomics opt-in stays an opt-in (the probe).
+
+### What to do next
+
+1. The first-launch rule. It is where the time is: a static estimate that sees the loop (trip counts from the launch's arguments, or the instruction count
+   times the grid as a floor that is raised by the kernel's back edges) would send 2MM's first kernel, COVAR, CORR, SYR2K, SYRK and black-scholes. Both modes gain.
+2. Short programs that lose 0.1 to 0.2 s to the driver start: the account should weigh the expected gain, not the simulator time spent.
+3. Measure the plain simulator with result caching off against a host-GPU run with nothing sent, and report speed-ups against the faster one.
+4. `MUFU.SIN` / `MUFU.COS` in the simulator: model the card's turns in fixed point, at least for arguments beyond 2^10; then an absolute tolerance for
+   results of these two.
+5. Name `BMMA` in the tensor class (20 launches identical), and give the tensor probe inputs whose accumulation is not exact.
+6. Make the stand-in-driver test reproduce the lost update (it needs two host threads inside the gate at once).
+7. Other cards and toolkits: everything here is one A10G, nvcc 13.0.
+
+### Caveats
+
+* One rig, one card. Programs over 30 s in the simulator had one run of each form (2MM, CORR, COVAR, FDTD-2D, GRAMSCHM, LU in the main pass, atomicReduction);
+  GRAMSCHM's 0.83x to 0.87x is one run of each, against 1.00x to 1.02x in sp44.
+* The timed passes ran on the build before the verify fix; the fix touches only verify runs. The verify of 2MM, FDTD-2D, GRAMSCHM, aligned-types,
+  atomicReduction, babelstream, base64e and binomial timed out (600 s or 300 s) and says nothing; these are the programs with the most launches on the card.
+* The exact form of a long program has no `card_s` / `sim_s` (the extra run with the log is skipped for it).
+* "Identical output" is the program's printed text and files with timing lines dropped: most of these programs print a checksum to a few digits or PASS, so
+  it is a weaker statement than verify's.
+* The harness, the probes and the mode were changed during the run (listed above); the card CI passed again on the final sources.
+
+### Before the card: what ran without one (server3, GCC 13.3, `Release`, `-Werror`, no LTO; every build and run under the machine lock, `-j3`, `nice 19`)
 
 * The build is clean (0 warnings); `host_gpu.cpp` and `config.cpp` also compile alone with `-Wall -Wextra -Werror -Wformat-security`.
 * `ctest -R 'host_gpu|card_gate|hostgpu'`: 8 tests, 6 pass (`test_host_gpu_logic` 62 cases, `test_host_gpu_ref` 7, `test_host_gpu_tol` 15,
@@ -1414,21 +1604,3 @@ was built and unit tested on server3, which has no card and no nvcc. This sectio
   output in all 27 runs; the mode says `cannot load the real driver ...; mode off` where a launch was sent, the summary with 0 launches on the card
   where none was, and `not a mode` / `not a number` for the last two. The stderr of the `exact` runs equals, line for line, that of an earlier build of
   main (another round's baseline tree on the same machine), apart from the two lines for scripts that `VGPU_HOST_GPU_LOG` now adds.
-
-### To measure on a card (commands in the design doc, section 5)
-
-| item | command | result |
-|---|---|---|
-| e2e and card CI with the relaxed checks | `tools/card-ci/run-card-ci.sh` | |
-| `sin`, `cos`, `tanh` over all 2^32 patterns: differ, share, largest distance | `tools/probes/hostgpu_relaxed_card_probes.sh sfu <out>` | |
-| atomics: which kinds the card repeats | `tools/probes/hostgpu_relaxed_card_probes.sh atomics <out>` | |
-| tensor instructions under verify, rtol 1e-5 and 2e-3 | `tools/probes/hostgpu_relaxed_card_probes.sh tensor <out> <build>` | |
-| the three corpora: sim, exact, relaxed, verify | `tools/bench/hostgpu/run.py --forms sim,exact,relaxed,verify ...` | |
-
-### Results
-
-(to follow)
-
-### Caveats
-
-(to follow)

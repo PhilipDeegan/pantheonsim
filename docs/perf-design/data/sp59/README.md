@@ -29,8 +29,19 @@ python3 tools/bench/hostgpu/run.py --build build --corp corp --gpu nvidia/a10g -
 
 | file | what |
 |---|---|
-| `card-ci.txt` | stage A: the output of `run-card-ci.sh` |
+| `card-ci.txt` | stage A: the output of `run-card-ci.sh`, first run (its `sin` and `cos` lines are of the probe's first model, corrected in `probes.txt`) |
 | `probes.txt` | stage B: the RESULT, VERDICT and TENSOR lines |
-| `rodinia.md`, `polybench.md`, `hecbench.md` | stage C: the harness tables |
-| `bench.json` | stage C: the harness records of the three suites in one file, compact (no program output) |
-| `summary.txt` | the per-suite numbers the round text quotes (`summ.py` over the JSON) |
+| `rodinia.md`, `polybench.md`, `hecbench.md` | stage C: the harness tables. Their verify columns are of the pass before the verify fix |
+| `atomics-opt-in.md` | the three programs with launches refused for atomics, with `--env VGPU_HOST_GPU_ATOMICS=1` (after the fix) |
+| `start-cost-0.md` | PolyBench and Rodinia without 2MM, CORR, COVAR, GRAMSCHM, one run, `--env VGPU_HOST_GPU_START_COST=0` |
+| `bench.json` | the harness records of every pass in one file, compact: `rodinia`, `polybench`, `hecbench`, `verify_after_fix` (52 programs, verify form only), `atomics_opt_in`, `start_cost_0`. Per form: `s` median seconds, `x` speed-up, `card` / `launches`, `card_s`, `sim_s`, `kept` (launches kept in the simulator, by reason), `out`, `verify` |
+| `summary.txt` | the per-suite numbers the round text quotes |
+
+HeCBench was run with a 300 s limit per run, and `fpdc-cuda` and `zerocopy-cuda` were skipped. Follow-up passes:
+
+```
+H="python3 tools/bench/hostgpu/run.py --build build --corp corp --gpu nvidia/a10g"
+$H --skip <the programs over 30 s, atomicCost-cuda, fpdc-cuda, zerocopy-cuda> --runs 1 --forms sim,relaxed,verify --timeout 300 --verify-timeout 300
+$H --programs aop-cuda,atomicPerf-cuda,bh-cuda --runs 3 --forms sim,relaxed,verify --env VGPU_HOST_GPU_ATOMICS=1 --timeout 300
+$H --corpora polybench,rodinia --skip 2MM,CORR,COVAR,GRAMSCHM --runs 1 --forms sim,exact,relaxed --env VGPU_HOST_GPU_START_COST=0 --timeout 600
+```

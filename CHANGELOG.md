@@ -16,7 +16,10 @@ release says what runs and what it produces, never how fast a real GPU would run
   `host_gpu_outside:`). A launch that does not come back from the card ends the process after `VGPU_HOST_GPU_TIMEOUT` seconds (600 in
   relaxed mode). `exact` mode is unchanged, except for two bugs: a kernel refused for its module is no longer reported as "not in the
   exact set" from its second launch on, and a float reduction (`RED.ADD.F32`, which adds in arrival order) is now refused on sm_75 to
-  sm_89 as it was meant to be (the check did not recognise the decoder's spelling of the type). Not yet run on a card: [design and limits](docs/perf-design/12-host-gpu-relaxed.md); the benchmark harness is
+  sm_89 as it was meant to be (the check did not recognise the decoder's spelling of the type). Measured on one A10G (Round sp59): geometric mean 1.23x over 59 programs
+  of PolyBench/GPU, Rodinia and HeCBench against 1.12x for `exact`, outputs identical. `VGPU_HOST_GPU_VERIFY` now gives the card copy up before the
+  simulator runs the launch, in both modes: the simulator's atomics could lose updates under verify, and the card ran on its own earlier results.
+  [Design and limits](docs/perf-design/12-host-gpu-relaxed.md); the benchmark harness is
   `tools/bench/hostgpu/run.py`, the card probes `tools/probes/hostgpu_relaxed_card_probes.sh`. `docs/cli.md` now lists every
   `VGPU_HOST_GPU_*` variable (pantheonsim #587).
 - CI: a heavy job (SASS, ollama, ollama-amd, ASan, TSan) takes a reservation before it samples the memory, not after. `ci/jobs.sh --check`
