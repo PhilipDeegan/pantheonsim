@@ -2478,6 +2478,57 @@ DONE:
     VCHECK_EQ(e.mem.load_scalar(out + l * 4, 4), uint64_t{0xFFFF0000});
 }
 
+VTEST(group_ballots_at_two_sites_rendezvous_and_reach_the_barrier) {
+  // Groups of 4 lanes vote with their own mask, but the lanes of one group sit at two copies of the
+  // ballot (the compiler tail-duplicates it into both arms of an if). On an RTX 3060 (sm_86, CUDA 13.0)
+  // every lane gets its whole group's ballot, and the bar.sync after them is reached. The simulator ran
+  // the first copy for its lanes alone, then the barrier found the other lanes parked at a ballot that
+  // nothing could complete: "bar.sync cannot be reached by every lane of the warp" (issue #574).
+  std::string ptx = std::string(kHeader) + R"(
+.visible .entry k(.param .u64 out)
+{
+    .reg .b32 %r<12>;
+    .reg .b64 %rd<6>;
+    .reg .pred %p<6>;
+    ld.param.u64 %rd1, [out];
+    cvta.to.global.u64 %rd2, %rd1;
+    mov.u32 %r1, %laneid;
+    mul.wide.u32 %rd3, %r1, 4;
+    add.s64 %rd4, %rd2, %rd3;
+    and.b32 %r2, %r1, 28;
+    mov.u32 %r3, 15;
+    shl.b32 %r4, %r3, %r2;
+    mul.lo.u32 %r5, %r1, 7;
+    add.u32 %r5, %r5, 3;
+    rem.u32 %r5, %r5, 5;
+    setp.gt.u32 %p1, %r5, 1;
+    setp.gt.u32 %p2, %r5, 1;
+    and.b32 %r6, %r1, 1;
+    setp.ne.u32 %p3, %r6, 0;
+    @%p3 bra ODD;
+    vote.sync.ballot.b32 %r7, %p1, %r4;
+    bra.uni JOIN;
+ODD:
+    vote.sync.ballot.b32 %r7, %p2, %r4;
+JOIN:
+    st.global.u32 [%rd4], %r7;
+    bar.sync 0;
+    ret;
+}
+)";
+  Env e;
+  auto m = ptx::parse(ptx);
+  uint64_t out = e.mem.alloc(32 * 4);
+  LaunchConfig cfg;
+  cfg.block = {32, 1, 1};
+  exec::launch(m.entries[0], cfg, {arg_u64(out)}, e.mem, e.prof);
+  // Card output, lane group by group (probe in the issue's shape, run on the 3060).
+  const uint32_t want[8] = {0x0000000d, 0x000000a0, 0x00000500, 0x0000b000,
+                            0x00060000, 0x00d00000, 0x0a000000, 0x50000000};
+  for (uint32_t l = 0; l < 32; ++l)
+    VCHECK_EQ(e.mem.load_scalar(out + l * 4, 4), uint64_t{want[l / 4]});
+}
+
 // ---- counters derived from the addresses themselves ----
 //
 // Every expected number below is worked out by hand from the access pattern,

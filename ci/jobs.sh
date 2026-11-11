@@ -27,6 +27,19 @@
 #                               minimum is available (exit 1)
 #   ci/jobs.sh --available      print the available memory in GiB
 #   ci/jobs.sh --profiles       print the table
+#   ci/jobs.sh --release        give back this job's reservation (see below); put it last, if: always()
+#   ci/jobs.sh --reservations   print the ledger: id, MiB, expiry (epoch seconds)
+#
+# Reservation. A free-memory sample is not a claim on the memory: the job that starts a second
+# later on the other runner sees the same free memory, and both die when they grow (#575, #576).
+# So --check first takes a share in a ledger that every runner and container on the host can
+# see, waits (CI_MEM_WAIT_SECS) while the shares already taken leave no room, lets the machine
+# settle (CI_MEM_SETTLE_SECS) so a job that just started is counted, and only then samples the
+# memory. The ledger is a file under CI_RESERVE_DIR, edited under flock; a share is the profile's
+# minimum, and the capacity is CI_RESERVE_CAPACITY_GIB (default 5: one heavy job at a time, a
+# host with room for two sets 10). --release gives the share back; a share a killed runner never
+# released expires after CI_RESERVE_TTL_SECS (default 4 hours). No usable ledger (no directory
+# or no flock) is a warning, never a failure: the check then works as it always did.
 #
 # Environment
 #   CI_JOBS            force this many jobs (what a person who knows better sets)
@@ -37,6 +50,12 @@
 #                      within minutes; waiting costs no memory, refusing costs a re-run.
 #   CI_MEM_POLL_SECS   how often --check looks again while it waits (default 30)
 #   CI_MEM_LIMIT_GIB   ceiling on the memory this job may count on
+#   CI_RESERVE=0       no reservation (the check only samples)
+#   CI_RESERVE_DIR     the ledger's directory, the same path on the host and in the containers
+#                      (default /tmp/pantheonsim-ci-reserve; the container jobs bind-mount it)
+#   CI_RESERVE_CAPACITY_GIB, CI_RESERVE_TTL_SECS, CI_MEM_SETTLE_SECS (default 5)
+#   CI_RESERVE_ID      this job's name in the ledger (default: run, attempt, runner and job)
+#   CI_NOW             the clock in epoch seconds (tests)
 #   CI_NPROC, CI_MEMINFO, CI_CGROUP_ROOT, CI_PROC_CGROUP
 #                      where the numbers come from (/proc/meminfo and so on);
 #                      tests/lint/check_ci_jobs.sh points them at synthetic files
@@ -165,6 +184,46 @@ cpus() {
   nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1
 }
 
+reserve_dir=${CI_RESERVE_DIR:-/tmp/pantheonsim-ci-reserve}
+ledger="$reserve_dir/ledger"
+now() { echo "${CI_NOW:-$(date +%s)}"; }
+reserve_id() {
+  local id=${CI_RESERVE_ID:-}
+  if [[ -z $id && -n ${GITHUB_RUN_ID:-} ]]; then
+    id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}-${RUNNER_NAME:-runner}-${GITHUB_JOB:-job}"
+  fi
+  [[ -n $id ]] || id="local-$(id -u)-$(hostname 2>/dev/null || echo host)"
+  printf '%s' "$id" | tr -c 'A-Za-z0-9._-' '_'
+}
+
+# Makes the ledger usable by every user on the host (the runner's user and root in a container
+# both write it); prints why not and returns 1 when it cannot be had.
+ledger_open() {
+  command -v flock >/dev/null 2>&1 || { echo "flock is not installed"; return 1; }
+  mkdir -p "$reserve_dir" 2>/dev/null || sudo -n mkdir -p "$reserve_dir" 2>/dev/null || { echo "cannot create $reserve_dir"; return 1; }
+  [[ -w $reserve_dir ]] || chmod 0777 "$reserve_dir" 2>/dev/null || sudo -n chmod 0777 "$reserve_dir" 2>/dev/null
+  [[ -e $ledger ]] || { : >> "$ledger" 2>/dev/null && chmod 0666 "$ledger" 2>/dev/null; }
+  [[ -w $ledger ]] || { echo "cannot write $ledger"; return 1; }
+}
+
+# ledger_edit ID MIB CAP_MIB TTL: under the lock, drop expired entries and ID's own, add ID
+# (MIB 0 = only remove) if the others plus MIB fit CAP_MIB. Prints "ok" or "busy <holders>".
+ledger_edit() {
+  (
+    flock -w 60 9 || { echo "busy (the ledger lock is held)"; exit 0; }
+    out=$(awk -v now="$(now)" -v id="$1" -v mib="$2" -v cap="$3" -v ttl="$4" '
+      $3 > now && $1 != id { print "L " $0; sum += $2; held = held " " $1 "=" $2 "MiB" }
+      END {
+        if (mib == 0) { print "V ok"; exit }
+        if (sum + mib <= cap) { print "L " id " " mib " " (now + ttl); print "V ok" }
+        else print "V busy" held
+      }' "$ledger")
+    verdict=$(printf '%s\n' "$out" | sed -n 's/^V //p')
+    printf '%s\n' "$out" | sed -n 's/^L //p' > "$ledger"
+    echo "$verdict"
+  ) 9>>"$ledger"
+}
+
 mode="jobs"; per=""; profile=""; max=${CI_JOBS_MAX:-}
 while (( $# )); do
   case "$1" in
@@ -173,6 +232,8 @@ while (( $# )); do
     -m|--max)      max=${2:-}; shift 2 || die "$1 needs a number" ;;
     --check)       mode=check; profile=${2:-}; shift 2 || die "--check needs a profile" ;;
     --available)   mode=available; shift ;;
+    --release)     mode=release; shift ;;
+    --reservations) mode=reservations; shift ;;
     --profiles)    mode=profiles; shift ;;
     -h|--help)     sed -n '2,/^set -u/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
     [0-9]*)        per=$1; shift ;;
@@ -183,6 +244,20 @@ done
 if [[ $mode == profiles ]]; then
   printf '%-11s %7s %8s\n' profile GiB/job minimum
   for n in $profile_names; do read -r p m <<<"$(profile_row "$n")"; printf '%-11s %7s %8s\n' "$n" "$p" "$m"; done
+  exit 0
+fi
+
+if [[ $mode == reservations ]]; then
+  [[ -r $ledger ]] && cat "$ledger"
+  exit 0
+fi
+if [[ $mode == release ]]; then
+  if [[ ${CI_RESERVE:-1} == 0 ]]; then exit 0; fi
+  # Never fails: this is the last step, and a missing ledger means there is nothing to give back.
+  if [[ -w $ledger ]] && command -v flock >/dev/null 2>&1; then
+    id=$(reserve_id)
+    ledger_edit "$id" 0 0 0 >/dev/null 2>&1 && echo "memory: released the reservation of $id"
+  fi
   exit 0
 fi
 
@@ -208,12 +283,49 @@ fi
 if [[ $mode == check ]]; then
   [[ -n $profile ]] || die "--check needs a profile (one of: $profile_names)"
   if [[ ${CI_MEM_CHECK:-1} == 0 ]]; then echo "memory check skipped (CI_MEM_CHECK=0)"; exit 0; fi
-  if [[ -z $av ]]; then echo "memory: cannot tell how much is available; not checking"; exit 0; fi
-  n=$("$0" -p "$profile")
-  echo "memory: $(gib "$kib") GiB available (lowest of the limits: $src), $profile needs $pmin GiB; $(cpus) CPUs, $n parallel jobs at $per GiB each"
+
+  # Take this job's share of the ledger before looking at the memory.
   need_kib=$(awk -v g="$pmin" 'BEGIN { printf "%d", g * 1048576 }')
   wait_secs=${CI_MEM_WAIT_SECS:-0}; poll_secs=${CI_MEM_POLL_SECS:-30}
   is_pos_int "$poll_secs" || poll_secs=30
+  reserved=0
+  if [[ ${CI_RESERVE:-1} != 0 ]] && (( need_kib > 0 )); then
+    if why=$(ledger_open); then
+      id=$(reserve_id)
+      cap_gib=${CI_RESERVE_CAPACITY_GIB:-5}
+      is_num "$cap_gib" || die "CI_RESERVE_CAPACITY_GIB is not a number: $cap_gib"
+      # A share larger than the capacity could never be taken.
+      cap_mib=$(awk -v c="$cap_gib" -v m="$pmin" 'BEGIN { if (m > c) c = m; printf "%d", c * 1024 }')
+      mib=$(awk -v m="$pmin" 'BEGIN { printf "%d", m * 1024 }')
+      ttl=${CI_RESERVE_TTL_SECS:-14400}; [[ $ttl =~ ^[0-9]+$ ]] || ttl=14400
+      [[ $wait_secs =~ ^[0-9]+$ ]] || wait_secs=0
+      waited=0
+      while :; do
+        verdict=$(ledger_edit "$id" "$mib" "$cap_mib" "$ttl")
+        [[ $verdict == ok ]] && break
+        if (( waited >= wait_secs )); then
+          msg="the memory the other heavy jobs on this machine have reserved leaves no room for the $profile job's $pmin GiB ($verdict, capacity ${cap_mib} MiB; ci/jobs.sh --reservations). Re-run it when they are done."
+          if [[ ${GITHUB_ACTIONS:-} == true ]]; then echo "::error::$msg"; else echo "error: $msg"; fi
+          exit 1
+        fi
+        (( waited == 0 )) && echo "memory: waiting up to $wait_secs s for the other heavy jobs' reservations ($verdict)"
+        sleep "$poll_secs"; waited=$(( waited + poll_secs ))
+      done
+      reserved=1
+      echo "memory: reserved $pmin GiB as $id (capacity $(awk -v m="$cap_mib" 'BEGIN { printf "%.1f", m / 1024 }') GiB)$( (( waited > 0 )) && echo ", after waiting $waited s")"
+      # A job that started on the other runner a moment ago has not yet taken its memory.
+      settle=${CI_MEM_SETTLE_SECS:-5}; [[ $settle =~ ^[0-9]+$ ]] || settle=5
+      (( settle > 0 )) && sleep "$settle"
+      av=$(available); kib=${av%% *}; src=${av#* }
+    else
+      echo "memory: no reservation ($why); only sampling"
+    fi
+  fi
+  release_now() { (( reserved )) && CI_RESERVE_ID="$id" "$0" --release >/dev/null 2>&1; true; }
+
+  if [[ -z $av ]]; then echo "memory: cannot tell how much is available; not checking"; exit 0; fi
+  n=$("$0" -p "$profile")
+  echo "memory: $(gib "$kib") GiB available (lowest of the limits: $src), $profile needs $pmin GiB; $(cpus) CPUs, $n parallel jobs at $per GiB each"
   if (( kib < need_kib )) && [[ $wait_secs =~ ^[0-9]+$ ]] && (( wait_secs > 0 )); then
     echo "memory: waiting up to $wait_secs s for $pmin GiB to be available"
     waited=0
@@ -228,6 +340,7 @@ if [[ $mode == check ]]; then
   if (( kib < need_kib )); then
     msg="only $(gib "$kib") GiB of memory is available, and the $profile job needs $pmin GiB (ci/jobs.sh); it would take the machine's other jobs down with it, so it stops here. Re-run it when the runner is quieter, or set CI_MEM_CHECK=0 to start anyway."
     if [[ ${GITHUB_ACTIONS:-} == true ]]; then echo "::error::$msg"; else echo "error: $msg"; fi
+    release_now
     exit 1
   fi
   exit 0

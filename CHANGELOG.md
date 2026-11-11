@@ -12,6 +12,17 @@ release says what runs and what it produces, never how fast a real GPU would run
   counted region by region again for the last `VGPU_JIT_PROFILE` (4,000,000) instructions before the threshold. Programs that never
   reach the threshold paid 2 to 16 % for the counting with `VGPU_JIT=1`; results and counters are unchanged
   ([round sp57](docs/perf-design/rounds/11-rounds-sp36-sp41.md), which also says why the JIT stays opt-in).
+- CI: a heavy job (SASS, ollama, ollama-amd, ASan, TSan) takes a reservation before it samples the memory, not after. `ci/jobs.sh --check`
+  now takes a share (the profile's minimum) in a ledger under `/tmp/pantheonsim-ci-reserve`, which the pool's containers bind-mount, waits
+  while the shares leave no room (capacity 5 GiB: one heavy job per host, `CI_RESERVE_CAPACITY_GIB` raises it), lets the machine settle
+  5 s and only then samples. A new last step, `ci/jobs.sh --release` (`if: always()`), gives the share back; one a killed runner never
+  released expires after 4 hours. Before, two jobs on the two runners of one host both passed on the same free memory and the host's
+  out-of-memory killer took them down (pantheonsim #575, #576). The ollama downloads retry once when the archive arrives partial, and
+  the clean-up step no longer fails on a step-summary file the runner has already removed. The test is `lint_ci_jobs` (the ledger) and
+  `lint_ci_reservation` (every job releases and mounts it).
+- Setup action: the build cache is saved by an `actions/cache/save` step right after the build (on a miss only) instead of by
+  `actions/cache`'s post step, which runs only when the whole job succeeds; a caller whose tests failed no longer throws the build away
+  and rebuilds it for about 15 minutes next run (pantheonsim #582).
 - PTX: `ld.weak` and `st.weak` are accepted (the explicit spelling of the default memory semantics, PTX ISA 6.0 and later). They
   stopped GiMMiK 4.0's matrix-multiply kernels, and so PyFR's CUDA backend, at module load (pantheonsim #554).
 - NVRTC (the built-in compiler, used when no toolkit is visible): `--ftz=`, `--prec-div=` and `--prec-sqrt=` are accepted beside
@@ -24,6 +35,10 @@ release says what runs and what it produces, never how fast a real GPU would run
 - PTX: a `.reg` range may declare up to 1,048,576 registers (it was 65,536). ptxas allocates physical registers and counts only what
   a kernel uses, so nvcc's unrolled BN254 field arithmetic declares 125,511 and loads on a GPU; the per-block limit on registers a
   kernel uses is unchanged (pantheonsim #559).
+- PTX: lanes of one group that sit at two copies of a `vote.sync` naming the whole group (nvcc tail-duplicates a ballot into both arms
+  of an `if`) now vote together, as they do on a card, where each lane gets its group's ballot. The simulator ran the first copy
+  for its lanes alone, and the `bar.sync` after it stopped with "cannot be reached by every lane of the warp", as in fastMD's
+  neighbour-list build (pantheonsim #574). Measured on an RTX 3060 (sm_86, CUDA 13.0).
 
 - SASS: a loop that spins with `__nanosleep` as its back-off (lanes of one warp racing for a slot with `atomicCAS`, the losers
   sleeping until the winner publishes) runs to the end. ptxas puts no YIELD in such a loop, so the lane that won stood at the

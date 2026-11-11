@@ -265,7 +265,7 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ github.token }}
-      options: --shm-size=2g ${{ vars.BURST_CONTAINER_OPTIONS }}
+      options: --shm-size=2g -v /tmp/pantheonsim-ci-reserve:/tmp/pantheonsim-ci-reserve ${{ vars.BURST_CONTAINER_OPTIONS }}
     env:
       NVCC_PREPEND_FLAGS: ''
     permissions: { contents: read, packages: read, actions: write, pull-requests: read }  # pr-guard cancels a run whose PR conflicts
@@ -345,6 +345,13 @@ jobs:
         if: always() && job.container.id
         run: chown -R "$(stat -c %u:%g "$GITHUB_WORKSPACE/..")" "$GITHUB_WORKSPACE" || true
 
+      # The memory share this job took in the host's ledger (ci/jobs.sh --check), given back whatever the
+      # outcome so the next heavy job on the host can start. A share a killed runner never gives back
+      # expires by itself (CI_RESERVE_TTL_SECS).
+      - name: Give back the memory reservation
+        if: always()
+        run: ci/jobs.sh --release
+
       - name: Clean the runner
         if: always()
         uses: ./.github/actions/clean-runner
@@ -366,7 +373,7 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ github.token }}
       # The IPC tests need more than Docker's 64 MB of /dev/shm.
-      options: --shm-size=2g ${{ vars.BURST_CONTAINER_OPTIONS }}
+      options: --shm-size=2g -v /tmp/pantheonsim-ci-reserve:/tmp/pantheonsim-ci-reserve ${{ vars.BURST_CONTAINER_OPTIONS }}
     env:
       # Shims built against CUDA 13 make Ollama pick its cuda_v13 backend,
       # whose PTX starts at sm_75 and so covers every profile.
@@ -412,8 +419,19 @@ jobs:
           # A directory of its own: on a runner that lasts, the last job left root-owned files in a fixed one, and tar
           # could neither replace them nor set their times ("Cannot utime", "File exists").
           ollama_dir="$(mktemp -d "$RUNNER_TEMP/ollama.XXXXXX")"
-          wget -qO- "https://github.com/ollama/ollama/releases/download/$OLLAMA_VERSION/ollama-linux-amd64.tar.zst" |
-            zstd -d | tar -x -C "$ollama_dir"
+          # A kill (the host's out-of-memory killer) leaves a partial archive: "tar: Unexpected EOF". Once more
+          # before failing, and the job summary says so.
+          fetch_ollama() {
+            local t=$1 try
+            for try in 1 2; do
+              if ( set -o pipefail; wget -qO- "https://github.com/ollama/ollama/releases/download/$OLLAMA_VERSION/$t" | zstd -d | tar -x -C "$ollama_dir" ); then return 0; fi
+              echo "::warning::fetching $t failed (attempt $try of 2)"
+              echo "Fetching $t failed on attempt $try and was retried." >> "${GITHUB_STEP_SUMMARY:-/dev/null}" 2>/dev/null || true
+              sleep 5
+            done
+            return 1
+          }
+          fetch_ollama ollama-linux-amd64.tar.zst
           echo "$ollama_dir/bin" >> "$GITHUB_PATH"
 
       # Compile cache (.github/actions/ccache): the library's objects from an earlier build, when the source and the compiler are the same.
@@ -470,6 +488,13 @@ jobs:
       - name: Return the workspace to the runner's user
         if: always() && job.container.id
         run: chown -R "$(stat -c %u:%g "$GITHUB_WORKSPACE/..")" "$GITHUB_WORKSPACE" || true
+
+      # The memory share this job took in the host's ledger (ci/jobs.sh --check), given back whatever the
+      # outcome so the next heavy job on the host can start. A share a killed runner never gives back
+      # expires by itself (CI_RESERVE_TTL_SECS).
+      - name: Give back the memory reservation
+        if: always()
+        run: ci/jobs.sh --release
 
       - name: Clean the runner
         if: always()
@@ -535,9 +560,20 @@ jobs:
           # A directory of its own: on a runner that lasts, the last job left root-owned files in a fixed one, and tar
           # could neither replace them nor set their times ("Cannot utime", "File exists").
           ollama_dir="$(mktemp -d "$RUNNER_TEMP/ollama.XXXXXX")"
+          # A kill (the host's out-of-memory killer) leaves a partial archive: "tar: Unexpected EOF". Once more
+          # before failing, and the job summary says so.
+          fetch_ollama() {
+            local t=$1 try
+            for try in 1 2; do
+              if ( set -o pipefail; wget -qO- "https://github.com/ollama/ollama/releases/download/$OLLAMA_VERSION/$t" | zstd -d | tar -x -C "$ollama_dir" ); then return 0; fi
+              echo "::warning::fetching $t failed (attempt $try of 2)"
+              echo "Fetching $t failed on attempt $try and was retried." >> "${GITHUB_STEP_SUMMARY:-/dev/null}" 2>/dev/null || true
+              sleep 5
+            done
+            return 1
+          }
           for t in ollama-linux-amd64.tar.zst ollama-linux-amd64-rocm.tar.zst; do
-            wget -qO- "https://github.com/ollama/ollama/releases/download/$OLLAMA_VERSION/$t" |
-              zstd -d | tar -x -C "$ollama_dir"
+            fetch_ollama "$t"
           done
           # Its CUDA backends are not needed here.
           rm -rf "$ollama_dir"/lib/ollama/cuda_* "$ollama_dir"/lib/ollama/mlx_*
@@ -588,6 +624,13 @@ jobs:
       - name: Remove the Ollama install from the runner's temp directory
         if: always()
         run: rm -rf "$RUNNER_TEMP"/ollama.* || true
+
+      # The memory share this job took in the host's ledger (ci/jobs.sh --check), given back whatever the
+      # outcome so the next heavy job on the host can start. A share a killed runner never gives back
+      # expires by itself (CI_RESERVE_TTL_SECS).
+      - name: Give back the memory reservation
+        if: always()
+        run: ci/jobs.sh --release
 
       - name: Clean the runner
         if: always()
@@ -822,7 +865,7 @@ jobs:
         password: ${{ github.token }}
       # TSan's setarch -R needs personality() (seccomp), LeakSanitizer
       # ptrace; the IPC tests more than Docker's 64 MB of /dev/shm.
-      options: --shm-size=2g --cap-add=SYS_PTRACE --security-opt seccomp=unconfined ${{ vars.BURST_CONTAINER_OPTIONS }}
+      options: --shm-size=2g --cap-add=SYS_PTRACE --security-opt seccomp=unconfined -v /tmp/pantheonsim-ci-reserve:/tmp/pantheonsim-ci-reserve ${{ vars.BURST_CONTAINER_OPTIONS }}
     permissions: { contents: read, packages: read, actions: write, pull-requests: read }  # pr-guard cancels a run whose PR conflicts
     steps:
       - uses: actions/checkout@v4
@@ -886,6 +929,13 @@ jobs:
         if: always() && job.container.id
         run: chown -R "$(stat -c %u:%g "$GITHUB_WORKSPACE/..")" "$GITHUB_WORKSPACE" || true
 
+      # The memory share this job took in the host's ledger (ci/jobs.sh --check), given back whatever the
+      # outcome so the next heavy job on the host can start. A share a killed runner never gives back
+      # expires by itself (CI_RESERVE_TTL_SECS).
+      - name: Give back the memory reservation
+        if: always()
+        run: ci/jobs.sh --release
+
       - name: Clean the runner
         if: always()
         uses: ./.github/actions/clean-runner
@@ -908,7 +958,7 @@ jobs:
         password: ${{ github.token }}
       # TSan's setarch -R needs personality() (seccomp), LeakSanitizer
       # ptrace; the IPC tests more than Docker's 64 MB of /dev/shm.
-      options: --shm-size=2g --cap-add=SYS_PTRACE --security-opt seccomp=unconfined ${{ vars.BURST_CONTAINER_OPTIONS }}
+      options: --shm-size=2g --cap-add=SYS_PTRACE --security-opt seccomp=unconfined -v /tmp/pantheonsim-ci-reserve:/tmp/pantheonsim-ci-reserve ${{ vars.BURST_CONTAINER_OPTIONS }}
     permissions: { contents: read, packages: read, actions: write, pull-requests: read }  # pr-guard cancels a run whose PR conflicts
     steps:
       - uses: actions/checkout@v4
@@ -971,6 +1021,13 @@ jobs:
       - name: Return the workspace to the runner's user
         if: always() && job.container.id
         run: chown -R "$(stat -c %u:%g "$GITHUB_WORKSPACE/..")" "$GITHUB_WORKSPACE" || true
+
+      # The memory share this job took in the host's ledger (ci/jobs.sh --check), given back whatever the
+      # outcome so the next heavy job on the host can start. A share a killed runner never gives back
+      # expires by itself (CI_RESERVE_TTL_SECS).
+      - name: Give back the memory reservation
+        if: always()
+        run: ci/jobs.sh --release
 
       - name: Clean the runner
         if: always()
