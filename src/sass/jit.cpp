@@ -275,7 +275,8 @@ Config Config::from_env() {
 // Mutation checks (tests only, -DVGPU_JIT_MUTANTS=ON; VGPU_JIT_MUTANT=<name>, as the generator's in jit_gen.cpp): share_all_on keeps every section, share_all_off declines
 // every section, share_no_defer lets a section ask the cache before the rule has decided, cid_nocache never believes a remembered compiler identity. A test that does not fail with each of them does not test the rule.
 // (round sp57, the wait on the plain loop) wait_never: a section never waits; wait_stuck: a wait never ends; wait_no_credit: the waited instructions do not count towards the threshold;
-// wait_no_profile: the wait goes all the way to the threshold (the compile is asked for with the counts of before the wait).
+// wait_no_profile: the wait goes all the way to the threshold (the compile is asked for with the counts of before the wait); wait_no_batch: a thread brings every call's
+// instructions to the shared count at once, however long the wait.
 // The ctl_* mutants break one rule of the control flow in generated code (milestone 5, see mutation-checks in round15-jit.md).
 static bool mutant(const char* what) {
   const char* m = std::getenv("VGPU_JIT_MUTANT");
@@ -1589,6 +1590,7 @@ struct Manager {
         if (wait) {
           const uint64_t n = threshold - done - (mutant("wait_no_profile") ? 0 : profile);
           u->wait_for.store(n, std::memory_order_relaxed);
+          u->wait_batch.store(n >= kWaitBatchFrom && !mutant("wait_no_batch") ? kWaitBatch : 1, std::memory_order_relaxed);
           u->waited.store(0, std::memory_order_relaxed);
         }
         int exp = static_cast<int>(State::Looking);
@@ -1674,6 +1676,21 @@ void Unit::note(uint32_t region, uint32_t k) {
   if (total < mgr.threshold || s != static_cast<int>(State::Counting)) return;
   int exp = static_cast<int>(State::Counting);
   if (state.compare_exchange_strong(exp, static_cast<int>(State::Queued))) mgr.submit(Job::Compile, shared_from_this());
+}
+
+void Unit::wait_note(uint64_t instr) {
+  // (One section's remainder is dropped when the thread goes on to another: that only makes the first one's wait longer.)
+  static thread_local const Unit* mine = nullptr;
+  static thread_local uint64_t n = 0;
+  if (mine != this) {
+    mine = this;
+    n = 0;
+  }
+  n += instr;
+  if (n < wait_batch.load(std::memory_order_relaxed)) return;
+  const uint64_t t = waited.fetch_add(n, std::memory_order_relaxed) + n;
+  n = 0;
+  if (t >= wait_for.load(std::memory_order_relaxed)) wait_over();
 }
 
 // The wait is over: what it ran counts towards the threshold, and the section is Counting again (the hook loop, the regions' counts) for the last stretch.

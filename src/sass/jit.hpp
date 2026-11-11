@@ -345,6 +345,8 @@ struct Region {
 // that the regions' counts of the compile are fresh. (Until that round a section counted in the hook loop all the way: 2 to 12 % of a program that
 // never reaches the threshold.)
 enum class State : int { Idle, Looking, Counting, Queued, Ready, Failed, Declined, Waiting };
+inline constexpr uint64_t kWaitBatch = 65536;        // warp instructions a thread adds up by itself while a section waits
+inline constexpr uint64_t kWaitBatchFrom = 1 << 20;  // ... when the wait is at least this long
 
 // The share rule (round 14). The hook (tier_run_t<true>, the counting, the cache lookup) costs the instructions of a section that are not in a compiled
 // region something, and a section whose regions are a small part of its work never earns it back (`warp`, `shared`, `f64_fma`, `divergent`, `texture`
@@ -382,6 +384,7 @@ struct Unit : std::enable_shared_from_this<Unit> {
   std::unique_ptr<std::atomic<uint64_t>[]> counts;   // ... per region: which ones are hot decides which are compiled
   std::atomic<uint64_t> waited{0};     // warp instructions of the section run on the plain loop while Waiting (all of them, in regions or not)
   std::atomic<uint64_t> wait_for{0};   // ... and how many of them end the wait
+  std::atomic<uint64_t> wait_batch{1}; // ... and how many a thread adds up before it brings them to `waited` (set with wait_for)
   std::atomic<uint64_t> credit{0};     // what the wait counts for towards the threshold once it is over (wait_for; Unit::note adds it to the regions' counts)
   // Merging (linking): `regions` has one more element than spec.regions, a placeholder until a merged selection is published; then it is the merged region
   // (its spec is `merged`), the only one with entries in active_at and a function.
@@ -394,13 +397,11 @@ struct Unit : std::enable_shared_from_this<Unit> {
   bool hook() const { return state.load(std::memory_order_relaxed) <= static_cast<int>(State::Ready); }
   // Waiting: the plain loop is used, and step_warp tells wait_note what each call of it ran.
   bool waiting() const { return state.load(std::memory_order_relaxed) == static_cast<int>(State::Waiting); }
-  // The plain loop ran `instr` warp instructions of this section while it was Waiting. A load and a store, no locked instruction: two threads may lose one
-  // another's addition, which only makes the wait longer. The call that completes the wait makes the section Counting again.
-  void wait_note(uint64_t instr) {
-    const uint64_t t = waited.load(std::memory_order_relaxed) + instr;
-    waited.store(t, std::memory_order_relaxed);
-    if (t >= wait_for.load(std::memory_order_relaxed)) [[unlikely]] wait_over();
-  }
+  // The plain loop ran `instr` warp instructions of this section while it was Waiting. Each thread adds them up by itself and brings them to the shared
+  // count a batch at a time (kWaitBatch instructions when the wait is a long one, so that sixteen threads running short calls do not pass the count's cache
+  // line around: that cost a 16-thread run up to 13 %; at once when the wait is short, as in the tests). The thread whose batch completes the wait makes
+  // the section Counting again, up to a batch a thread late.
+  void wait_note(uint64_t instr);
   void wait_over();
   // The hook loop ran `instr` warp instructions of this section (the whole pass, regions or not). The one that brings the sample to `sample_after` decides.
   void sample(uint64_t instr);

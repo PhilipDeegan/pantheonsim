@@ -5,6 +5,7 @@
 //
 // The executor side (words and counters across the four stretches against the interpreter) is ctest test_sass_chain_cont_jit_wait.
 // Mutants (-DVGPU_JIT_MUTANTS=ON, VGPU_JIT_MUTANT=wait_never | wait_stuck | wait_no_credit | wait_no_profile): each makes the first test fail.
+// (wait_no_batch only turns the batches off where the manager sets them: a matter of speed, measured in round sp57, not of a result.)
 #include <unistd.h>
 
 #include <cstdio>
@@ -161,6 +162,49 @@ VTEST(jit_a_section_near_its_threshold_at_the_lookup_counts_on_in_the_hook_loop)
   VCHECK_EQ(state_of(*v), kWaiting);
   VCHECK_EQ(v->wait_for.load(), kProfile + 1);
   VCHECK_EQ(jit::stats().waits.load(), waits0 + 1);
+}
+
+// A long wait (a million instructions or more): a thread adds up what its calls ran and brings it to the shared count 65,536 instructions at a time, so the
+// wait may end up to a batch late, and what a thread had added up for one section is dropped when it goes on to another.
+VTEST(jit_a_long_wait_is_counted_a_batch_at_a_time_by_each_thread) {
+  if (!jit::requested()) return;
+  const uint64_t fails0 = jit::stats().failures.load();
+  FakeProgram fp("ggggggggx", 5);
+  const auto u = jit::make_unit(fp.prog, 80);
+  VCHECK(u != nullptr);
+  u->note(0, kLookup);
+  if (jit::stats().failures.load() != fails0) return;   // (no compiler)
+  VCHECK_EQ(state_of(*u), kWaiting);
+  VCHECK_EQ(u->wait_batch.load(), uint64_t{1});         // 89,872 instructions: a short wait, every call counts at once (the tests above)
+  // The same section with a wait of two million set by hand (the threshold of this test's manager is too near for one).
+  u->wait_for.store(2000000);
+  u->wait_batch.store(jit::kWaitBatch);
+  u->wait_note(1999999);              // more than a batch: brought to the count at once; one short
+  VCHECK_EQ(u->waited.load(), uint64_t{1999999});
+  VCHECK_EQ(state_of(*u), kWaiting);
+  u->wait_note(1);                    // the wait's last instruction stays with the thread ...
+  VCHECK_EQ(u->waited.load(), uint64_t{1999999});
+  VCHECK_EQ(state_of(*u), kWaiting);
+  u->wait_note(jit::kWaitBatch - 2);
+  VCHECK_EQ(state_of(*u), kWaiting);
+  u->wait_note(1);                    // ... until it has a batch
+  VCHECK_EQ(u->waited.load(), uint64_t{1999999} + jit::kWaitBatch);
+  VCHECK_EQ(state_of(*u), kCounting);
+  // Two sections on one thread: the remainder of the first is dropped when the thread counts for the second.
+  FakeProgram fa("ggggggggx", 6), fb("ggggggggx", 7);
+  const auto a = jit::make_unit(fa.prog, 80), b = jit::make_unit(fb.prog, 80);
+  a->note(0, kLookup);
+  b->note(0, kLookup);
+  VCHECK_EQ(state_of(*a), kWaiting);
+  a->wait_batch.store(jit::kWaitBatch);
+  b->wait_batch.store(jit::kWaitBatch);
+  a->wait_note(100);
+  b->wait_note(200);
+  a->wait_note(jit::kWaitBatch - 100);   // (not a batch: the 100 are gone)
+  VCHECK_EQ(a->waited.load(), uint64_t{0});
+  a->wait_note(100);
+  VCHECK_EQ(a->waited.load(), jit::kWaitBatch);
+  VCHECK_EQ(b->waited.load(), uint64_t{0});
 }
 
 VTEST_MAIN
