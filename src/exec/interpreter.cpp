@@ -6381,6 +6381,10 @@ class Interpreter {
       if (static_cast<Mask>(mm[lane]) & 0xffffffffu & elsewhere) waiting |= Mask{1} << lane;
     }
     if (waiting == 0) return false;
+    if (vote_rendezvous(w, ctx, ins, idx, mm, m)) {
+      m = 0;   // done here: the caller only steps past it
+      return false;
+    }
     if (select_other_runnable(w, idx) == idx) return false;
     if (waiting == m && waiting == w.paths[idx].mask) {
       w.paths[idx].parked = Path::kAtBarrier;
@@ -6396,6 +6400,124 @@ class Interpreter {
     m &= ~waiting;
     w.paths.push_back(parked);
     return false;
+  }
+
+  // A vote.sync whose member mask names lanes that sit at another copy of the vote.
+  // The compiler tail-duplicates a ballot into both arms of an if, so the lanes of one
+  // group can be at two sites, each naming the whole group. A card runs them as one vote
+  // (every lane gets its group's ballot), and the lanes that arrived first are parked
+  // here waiting for lanes that will never come to their pc. When every lane the voters
+  // name is either here or parked at such a vote -- the same kind, on another pc --
+  // run the vote once over all of them: each lane reads its own site's predicate and
+  // writes its own site's destination, then the parked paths step past their vote and
+  // run again. Returns true when it did, with the current path's vote done too.
+  bool vote_rendezvous(Warp& w, const BlockCtx& ctx, const Instr& ins, size_t idx, const Lanes& mm, Mask m) {
+    const auto* me = std::get_if<OpVote>(&ins.op);
+    if (!me) return false;
+    const size_t here = w.paths[idx].pc;
+    std::vector<size_t> mates;   // paths parked at another copy of this vote
+    Mask others = 0;             // lanes on every other path that is not one of those
+    for (size_t i = 0; i < w.paths.size(); ++i) {
+      if (i == idx) continue;
+      const Path& q = w.paths[i];
+      const auto* qv = q.pc < cur_->body.size() ? std::get_if<OpVote>(&cur_->body[q.pc].op) : nullptr;
+      if (q.parked == Path::kAtBarrier && q.pc != here && qv && qv->has_members && qv->mode == me->mode &&
+          qv->ballot == me->ballot)
+        mates.push_back(i);
+      else
+        others |= q.mask;
+    }
+    if (mates.empty()) return false;
+    struct Part { Mask lanes; const OpVote* op; const Instr* ins; };
+    std::vector<Part> parts{{m, me, &ins}};
+    Lanes names{};     // each participating lane's member mask
+    Mask all = 0;
+    auto take = [&](const Part& pt, const Lanes& src) {
+      for (Mask r = pt.lanes; r != 0; r &= r - 1) {
+        const uint32_t lane = first_set(r);
+        names[lane] = src[lane];
+        all |= Mask{1} << lane;
+      }
+    };
+    take(parts[0], mm);
+    // A parked vote joins only if a lane already in names one of its lanes (a parked vote of an
+    // unrelated group is not part of this one, and keeps waiting for its own lanes); a joined
+    // path's own names may pull in more.
+    std::vector<size_t> joined;
+    for (bool grew = true; grew;) {
+      grew = false;
+      Mask named_all = 0;
+      for (Mask r = all; r != 0; r &= r - 1) named_all |= static_cast<Mask>(names[first_set(r)]) & 0xffffffffu;
+      for (size_t i : mates) {
+        if (std::find(joined.begin(), joined.end(), i) != joined.end() || !(w.paths[i].mask & named_all)) continue;
+        const Instr& qi = cur_->body[w.paths[i].pc];
+        Part pt{w.paths[i].mask, std::get_if<OpVote>(&qi.op), &qi};
+        Lanes _s;
+        take(pt, read_operand(w, ctx, qi, pt.op->members, _s));
+        parts.push_back(pt);
+        joined.push_back(i);
+        grew = true;
+      }
+    }
+    if (joined.empty()) return false;
+    for (size_t i : mates)
+      if (std::find(joined.begin(), joined.end(), i) == joined.end()) others |= w.paths[i].mask;
+    mates = joined;
+    // Only a vote that completes, with nothing it names left on a path that is not one of
+    // these, is run here; one still waiting on other lanes waits as before.
+    bool joins_a_mate = false;
+    for (Mask r = all; r != 0; r &= r - 1) {
+      const uint32_t lane = first_set(r);
+      const Mask named = static_cast<Mask>(names[lane]) & 0xffffffffu;
+      if (named & others) return false;
+      for (size_t k = 1; k < parts.size(); ++k)
+        if (named & parts[k].lanes) joins_a_mate = true;
+    }
+    if (!joins_a_mate) return false;
+    // One vote per distinct member mask, as dispatch does for lanes that name different ones.
+    std::vector<uint32_t> values;
+    for (Mask r = all; r != 0; r &= r - 1) {
+      const uint32_t v = static_cast<uint32_t>(names[first_set(r)]);
+      if (std::find(values.begin(), values.end(), v) == values.end()) values.push_back(v);
+    }
+    for (uint32_t v : values) {
+      Mask group = 0;
+      for (Mask r = all; r != 0; r &= r - 1)
+        if (static_cast<uint32_t>(names[first_set(r)]) == v) group |= Mask{1} << first_set(r);
+      if (values.size() > 1)
+        for (Mask r = group; r != 0; r &= r - 1)
+          if (!((v >> first_set(r)) & 1u))
+            ctx_fail(ins, -1, Err::IllegalInstruction,
+                     "a *.sync warp instruction run by lane " + std::to_string(first_set(r)) +
+                         ", which its member mask " + std::to_string(v) + " leaves out");
+      Mask voters = 0;
+      for (const Part& pt : parts) {
+        Mask p = read_pred(w, *pt.ins, pt.op->src);
+        if (pt.op->negate_src) p = ~p;
+        voters |= p & pt.lanes & group;
+      }
+      for (const Part& pt : parts) {
+        const Mask mine = pt.lanes & group;
+        if (mine == 0) continue;
+        if (me->ballot) {
+          Lanes r;
+          for (Mask l = mine; l != 0; l &= l - 1) r[first_set(l)] = voters;
+          write_reg(w, pt.op->dst, mine, r, 32);
+        } else {
+          const bool val = me->mode == VoteMode::All   ? voters == group
+                           : me->mode == VoteMode::Any ? voters != 0
+                                                       : (voters == group || voters == 0);
+          Mask& dp = pred_slot(w, pt.op->dst);
+          dp = val ? (dp | mine) : (dp & ~mine);
+        }
+      }
+    }
+    // The parked paths are past their vote; they merge or run on from the next pc.
+    for (size_t i : mates) {
+      ++w.paths[i].pc;
+      w.paths[i].parked = Path::kRunnable;
+    }
+    return true;
   }
 
   size_t select_other_runnable(Warp& w, size_t idx) {

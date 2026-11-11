@@ -19,6 +19,10 @@ release says what runs and what it produces, never how fast a real GPU would run
 - PTX: a `.reg` range may declare up to 1,048,576 registers (it was 65,536). ptxas allocates physical registers and counts only what
   a kernel uses, so nvcc's unrolled BN254 field arithmetic declares 125,511 and loads on a GPU; the per-block limit on registers a
   kernel uses is unchanged (pantheonsim #559).
+- PTX: lanes of one group that sit at two copies of a `vote.sync` naming the whole group (nvcc tail-duplicates a ballot into both arms
+  of an `if`) now vote together, as they do on a card, where each lane gets its group's ballot. The simulator ran the first copy
+  for its lanes alone, and the `bar.sync` after it stopped with "cannot be reached by every lane of the warp", as in fastMD's
+  neighbour-list build (pantheonsim #574). Measured on an RTX 3060 (sm_86, CUDA 13.0).
 
 - SASS: a loop that spins with `__nanosleep` as its back-off (lanes of one warp racing for a slot with `atomicCAS`, the losers
   sleeping until the winner publishes) runs to the end. ptxas puts no YIELD in such a loop, so the lane that won stood at the
