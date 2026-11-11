@@ -37,7 +37,9 @@ jobs:
   suite:
     name: build + tests, CUDA ${{ matrix.cuda }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 150
+    # A hosted runner can be half again as slow as the next one: the same
+    # tests took 93 minutes on one and 122 on another (2026-11-10).
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -51,11 +53,7 @@ jobs:
           # the checked-in hipCUB and rocThrust programs, which ROCm's GCC 13
           # built and 22.04's libstdc++ (GLIBCXX_3.4.30) cannot load. Nothing
           # in them depends on the toolkit, and the build job runs them on 24.04.
-          # The two _jit_link legs repeat a unit test with region linking on;
-          # they take 11 minutes of this leg's 150 (GCC 12 builds the slowest
-          # binaries of the three), and the other two legs and the build job
-          # run them.
-          - { cuda: '12.4', os: ubuntu-22.04, repo: ubuntu2204, skip: '|amd_tools|regs_cli|amd_hipcc|test_sass_alu_runs_jit_link|test_sass_dispatch_counts_jit_link' }
+          - { cuda: '12.4', os: ubuntu-22.04, repo: ubuntu2204, skip: '|amd_tools|regs_cli|amd_hipcc' }
     # On the runner itself, not the cuda12.8 image: it runs the build job's
     # tests, whose session tests need user namespaces and mounts a container
     # refuses.
@@ -112,9 +110,10 @@ jobs:
 
       - name: Unit and end-to-end tests
         # The build job's set. The ML tests are the ml job's, the workloads
-        # and ollama ci.yml's, and CUTLASS's builds take hours.
+        # and ollama ci.yml's, and CUTLASS's builds take hours. The two _jit_link
+        # repeats of a unit test (7 to 11 minutes) are left to the build job.
         env:
           SKIP: ${{ matrix.skip }}
         run: |
           ctest --test-dir build --output-on-failure \
-            -E "^(pantheon_workloads|.*ollama.*|amd_pytorch.*|amd_rocblas|amd_hipsparselt.*|amd_vllm.*|e2e_cutlass.*$SKIP)\$"
+            -E "^(pantheon_workloads|.*ollama.*|amd_pytorch.*|amd_rocblas|amd_hipsparselt.*|amd_vllm.*|e2e_cutlass.*|test_sass_alu_runs_jit_link|test_sass_dispatch_counts_jit_link$SKIP)\$"
