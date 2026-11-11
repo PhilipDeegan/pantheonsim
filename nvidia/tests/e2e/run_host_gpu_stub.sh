@@ -29,6 +29,9 @@
 #      outside tolerance, per kernel and in the summary, lists at most three launches of a kernel without VGPU_HOST_GPU_LOG, and the program's output is the
 #      simulator's;
 #  15. a launch that does not come back from the card (STUB_SYNC_MS) ends the process with status 124 and a message after VGPU_HOST_GPU_TIMEOUT seconds.
+#  16. the simulator's launch of a verify run is not disturbed by the card copy of the launch before it: an integer reduction onto 64 contended words gives
+#      the mode-off sums under VGPU_HOST_GPU_VERIFY=1 with 4 host threads, in both modes, five times over (the card copy used to stay valid through the
+#      simulator's launch, whose atomics then went through the gate and lost updates).
 set -uo pipefail
 root="$(cd "$(dirname "$0")/../../.." && pwd)"
 . "$root/tests/shim_guard.sh"
@@ -235,5 +238,14 @@ grep -q 'has been on the card for more than 1 s (VGPU_HOST_GPU_TIMEOUT)' "$work/
 run nohang mufu VGPU_HOST_GPU=relaxed VGPU_HOST_GPU_VERIFY=1 VGPU_HOST_GPU_TIMEOUT=30 STUB_CARD_OK=1 STUB_SYNC_MS=50 "${reach[@]}" || { echo "FAIL: a launch inside its time limit ended the process"; tail -3 "$work/nohang.err"; fails=1; }
 grep -q '^cuLaunchKernel$' "$work/nohang.log" || { echo "FAIL: the run inside the time limit launched nothing on the stand-in card"; fails=1; }
 diff -q "$work/off_mufu.out" "$work/nohang.out" > /dev/null || { echo "FAIL: the time limit changes the output"; fails=1; }
+# 16. verify with contended atomics in the simulator.
+env VGPU_GPU="$profile" VGPU_THREADS=4 LD_LIBRARY_PATH="$shim" "$work/prog" hist > "$work/off_hist.out" 2> "$work/off_hist.err" || { echo "FAIL: the hist run with the mode off failed"; exit 1; }
+for m in exact relaxed; do
+  for i in 1 2 3 4 5; do
+    run "hist_$m" hist VGPU_HOST_GPU=$m VGPU_HOST_GPU_VERIFY=1 STUB_CARD_OK=1 "${reach[@]}" || { echo "FAIL: the $m verify run of hist failed"; fails=1; }
+    diff -q "$work/off_hist.out" "$work/hist_$m.out" > /dev/null || { echo "FAIL: $m verify changes the sums of an integer reduction (run $i): the simulator lost updates"; fails=1; break; }
+  done
+  grep -q '^cuLaunchKernel$' "$work/hist_$m.log" || { echo "FAIL: the $m verify run of hist launched nothing on the stand-in card"; fails=1; }
+done
 (( fails == 0 )) && { echo "PASS: first launch $first ms against a driver start of $init_ms ms; driver calls in the big run: $(calls on_big)"; exit 0; }
 exit 1

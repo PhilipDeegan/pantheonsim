@@ -785,8 +785,18 @@ void Runtime::before_simulated(MemoryManager& mem) {
     return;
   }
   std::lock_guard<GateLock> g(impl_->mu);
-  if (impl_->verify_card_ran) {   // verifying: this launch already ran on the card and the simulator runs it too; the card's copy stays valid
+  if (impl_->verify_card_ran) {
+    // Verifying: this launch already ran on the card and the simulator runs it now, on its own memory, which is the truth. The card's copy is given up
+    // (nothing is pulled). Until Round sp59 it was kept valid, which was wrong twice over: the simulator then ran its launch through the gate's slow
+    // path, where an atomic of one host thread could lose the update of another (HeCBench atomicAggregate printed FAIL under VERIFY with 4 host threads
+    // and PASS with 1), and the next launch on the card started from the card's own earlier results instead of the simulator's, so in relaxed mode the
+    // differences of one launch carried into the next. The price is that a verify run pushes all live memory before every launch.
     impl_->verify_card_ran = false;
+    for (auto& [b, a] : impl_->res) {
+      if (a.slot->load(std::memory_order_relaxed) == 0) continue;
+      a.r = Residency(a.r.chunks());
+      impl_->update_slot(a);
+    }
     return;
   }
   impl_->reset_for_simulator();
