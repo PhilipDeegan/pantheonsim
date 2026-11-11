@@ -1,0 +1,9 @@
+# build/test_jit_resid (the final build): the matrix test's line
+  matrix: 3 units, 10080 comparisons with the plain form (7 forms, linking off and on), 262 reference runs entered after a stop op, 171 stopped at one, 652 linked runs that went on past a branch or cont op, 0 failures
+[ PASS ] jit_every_combination_of_linking_fusing_residence_and_specialisation_equals_the_plain_form
+7/7 tests passed
+# VGPU_JIT_MUTANT=res_stop_keep build/test_jit_resid combination (the bug put back)
+  matrix: 3 units, 10080 comparisons with the plain form (7 forms, linking off and on), 262 reference runs entered after a stop op, 171 stopped at one, 652 linked runs that went on past a branch or cont op, 266 failures
+[ FAIL ] jit_every_combination_of_linking_fusing_residence_and_specialisation_equals_the_plain_form
+unit 0 region 0 trial 10 (entry 11, group 4294967295, flags 4): linking 0, residence 1, specialisation 0, fused runs 0 differs from the plain form: R differs, p differs, exit 14/14, log differs, threw 0/0
+0/1 tests passed

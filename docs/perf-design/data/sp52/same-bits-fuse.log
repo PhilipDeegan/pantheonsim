@@ -1,0 +1,8 @@
+hecbench/black-scholes-cuda        thr=1 b:jit:VGPU_JIT_LINK=1;VGPU_JIT_FUSE=1 cold  same
+hecbench/black-scholes-cuda        thr=1 b:jit:VGPU_JIT_LINK=1;VGPU_JIT_FUSE=1 warm  same
+rodinia/gaussian                   thr=1 b:jit:VGPU_JIT_LINK=1;VGPU_JIT_FUSE=1 cold  same
+rodinia/gaussian                   thr=1 b:jit:VGPU_JIT_LINK=1;VGPU_JIT_FUSE=1 warm  same
+rodinia/hotspot                    thr=1 b:jit:VGPU_JIT_LINK=1;VGPU_JIT_FUSE=1 cold  same
+rodinia/hotspot                    thr=1 b:jit:VGPU_JIT_LINK=1;VGPU_JIT_FUSE=1 warm  same
+DIFFERENCES: 0
+SAME_DONE

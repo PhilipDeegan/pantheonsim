@@ -1,0 +1,16 @@
+test_jit rc=0 secs=63 
+test_jit_share rc=0 secs=58 
+test_jit_resid rc=0 secs=78   graph: 6 units, 2880 runs, 2120 left inside the region, 572 outside it, 2430 with a branch or cont op taken, 188 threw, 0 failures   link: 6 units, 4320 runs, 1050 of them linked (3932 links: 373 splits, 223 BSSYs, 174 EXITs no lane took, 1300 CALLs, 116 RETs, 600 counted by the spin rule; 164 runs linked on after a split), 131 stopped by the spin rule, 683 by the other lanes' address, 195 threw, 0 failures 
+test_sass_chain_cont rc=0 secs=12 
+test_sass_chain_cont_jit rc=0 secs=30 
+test_sass_chain_cont_jit_link rc=0 secs=45   linked inside generated code: 3610 branches and register-only ops 
+test_sass_store_gate rc=0 secs=31 
+test_sass_store_gate_jit rc=0 secs=11 
+test_sass_store_gate_jit_link rc=0 secs=24 
+test_sass_alu_runs rc=0 secs=19 
+test_sass_alu_runs_jit rc=0 secs=332 
+test_sass_alu_runs_jit_link rc=0 secs=341 
+test_sass_dispatch_counts rc=0 secs=0 
+test_sass_dispatch_counts_jit rc=0 secs=91 
+test_sass_dispatch_counts_jit_link rc=0 secs=101 
+TESTS_DONE

@@ -755,6 +755,9 @@ class Runner {
   // The special registers a handler fills a warp's lanes with in one pass (S2R of TID.X/Y/Z, LANEID, CTAID, NTID): the lanes of
   // `ex` of d, exactly the values sreg() gives them one by one; false for any other register.
   bool tier_sreg_fill(const Block& blk, const Warp& w, unsigned idx, uint32_t* d, Mask ex) const;
+  bool jit_exit_none(Block& blk, const Warp& w);   // tier_ops.inc: an EXIT no lane of the group takes, for generated code (linking)
+  bool jit_call_ok(uint64_t target) const;         // tier_ops.inc: a CALL.REL's target is plain code, not a function the simulator provides
+  int64_t jit_ret_target(Warp& w, unsigned r, Mask ex, Mask group, uint64_t base, uint64_t count, uint64_t pc0) const;   // tier_ops.inc: where a RET takes the whole group
   void tier_exec_mem(Block& blk, Warp& w, const Instr& ins, Mask ex) { exec_mem(blk, w, ins, ex); }
   uint32_t tier_cbank32(unsigned bank, uint64_t offset) const { return cbank32(bank, offset); }
   void tier_exec_float(Block& blk, Warp& w, const Instr& ins, Mask ex) { exec_float(blk, w, ins, ex); }
@@ -918,6 +921,7 @@ class Runner {
   // no per-instruction trace. tier_stats_: VGPU_TIER_STATS=1 counts what ran where.
   bool tier_ = false;
   bool tier_stats_ = false;
+  const bool jit_link_ = jit::link_requested();   // VGPU_JIT_LINK=1: linking in generated code (jit.hpp, Ctx::olo)
   bool tier_chain_ = true;   // VGPU_TIER_CHAIN=0: one run per call of step_warp, as the interpreter's (tier_ops.inc)
   std::vector<uint8_t> bank0_;
   const Module::KernelStatics* ks_ = nullptr;

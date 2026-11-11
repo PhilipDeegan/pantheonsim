@@ -11,6 +11,7 @@
 //   * two warps that each load, add and store one word in a loop of S2Rs, 3000 times: where the 4096-call turns end decides which updates
 //     are lost, so the final word and the clocks agree only if the saved calls are counted as the interpreter's are.
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -23,6 +24,8 @@
 #include "vgpu/sass/exec.hpp"
 #include "vgpu/sass/sass.hpp"
 #include "vtest.hpp"
+
+#include "sass/jit.hpp"   // (the statistics of tier 2, for the linking check)
 
 using namespace vgpu;
 
@@ -205,6 +208,235 @@ std::vector<Insn> loop_kernel(unsigned iters, unsigned s2rs) {
   return c;
 }
 
+// A warp in two groups that loop apart (round sp52: the run loop's chain between the passes of a diverged warp, which tier 2 with VGPU_JIT_LINK=1 takes over
+// inside generated code). Lanes 16..31 jump ahead to their own loop (B) and wait there while lanes 0..15, at the lower address, run theirs (A): every pass of
+// A's ends at an S2R or at the branch back, and the chain picks A again because it stands below B; each taken branch back counts towards the spin rule, and
+// the 64th lets B in. After its loop A jumps over B's code to the tail (above B: B runs first, and the two meet at the tail), or, with `meet`, to B's first
+// instruction (the groups meet there and run loop B together). Both loops update one shared word, so with two warps the place where a 4096-call turn ends
+// decides which updates are lost; every thread stores the clock and its lane.
+std::vector<Insn> two_loops_kernel(unsigned iters_a, unsigned iters_b, unsigned s2rs, bool meet) {
+  std::vector<Insn> c;
+  c.push_back(s2r_tid(0));
+  c.push_back(make(0x000fc60000000f00ull, 0x0000580000007a02ull | uint64_t{12} << 16, "MOV R12, c[0x0][0x160]"));
+  c.push_back(make(0x000fc60000000f00ull, 0x0000590000007a02ull | uint64_t{13} << 16, "MOV R13, c[0x0][0x164]"));
+  c.push_back(imad_wide_i(14, 0, kStride, 12));
+  c.push_back(s2r_lane(4));
+  c.push_back(movi(5, iters_a));
+  c.push_back(isetp_ge(4, 16));
+  const size_t split = c.size();
+  c.push_back(exit_());   // (placeholder: the branch to loop B)
+  Insn dec = iadd3i(5, 5, 0xffffffffu, kRZ);
+  dec.text = "IADD3 R5, R5, -0x1, RZ";
+  const auto loop = [&] {
+    const int top = static_cast<int>(c.size());
+    c.push_back(ldg(1, 12));
+    for (unsigned i = 0; i < s2rs; ++i) c.push_back(s2r_lane(2));
+    c.push_back(iadd3i(1, 1, 1, kRZ));
+    c.push_back(stg(12, 1, 0));
+    c.push_back(dec);
+    c.push_back(isetp_ge(5, 1));
+    c.push_back(bra_p0(static_cast<int>(c.size()), top));
+  };
+  loop();   // A
+  c.push_back(isetp_ge(4, 0));   // (every lane: the branch below is taken by the whole group)
+  const size_t leave_a = c.size();
+  c.push_back(exit_());   // (placeholder: A's branch over B's code, or into it)
+  const int setup_b = static_cast<int>(c.size());
+  c.push_back(movi(5, iters_b));
+  loop();   // B
+  const int tail = static_cast<int>(c.size());
+  c.push_back(cs2r_clock(3));
+  c.push_back(stg(14, 3, 4));
+  c.push_back(stg(14, 2, 8));
+  c.push_back(exit_());
+  c[split] = bra_p0(static_cast<int>(split), setup_b);
+  c[leave_a] = bra_p0(static_cast<int>(leave_a), meet ? setup_b : tail);
+  return c;
+}
+
+// BSSY Bb, <the instruction at index `to`> and BSYNC Bb (no text: the test checks what they decode to).
+Insn bssy(unsigned b, int from, int to) {
+  const uint64_t off = static_cast<uint64_t>(int64_t{16} * (to - from - 1)) / 4;
+  return make(0x000fe20003800000ull, 0x7945ull | uint64_t{b} << 16 | (off & 0x3fffffffull) << 34, "");
+}
+Insn bsync(unsigned b) { return make(0x000fea0003800000ull, 0x7941ull | uint64_t{b} << 16, ""); }
+
+// The same two loops inside a BSSY / BSYNC pair, as a compiler lays out an if and its else: every lane joins barrier B0 before the warp splits, loop A
+// (lanes 0..15) falls into the join, a BSYNC B0, and loop B (lanes 16..31, at the higher addresses) branches back to it. The group that gets there first
+// waits at the BSYNC for the other: it may not run the tail alone, which it would if the BSSY had not entered the lanes in the barrier (with linking the BSSY
+// is an op of a generated region, and entering them is the host's call).
+std::vector<Insn> joined_loops_kernel(unsigned iters_a, unsigned iters_b, unsigned s2rs) {
+  std::vector<Insn> c;
+  c.push_back(s2r_tid(0));
+  c.push_back(make(0x000fc60000000f00ull, 0x0000580000007a02ull | uint64_t{12} << 16, "MOV R12, c[0x0][0x160]"));
+  c.push_back(make(0x000fc60000000f00ull, 0x0000590000007a02ull | uint64_t{13} << 16, "MOV R13, c[0x0][0x164]"));
+  c.push_back(imad_wide_i(14, 0, kStride, 12));
+  c.push_back(s2r_lane(4));
+  c.push_back(movi(5, iters_a));
+  const size_t enter = c.size();
+  c.push_back(exit_());   // (placeholder: the BSSY)
+  c.push_back(isetp_ge(4, 16));
+  const size_t split = c.size();
+  c.push_back(exit_());   // (placeholder: the branch to loop B)
+  Insn dec = iadd3i(5, 5, 0xffffffffu, kRZ);
+  dec.text = "IADD3 R5, R5, -0x1, RZ";
+  const auto loop = [&] {
+    const int top = static_cast<int>(c.size());
+    c.push_back(ldg(1, 12));
+    for (unsigned i = 0; i < s2rs; ++i) c.push_back(s2r_lane(2));
+    c.push_back(iadd3i(1, 1, 1, kRZ));
+    c.push_back(stg(12, 1, 0));
+    c.push_back(dec);
+    c.push_back(isetp_ge(5, 1));
+    c.push_back(bra_p0(static_cast<int>(c.size()), top));
+  };
+  loop();   // A
+  const int join = static_cast<int>(c.size());
+  c.push_back(bsync(0));
+  c.push_back(cs2r_clock(3));
+  c.push_back(stg(14, 3, 4));
+  c.push_back(stg(14, 2, 8));
+  c.push_back(exit_());
+  const int setup_b = static_cast<int>(c.size());
+  c.push_back(movi(5, iters_b));
+  loop();   // B
+  c.push_back(isetp_ge(4, 0));   // (every lane: the branch back to the join is taken by the whole group)
+  c.push_back(bra_p0(static_cast<int>(c.size()), join));
+  c.push_back(exit_());   // (never reached: a section's last instruction is not a straight one)
+  c[enter] = bssy(0, static_cast<int>(enter), join);
+  c[split] = bra_p0(static_cast<int>(split), setup_b);
+  return c;
+}
+
+// An if and its else inside a loop (round sp53: BSYNC, which tier 2 with linking runs inside generated code). Every iteration the warp joins barrier B0, the
+// lanes of lane id >= `ge` branch to the else part (above the tail), the others fall through the then part into the join, a BSYNC B0, and wait there; the
+// chain then runs the else group, which branches back to the join, completes the barrier and releases everyone: the joined warp counts the iteration and
+// branches back. So a diverged warp runs the BSYNC twice an iteration: once to wait (the next group is another one, standing elsewhere) and once to release
+// (the next group is the joined lanes at the next op). With `ge` 0 or above 31 the warp never splits and the BSYNC releases at once. Both parts update one
+// shared word, so with two warps the place where a 4096-call turn ends decides which updates are lost: the BSYNC's call must be charged as the chain's.
+// With `side` below 32 the lanes of lane id >= `side` never enter the loop: they branch to a loop of their own above everything else (`side_iters` times
+// the same update) before the first BSSY, so they are no lanes of the barrier, and while the others go round the diamond they are runnable lanes that stand
+// elsewhere: after every BSYNC the group that goes on has other lanes above it (the link bit, their lowest place), each of its branches back counts
+// towards the spin rule, and the 64th lets the side loop in.
+std::vector<Insn> diamond_loop_kernel(unsigned iters, unsigned ge, unsigned s2rs, unsigned side = 99, unsigned side_iters = 0) {
+  std::vector<Insn> c;
+  c.push_back(s2r_tid(0));
+  c.push_back(make(0x000fc60000000f00ull, 0x0000580000007a02ull | uint64_t{12} << 16, "MOV R12, c[0x0][0x160]"));
+  c.push_back(make(0x000fc60000000f00ull, 0x0000590000007a02ull | uint64_t{13} << 16, "MOV R13, c[0x0][0x164]"));
+  c.push_back(imad_wide_i(14, 0, kStride, 12));
+  c.push_back(s2r_lane(4));
+  c.push_back(movi(5, iters));
+  c.push_back(isetp_ge(4, side));
+  const size_t aside = c.size();
+  c.push_back(exit_());   // (placeholder: the branch to the side loop)
+  const int top = static_cast<int>(c.size());
+  const size_t enter = c.size();
+  c.push_back(exit_());   // (placeholder: the BSSY)
+  c.push_back(isetp_ge(4, ge));
+  const size_t split = c.size();
+  c.push_back(exit_());   // (placeholder: the branch to the else part)
+  const auto part = [&](uint32_t add) {
+    c.push_back(ldg(1, 12));
+    for (unsigned i = 0; i < s2rs; ++i) c.push_back(s2r_lane(2));
+    c.push_back(iadd3i(1, 1, add, kRZ));
+    c.push_back(stg(12, 1, 0));
+  };
+  part(1);   // then
+  const int join = static_cast<int>(c.size());
+  c.push_back(bsync(0));
+  Insn dec = iadd3i(5, 5, 0xffffffffu, kRZ);
+  dec.text = "IADD3 R5, R5, -0x1, RZ";
+  c.push_back(dec);
+  c.push_back(isetp_ge(5, 1));
+  c.push_back(bra_p0(static_cast<int>(c.size()), top));
+  const int tail = static_cast<int>(c.size());
+  c.push_back(cs2r_clock(3));
+  c.push_back(stg(14, 3, 4));
+  c.push_back(stg(14, 2, 8));
+  c.push_back(exit_());
+  const int else_ = static_cast<int>(c.size());
+  part(2);   // else
+  c.push_back(isetp_ge(4, 0));   // (every lane: the branch back to the join is taken by the whole group)
+  c.push_back(bra_p0(static_cast<int>(c.size()), join));
+  const int side_setup = static_cast<int>(c.size());
+  c.push_back(movi(5, side_iters));
+  {
+    const int side_top = static_cast<int>(c.size());
+    part(3);
+    c.push_back(dec);
+    c.push_back(isetp_ge(5, 1));
+    c.push_back(bra_p0(static_cast<int>(c.size()), side_top));
+  }
+  c.push_back(isetp_ge(4, 0));
+  c.push_back(bra_p0(static_cast<int>(c.size()), tail));
+  c.push_back(exit_());   // (never reached: a section's last instruction is not a straight one)
+  c[aside] = bra_p0(static_cast<int>(aside), side_setup);
+  c[enter] = bssy(0, static_cast<int>(enter), join);
+  c[split] = bra_p0(static_cast<int>(split), else_);
+  return c;
+}
+
+// CALL.REL.NOINC <the instruction at index `to`> and RET.REL.NODEC Rr (no text: the test checks what they decode to).
+Insn call_rel(int from, int to) {
+  const int64_t off = int64_t{16} * (to - from - 1);
+  return make(0x000fc00003800000ull | (off < 0 ? 0x3ffffull : 0ull), 0x7944ull | (static_cast<uint64_t>(off) & 0xffffffffull) << 32, "");
+}
+Insn ret_rel(unsigned r) { return make(0x000fc00003800000ull, 0x7950ull | uint64_t{r} << 24, ""); }
+
+// A loop that calls a function (round sp52: CALL.REL and RET.REL, which tier 2 with linking runs inside generated code). The function loads the shared
+// word, runs S2Rs, adds one and stores it; it returns through R8:R9, which the caller sets before each call as a compiler does. Lanes 16..31 make `more`
+// more iterations, so the branch back splits the warp once: the half that goes on loops, calls and returns while the other half waits at the tail.
+// With `fn_low` the function lies below the loop (the calls and returns of the half that goes on stay below the waiting half: the chain picks it again);
+// without, it lies above the tail (the chain picks the waiting half first, at every call).
+std::vector<Insn> call_kernel(unsigned iters, unsigned more, unsigned s2rs, bool fn_low) {
+  std::vector<Insn> c;
+  c.push_back(s2r_tid(0));
+  c.push_back(make(0x000fc60000000f00ull, 0x0000580000007a02ull | uint64_t{12} << 16, "MOV R12, c[0x0][0x160]"));
+  c.push_back(make(0x000fc60000000f00ull, 0x0000590000007a02ull | uint64_t{13} << 16, "MOV R13, c[0x0][0x164]"));
+  c.push_back(imad_wide_i(14, 0, kStride, 12));
+  c.push_back(s2r_lane(4));
+  c.push_back(movi(5, iters));
+  c.push_back(movi(9, 0));
+  c.push_back(isetp_ge(4, 16));
+  c.push_back(iadd3i(5, 5, more, kRZ, 0));   // @P0: lanes 16..31
+  int fn = -1;
+  const auto function = [&] {
+    fn = static_cast<int>(c.size());
+    c.push_back(ldg(1, 12));
+    for (unsigned i = 0; i < s2rs; ++i) c.push_back(s2r_lane(2));
+    c.push_back(iadd3i(1, 1, 1, kRZ));
+    c.push_back(stg(12, 1, 0));
+    c.push_back(ret_rel(8));
+  };
+  size_t skip = 0;
+  if (fn_low) {
+    c.push_back(isetp_ge(4, 0));   // (every lane: the branch over the function is taken by the whole warp)
+    skip = c.size();
+    c.push_back(exit_());   // (placeholder)
+    function();
+    c[skip] = bra_p0(static_cast<int>(skip), static_cast<int>(c.size()));
+  }
+  const int top = static_cast<int>(c.size());
+  const size_t ra = c.size();
+  c.push_back(exit_());   // (placeholder: MOV R8, <the address after the call>)
+  const size_t call = c.size();
+  c.push_back(exit_());   // (placeholder: the call)
+  c[ra] = movi(8, 16u * static_cast<uint32_t>(c.size()));
+  Insn dec = iadd3i(5, 5, 0xffffffffu, kRZ);
+  dec.text = "IADD3 R5, R5, -0x1, RZ";
+  c.push_back(dec);
+  c.push_back(isetp_ge(5, 1));
+  c.push_back(bra_p0(static_cast<int>(c.size()), top));
+  c.push_back(cs2r_clock(3));
+  c.push_back(stg(14, 3, 4));
+  c.push_back(stg(14, 2, 8));
+  c.push_back(exit_());
+  if (!fn_low) function();
+  c.push_back(exit_());   // (never reached: a section's last instruction is not a straight one)
+  c[call] = call_rel(static_cast<int>(call), fn);
+  return c;
+}
+
 struct Result {
   std::vector<uint32_t> out;
   exec::LaunchStats stats;
@@ -298,6 +530,101 @@ VTEST(a_branch_the_whole_group_takes_or_none_of_it_lands_where_the_chain_would_s
   compare(branch_kernel(16, true), 32, "guard on half, condition false");
   compare(branch_kernel(0, true), 32, "guard on all, condition false");
   compare(branch_kernel(0, false), 40, "a warp and a part of one");
+}
+
+VTEST(the_groups_of_a_diverged_warp_loop_apart_and_meet_where_the_chain_picks_them) {
+  for (const bool meet : {false, true}) {
+    const std::string m = meet ? ", the groups meet at loop B" : ", the groups meet at the tail";
+    for (unsigned s2rs : {1u, 3u}) {
+      compare(two_loops_kernel(5, 7, s2rs, meet), 32, "5 and 7 iterations, " + std::to_string(s2rs) + " S2Rs" + m);
+      compare(two_loops_kernel(150, 3, s2rs, meet), 32, "150 and 3 iterations (the spin rule lets the other group in), " + std::to_string(s2rs) + " S2Rs" + m);
+      compare(two_loops_kernel(3, 150, s2rs, meet), 32, "3 and 150 iterations, " + std::to_string(s2rs) + " S2Rs" + m);
+    }
+    compare(two_loops_kernel(700, 900, 2, meet), 64, "two warps, turns end inside the loops" + m);
+    compare(two_loops_kernel(40, 90, 1, meet), 40, "a warp and a part of one" + m);
+    compare(two_loops_kernel(63, 64, 1, meet), 32, "63 and 64 iterations" + m);
+    compare(two_loops_kernel(64, 65, 1, meet), 32, "64 and 65 iterations" + m);
+  }
+  // The same loops between a BSSY and the BSYNC both groups come to.
+  {
+    const std::vector<Insn> k = joined_loops_kernel(5, 7, 1);
+    unsigned bssys = 0, bsyncs = 0;
+    for (size_t i = 0; i < k.size(); ++i) {
+      const sass::Instr ins = sass::decode(k[i].w, 16 * i, 86);
+      bssys += ins.op == sass::Op::BSSY;
+      bsyncs += ins.op == sass::Op::BSYNC;
+    }
+    VCHECK_EQ(bssys, 1u);
+    VCHECK_EQ(bsyncs, 1u);
+  }
+  for (unsigned s2rs : {1u, 3u}) {
+    compare(joined_loops_kernel(5, 7, s2rs), 32, "joined, 5 and 7 iterations, " + std::to_string(s2rs) + " S2Rs");
+    compare(joined_loops_kernel(150, 3, s2rs), 32, "joined, 150 and 3 iterations, " + std::to_string(s2rs) + " S2Rs");
+    compare(joined_loops_kernel(3, 150, s2rs), 32, "joined, 3 and 150 iterations, " + std::to_string(s2rs) + " S2Rs");
+  }
+  compare(joined_loops_kernel(700, 900, 2), 64, "joined, two warps, turns end inside the loops");
+  compare(joined_loops_kernel(40, 90, 1), 40, "joined, a warp and a part of one");
+  // A loop that calls a function and returns from it, the warp split once by the loop's branch back.
+  for (const bool fn_low : {false, true}) {
+    const std::vector<Insn> k = call_kernel(5, 7, 1, fn_low);
+    unsigned calls = 0, rets = 0;
+    for (size_t i = 0; i < k.size(); ++i) {
+      const sass::Instr ins = sass::decode(k[i].w, 16 * i, 86);
+      calls += ins.op == sass::Op::CALL;
+      rets += ins.op == sass::Op::RET;
+    }
+    VCHECK_EQ(calls, 1u);
+    VCHECK_EQ(rets, 1u);
+    const std::string m = fn_low ? ", the function below the loop" : ", the function above the tail";
+    for (unsigned s2rs : {1u, 3u}) {
+      compare(call_kernel(5, 7, s2rs, fn_low), 32, "calls, 5 and 12 iterations, " + std::to_string(s2rs) + " S2Rs" + m);
+      compare(call_kernel(100, 150, s2rs, fn_low), 32, "calls, 100 and 250 iterations, " + std::to_string(s2rs) + " S2Rs" + m);
+    }
+    compare(call_kernel(900, 300, 2, fn_low), 64, "calls, two warps, turns end inside the loops" + m);
+    compare(call_kernel(40, 0, 1, fn_low), 32, "calls, the warp never splits" + m);
+    compare(call_kernel(40, 30, 1, fn_low), 40, "calls, a warp and a part of one" + m);
+  }
+  // An if and its else in a loop: the BSYNC waits and releases every iteration (round sp53).
+  for (unsigned s2rs : {1u, 2u}) {
+    compare(diamond_loop_kernel(40, 16, s2rs), 32, "diamond, the warp in halves, " + std::to_string(s2rs) + " S2Rs");
+    compare(diamond_loop_kernel(40, 0, s2rs), 32, "diamond, every lane in the else part, " + std::to_string(s2rs) + " S2Rs");
+    compare(diamond_loop_kernel(40, 99, s2rs), 32, "diamond, every lane in the then part, " + std::to_string(s2rs) + " S2Rs");
+    compare(diamond_loop_kernel(40, 31, s2rs), 32, "diamond, one lane in the else part, " + std::to_string(s2rs) + " S2Rs");
+  }
+  compare(diamond_loop_kernel(900, 16, 2), 64, "diamond, two warps, turns end inside the loop");
+  compare(diamond_loop_kernel(900, 5, 1), 128, "diamond, four warps");
+  compare(diamond_loop_kernel(60, 16, 1), 40, "diamond, a warp and a part of one");
+  compare(diamond_loop_kernel(60, 4, 1), 20, "diamond, a part of a warp");
+  // ... with a third group in a loop of its own above the diamond: other lanes can run after every BSYNC.
+  for (unsigned s2rs : {1u, 2u}) {
+    compare(diamond_loop_kernel(40, 8, s2rs, 24, 30), 32, "diamond beside a side loop, " + std::to_string(s2rs) + " S2Rs");
+    compare(diamond_loop_kernel(200, 8, s2rs, 24, 150), 32, "diamond beside a side loop, the spin rule lets it in, " + std::to_string(s2rs) + " S2Rs");
+    compare(diamond_loop_kernel(200, 0, s2rs, 16, 150), 32, "diamond never split, beside a side loop, " + std::to_string(s2rs) + " S2Rs");
+  }
+  compare(diamond_loop_kernel(700, 8, 2, 24, 500), 64, "diamond beside a side loop, two warps");
+  compare(diamond_loop_kernel(90, 8, 1, 24, 60), 40, "diamond beside a side loop, a warp and a part of one");
+  // With tier 2 and linking asked for (ctest test_sass_chain_cont_jit_link), the generated code must have taken the chain's part: a run in which nothing was
+  // linked would compare equal too. (Counted only with VGPU_JIT_STATS; no compiler on PATH: nothing ran as generated code.)
+  if (sass::jit::requested() && sass::jit::link_requested() && sass::jit::stats_on() && sass::jit::stats().regions_run.load() > 0) {
+    std::printf("  linked inside generated code: %llu branches and register-only ops\n", static_cast<unsigned long long>(sass::jit::stats().linked.load()));
+    VCHECK(sass::jit::stats().linked.load() > 1000);
+    // The loop rule (round sp53): a section with a loop and no BSSY, BSYNC, CALL or RET is generated without linking. The kernels above that loop without a
+    // barrier are such sections (two_loops_kernel, which diverges by a plain branch as no compiler's code does, among them: the legs that check linking in
+    // it run with VGPU_JIT_LINK_RULE=0); the joined, the calling and the diamond kernels are not, and must still have been linked (the checks around this one).
+    {
+      const char* rule = std::getenv("VGPU_JIT_LINK_RULE");
+      const unsigned long long declined = sass::jit::stats().link_declined.load();
+      std::printf("  sections left unlinked by the loop rule: %llu\n", declined);
+      if (rule && rule[0] == '0') VCHECK_EQ(declined, 0ull);
+      else VCHECK(declined >= 10);
+    }
+    if (const char* bs = std::getenv("VGPU_JIT_LINK_BSYNC"); bs && bs[0] == '1') {   // (BSYNC as a region's op is an opt-in of its own: the legs of ctest ask for it)
+      std::printf("  BSYNCs run inside generated code: %llu (%llu went on with another group, %llu ended the pass)\n", static_cast<unsigned long long>(sass::jit::stats().bsyncs.load()),
+                  static_cast<unsigned long long>(sass::jit::stats().bsync_groups.load()), static_cast<unsigned long long>(sass::jit::stats().bsync_over.load()));
+      VCHECK(sass::jit::stats().bsyncs.load() > 1000);
+      VCHECK(sass::jit::stats().bsync_groups.load() > 500);
+    }
+  }
 }
 
 VTEST(one_warp_alone_gives_the_same_words_and_counters) { compare(loop_kernel(2000, 3), 32, "one warp"); }
