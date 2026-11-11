@@ -33,7 +33,6 @@ asm(".pushsection .text,\"ax\",@progbits\n.p2align 12\n.popsection");
 #include <bit>
 #include <bitset>
 #include <cerrno>
-#include <chrono>
 #include <cfenv>
 #include <cmath>
 #include <cstdio>
@@ -1671,7 +1670,7 @@ exec::LaunchStats Runner::run() {
     bool done = false;
     if (exact > 1) {
       // (the width rule of the launches below: a launch too small to pay for a hand-off stays on this thread)
-      exec::LaunchWidth width(&k_, units, exact, true);
+      exec::LaunchWidth width(&k_, units, exact);
       done = exact > 1 && run_exact(exact, units);
       if (!done) {
         solo = true;
@@ -1854,18 +1853,17 @@ static std::string stall_summary(const Block& blk) {
 }
 
 namespace {
-std::atomic<uint64_t> g_exact_trials{0}, g_exact_committed{0}, g_exact_stopped{0}, g_exact_again{0}, g_exact_scouted{0};
+std::atomic<uint64_t> g_exact_trials{0}, g_exact_committed{0}, g_exact_stopped{0}, g_exact_again{0};
 
 // VGPU_EXACT_LOG=<file>: a line per launch that asked for a trial (kernel, blocks, threads, what happened, why, bytes kept for
-// undoing, 4 KiB pages touched, the microseconds the trial took), and a line with "again" before it for each trial of the launch
-// that a coarse note stopped.
+// undoing, 4 KiB pages touched), and a line with "again" before it for each trial of the launch that a coarse note stopped.
 [[gnu::cold, gnu::noinline]] void exact_log(const char* path, const std::string& kernel, uint64_t units, unsigned threads, const char* what,
-                                            const char* why, uint64_t kept, uint64_t pages, uint64_t micros) {
+                                            const char* why, uint64_t kept, uint64_t pages) {
   static std::mutex mu;
   std::lock_guard<std::mutex> g(mu);
   if (FILE* f = std::fopen(path, "a")) {
-    std::fprintf(f, "%s\t%llu\t%u\t%s\t%s\t%llu\t%llu\t%llu\n", kernel.c_str(), static_cast<unsigned long long>(units), threads, what, why,
-                 static_cast<unsigned long long>(kept), static_cast<unsigned long long>(pages), static_cast<unsigned long long>(micros));
+    std::fprintf(f, "%s\t%llu\t%u\t%s\t%s\t%llu\t%llu\n", kernel.c_str(), static_cast<unsigned long long>(units), threads, what, why,
+                 static_cast<unsigned long long>(kept), static_cast<unsigned long long>(pages));
     std::fclose(f);
   }
 }
@@ -1882,11 +1880,11 @@ std::atomic<uint64_t> g_exact_trials{0}, g_exact_committed{0}, g_exact_stopped{0
   std::fprintf(f,
                "%s\tblocks=%llu\tthreads=%u\tattempt=%u\tend=%s\thooks=%llu\tpages=%llu\tpages_read=%llu\tpages_shared=%llu\tpages_by_word=%llu"
                "\tpages_coarse=%llu\tpage_looks=%llu\twords_read=%llu\twords_read_first=%llu\twords_read_shared=%llu\twords_written=%llu"
-               "\twords_written_first=%llu\tkeeps=%llu\tkept_bytes=%llu\truns_known=%llu\tword_pages=%llu\tlines_by_word=%llu\tlines_one_block=%llu\n",
+               "\twords_written_first=%llu\tkeeps=%llu\tkept_bytes=%llu\truns_known=%llu\tword_pages=%llu\n",
                kernel.c_str(), u(units), threads, attempt, out.committed ? "committed" : out.coarse ? "coarse" : "stopped", u(s.hooks),
                u(out.shadow_pages), u(s.pages_read), u(s.pages_shared), u(s.pages_by_word), u(s.pages_coarse), u(s.page_looks), u(s.words_read),
                u(s.words_read_first), u(s.words_read_shared), u(s.words_written), u(s.words_written_first), u(s.keeps), u(out.kept_bytes),
-               u(s.runs_known), u(s.word_pages), u(s.lines_by_word), u(s.lines_one_block));
+               u(s.runs_known), u(s.word_pages));
   std::fclose(f);
 }
 }  // namespace
@@ -1894,7 +1892,7 @@ std::atomic<uint64_t> g_exact_trials{0}, g_exact_committed{0}, g_exact_stopped{0
 [[gnu::cold, gnu::noinline]] bool Runner::run_exact(unsigned threads, uint64_t units) {
   const char* log = env_.exact_log && *env_.exact_log ? env_.exact_log : nullptr;
   const auto skip = [&](const char* why) {
-    if (log) exact_log(log, k_.name, units, threads, "in order", why, 0, 0, 0);
+    if (log) exact_log(log, k_.name, units, threads, "in order", why, 0, 0);
     return false;
   };
   // What a trial cannot stand in for. Each is a launch the order of blocks is visible in by some road other than device memory, or
@@ -1922,23 +1920,11 @@ std::atomic<uint64_t> g_exact_trials{0}, g_exact_committed{0}, g_exact_stopped{0
   // VGPU_EXACT_PAGES=0: every page is noted by word from its first touch (the note of round sp47), for measurements.
   const bool pages_off = env_.exact_pages && env_.exact_pages[0] == '0' && !env_.exact_pages[1];
   static constexpr uint64_t kExactPageBlocks = 8;
-  // The scout: the first trial of a kernel runs block 0 alone, on this thread, before the others start, and what block 0 read by
-  // page and then wrote in is noted by word for the rest of the trial and for the kernel's later ones (MemoryManager::spec_scouted).
-  // Block 0 is the first block of the run in order, so nothing of it is thrown away; it costs the launch one block's time on one
-  // thread, once a kernel, and so is left to launches of enough blocks for that to be a few percent (VGPU_EXACT_SCOUT=0: never).
-  static constexpr uint64_t kExactScoutBlocksPerThread = 32;
-  const bool scout_off = env_.exact_scout && env_.exact_scout[0] == '0' && !env_.exact_scout[1];
-  exec::LaunchStats scout_sum;
   MemoryManager::SpecOutcome out;
   // A trial stopped by a coarse note (a page noted as a whole where words would have told the blocks apart) is run again with
   // that allocation noted by word; after two such, or with nothing to add, every page is. A trial noted by word throughout has
   // no coarse stop, so this ends.
-  std::chrono::steady_clock::time_point began;
-  const auto micros = [&] {
-    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count());
-  };
   for (unsigned attempt = 0;; ++attempt) {
-    if (log) began = std::chrono::steady_clock::now();
     MemoryManager::SpecPlan plan;
     {
       std::lock_guard<std::mutex> g(m_.polling_mu);
@@ -1948,37 +1934,8 @@ std::atomic<uint64_t> g_exact_trials{0}, g_exact_committed{0}, g_exact_stopped{0
     // a page it read, and when the blocks are few and that store comes at a block's end, that is most of the launch.
     if (pages_off || units < kExactPageBlocks) plan.pages = false;
     sums.assign(threads, exec::LaunchStats{});
-    scout_sum = exec::LaunchStats{};
-    const bool scout = plan.pages && !plan.scouted && !scout_off && units >= kExactScoutBlocksPerThread * threads;
     mem_.spec_begin(threads, &plan);
     exact_trial_ = true;
-    if (scout) {
-      {
-        PooledBlock held;
-        mem_.spec_enter(0);
-        const uint64_t i = next.fetch_add(1);
-        try {
-          Block& blk = *held.block;
-          mem_.spec_block(i);
-          init_block(blk, i);
-          blk.worker = 0;
-          while (block_round(blk, 4096))
-            if (mem_.spec_stopped()) throw MemoryManager::SpecStop{};
-          scout_sum.add(blk.st);
-        } catch (...) {
-          mem_.spec_stop("a block failed");
-          held.block.reset();
-        }
-        mem_.spec_leave();
-      }
-      const std::vector<std::pair<uint64_t, uint64_t>> learned = mem_.spec_scouted();
-      std::lock_guard<std::mutex> g(m_.polling_mu);
-      MemoryManager::SpecPlan& kept = m_.exact_plan[k_.name];
-      kept.scouted = true;
-      for (const auto& range : learned)
-        if (std::find(kept.by_word.begin(), kept.by_word.end(), range) == kept.by_word.end()) kept.by_word.push_back(range);
-      g_exact_scouted.fetch_add(1, std::memory_order_relaxed);
-    }
     const auto body = [&](unsigned t) {
       PooledBlock held;
       exec::LaunchStats mine;
@@ -2021,7 +1978,7 @@ std::atomic<uint64_t> g_exact_trials{0}, g_exact_committed{0}, g_exact_stopped{0
       if (added == 0 || attempt >= 2 || kept.by_word.size() > 32) kept.pages = false;
     }
     g_exact_again.fetch_add(1, std::memory_order_relaxed);
-    if (log) exact_log(log, k_.name, units, threads, "again", out.why, out.kept_bytes, out.shadow_pages, micros());
+    if (log) exact_log(log, k_.name, units, threads, "again", out.why, out.kept_bytes, out.shadow_pages);
     next.store(0);   // every block again, on trial
   }
   g_exact_trials.fetch_add(1, std::memory_order_relaxed);
@@ -2036,12 +1993,11 @@ std::atomic<uint64_t> g_exact_trials{0}, g_exact_committed{0}, g_exact_stopped{0
       hold.second = std::min<uint32_t>(hold.second * 2, 4096);
     }
   }
-  if (log) exact_log(log, k_.name, units, threads, out.committed ? "committed" : "stopped", out.why, out.kept_bytes, out.shadow_pages, micros());
+  if (log) exact_log(log, k_.name, units, threads, out.committed ? "committed" : "stopped", out.why, out.kept_bytes, out.shadow_pages);
   if (!out.committed) {
     next.store(0);   // every block again, in order
     return false;
   }
-  stats_.add(scout_sum);
   for (const exec::LaunchStats& s : sums) stats_.add(s);   // (integer sums: the order of adding changes nothing)
   return true;
 }
@@ -2474,8 +2430,7 @@ void ChildRunner::operator()(Child& c, Launches& out) {
 
 ExactCounts exact_counts() {
   return {g_exact_trials.load(std::memory_order_relaxed), g_exact_committed.load(std::memory_order_relaxed),
-          g_exact_stopped.load(std::memory_order_relaxed), g_exact_again.load(std::memory_order_relaxed),
-          g_exact_scouted.load(std::memory_order_relaxed)};
+          g_exact_stopped.load(std::memory_order_relaxed), g_exact_again.load(std::memory_order_relaxed)};
 }
 
 exec::LaunchStats launch(const Module& m, const std::string& kernel, const exec::LaunchConfig& cfg,

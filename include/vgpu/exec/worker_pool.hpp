@@ -106,40 +106,24 @@ void note_busy_ns(uint64_t ns);
 //     skipping the first of a trial, which wakes cold workers; after kTrialLaunches the verdict is made.
 // A verdict that does not pay holds the kernel off for `backoff` launches and doubles `backoff` (to kTrialBackoffMax); one that pays
 // keeps the wide width, and resets `backoff`. Threads change nothing a launch computes: only time moves.
-//
-// A launch whose threads run under a proof (an exact parallel launch, docs/exact-threads.md: `proved`) is judged more strictly. Its
-// alternative is the run in order on one thread, without the proof's cost, and its launches scatter more (each sets a shadow up and
-// takes it down, on every thread), so the best launch of eight says little: the trial pays only if most of its launches (the first
-// left out) took under kProvedPaysBelowPermille of one thread's time (`wins`), and all of them together took no longer than one
-// thread would have (`sum`, in permille of one thread's time, a launch counted as kProvedWorstPermille at most).
 struct PoolTrial {
   uint32_t hold = 0, backoff = 256, n = 0, best = ~0u;
-  uint32_t wins = 0, sum = 0;   // (proved launches only)
 };
 inline constexpr uint32_t kTrialLaunches = 8, kTrialBackoffMin = 256, kTrialBackoffMax = 65536, kTrialPaysBelowPermille = 700;
-inline constexpr uint32_t kProvedPaysBelowPermille = 850, kProvedWorstPermille = 4000;
 // Whether this launch may use the wide width; spends one launch of a hold.
 bool pool_trial_allows(PoolTrial& t);
 // The launch that was on trial took `wall_ns`; one thread would have taken `solo_ns`.
-void pool_trial_note(PoolTrial& t, uint64_t wall_ns, uint64_t solo_ns, bool proved = false);
+void pool_trial_note(PoolTrial& t, uint64_t wall_ns, uint64_t solo_ns);
 
 // Per-kernel use of the two above, for an engine's grid launch. Construct it
 // after the thread count is known and before the blocks run; it lowers
 // `threads` by the cap and, when it ends, records what the launch cost. `key`
 // names the kernel (any address that is stable for it). A request of one
 // thread, or one block, is left alone and not timed.
-//
-// `proved` (an exact parallel launch: `threads` are the threads of a trial under the shadow, and one thread is the run in order
-// without it): what a block costs is then taken from launches that ran on one thread only. A figure from a trial's threads holds
-// the proof's cost and would make every later launch look large enough for the pool, which no launch on one thread would ever
-// correct. Until a launch has run on one thread such a figure counts for half (the proof costs up to as much again), and a launch
-// that half does not carry to the full width runs in order, which measures it; from then on the small launch goes wide on trial
-// only (PoolTrial, the stricter verdict). A figure one thread gave is replaced by a pool's only when the pool's is under three
-// quarters of it (it was too high: a block under the proof costs no less than a block in order), and then counts as a pool's.
 class LaunchWidth {
  public:
   // Out of line on purpose: a launch on one thread, which is most of them, runs the code it always did.
-  [[gnu::noinline]] LaunchWidth(const void* key, uint64_t units, unsigned& threads, bool proved = false);
+  [[gnu::noinline]] LaunchWidth(const void* key, uint64_t units, unsigned& threads);
   [[gnu::noinline]] ~LaunchWidth();
   LaunchWidth(const LaunchWidth&) = delete;
   LaunchWidth& operator=(const LaunchWidth&) = delete;
@@ -151,7 +135,6 @@ class LaunchWidth {
   uint64_t begin_ns_;   // 0: not timed
   uint64_t solo_ns_ = 0;   // what one thread would take, when this launch is on trial
   bool trial_ = false;
-  bool proved_ = false;
 };
 
 }  // namespace vgpu::exec
