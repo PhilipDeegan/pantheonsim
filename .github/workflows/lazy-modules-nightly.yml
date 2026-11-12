@@ -60,6 +60,7 @@ jobs:
       - name: Install toolchain
         if: ${{ !job.container.id }}
         run: |
+          [ ! -x scripts/apt-mirror-fallback.sh ] || scripts/apt-mirror-fallback.sh
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
             build-essential cmake ninja-build g++-12 nvidia-cuda-toolkit nvidia-profiler
