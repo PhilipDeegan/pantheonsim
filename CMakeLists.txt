@@ -1411,7 +1411,7 @@ vgpu_unit_test(test_yamlish)
 vgpu_unit_test(test_check_compare)
 vgpu_unit_test(test_host_gpu_logic)
 vgpu_unit_test(test_host_gpu_ref)
-# Relaxed host-GPU mode's compare by tolerance (include/vgpu/host_gpu_tol.hpp): header-only, no card.
+# Turbo host-GPU mode's compare by tolerance (include/vgpu/host_gpu_tol.hpp): header-only, no card.
 vgpu_unit_test(test_host_gpu_tol)
 vgpu_unit_test(test_card_gate)
 vgpu_unit_test(test_host_gpu_track)
@@ -1557,19 +1557,14 @@ endforeach()
 # test_sass_chain_cont's kernels diverge, loop apart and meet; the same words, counters and clocks as the interpreter, and the linking must have happened.
 # (VGPU_JIT_LINK_RULE=0: every section linked. The loop rule of round sp53 leaves a section with a loop and no BSSY, BSYNC, CALL or RET unlinked, and several of
 # these hand-written kernels are such sections; test_sass_chain_cont_jit_link_rule below runs with the rule and checks what it declines and what it leaves linked.)
-# (VGPU_JIT_LINK_BSYNC=1: BSYNC as a region's op, an opt-in of its own; test_sass_chain_cont checks that the generated code ran its kernels' BSYNCs.)
 foreach(_t test_sass_chain_cont test_sass_store_gate test_sass_alu_runs test_sass_dispatch_counts)
   add_test(NAME ${_t}_jit_link COMMAND ${_t})
   set_tests_properties(${_t}_jit_link PROPERTIES ENVIRONMENT
-    "VGPU_JIT=1;VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_LINK_RULE=0;VGPU_JIT_STATS=1;VGPU_JIT_STATS_FILE=/dev/null;VGPU_JIT_THRESHOLD=1;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-link-${_t}")
+    "VGPU_JIT=1;VGPU_JIT_LINK=1;VGPU_JIT_LINK_RULE=0;VGPU_JIT_STATS=1;VGPU_JIT_STATS_FILE=/dev/null;VGPU_JIT_THRESHOLD=1;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-link-${_t}")
 endforeach()
-# ... and linking as it is by default (BSYNC the run loop's), on the kernels that diverge:
-add_test(NAME test_sass_chain_cont_jit_link_nobsync COMMAND test_sass_chain_cont)
-set_tests_properties(test_sass_chain_cont_jit_link_nobsync PROPERTIES ENVIRONMENT
-  "VGPU_JIT=1;VGPU_JIT_LINK=1;VGPU_JIT_LINK_RULE=0;VGPU_JIT_STATS=1;VGPU_JIT_STATS_FILE=/dev/null;VGPU_JIT_THRESHOLD=1;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-link-nobsync-test_sass_chain_cont")
 add_test(NAME test_sass_chain_cont_jit_link_rule COMMAND test_sass_chain_cont)
 set_tests_properties(test_sass_chain_cont_jit_link_rule PROPERTIES ENVIRONMENT
-  "VGPU_JIT=1;VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_STATS=1;VGPU_JIT_STATS_FILE=/dev/null;VGPU_JIT_THRESHOLD=1;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-link-rule-test_sass_chain_cont")
+  "VGPU_JIT=1;VGPU_JIT_LINK=1;VGPU_JIT_STATS=1;VGPU_JIT_STATS_FILE=/dev/null;VGPU_JIT_THRESHOLD=1;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-link-rule-test_sass_chain_cont")
 vgpu_unit_test(test_sass_s2r_fill)
 # LDGSTS (cp.async): the tier's own handler against the rule and the interpreter, registers, shared memory and counters.
 vgpu_unit_test(test_sass_ldgsts)
@@ -3990,7 +3985,7 @@ set_tests_properties(e2e_host_gpu_stub PROPERTIES
   SKIP_REGULAR_EXPRESSION "^SKIP:"
   TIMEOUT 600)
 
-# The host-GPU benchmark harness (tools/bench/hostgpu/run.py, docs/perf-design/12-host-gpu-relaxed.md): its self-test parses canned summary lines, classes
+# The host-GPU benchmark harness (tools/bench/hostgpu/run.py, docs/perf-design/12-host-gpu-turbo.md): its self-test parses canned summary lines, classes
 # canned outputs, builds the table and kills a child that hangs. No card, no simulator, no nvcc.
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)

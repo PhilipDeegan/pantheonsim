@@ -2,7 +2,7 @@
 // worth a card, `small` the same kernel on a few warps, `mufu` a kernel outside the set (expf); `div`, `rcp`, `divexp` an IEEE division, a bare rcp.approx and a division with an expf (the division idiom: in the set
 // only with VGPU_HOST_GPU_DIV=1, and only when it is the sole thing outside it). It prints the results on stdout, which must not depend on the
 // host-GPU mode, and on stderr how long the first launch took in milliseconds ("first_launch_ms=").
-// For relaxed mode (VGPU_HOST_GPU=relaxed, docs/perf-design/12-host-gpu-relaxed.md): `iatom` an integer atomicAdd whose old value is used (admitted),
+// For turbo mode (VGPU_HOST_GPU=turbo, docs/perf-design/12-host-gpu-turbo.md): `iatom` an integer atomicAdd whose old value is used (admitted),
 // `fatom` a float atomicAdd whose old value is used and `cas` a compare-and-swap (both only with VGPU_HOST_GPU_ATOMICS=1). Each thread's result
 // does not depend on the order the threads run in, so these print the same lines wherever they run. `hist` is an integer reduction onto 64 words (the
 // exact set), for the verify run of step 16: its sums are the same in any order, unless an update is lost. `none` is `acct` with no launch at all: what a

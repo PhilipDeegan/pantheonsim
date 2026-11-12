@@ -60,7 +60,7 @@ struct DeviceGraphLauncher {
 
 struct LaunchEnv;   // vgpu/exec/launch_env.hpp
 
-// A few blocks of a launch, run alone and timed (docs/perf-design/12-host-gpu-relaxed.md, "The first blocks of a launch, timed"). The run is not
+// A few blocks of a launch, run alone and timed (docs/perf-design/12-host-gpu-turbo.md, "The first blocks of a launch, timed"). The run is not
 // a launch: the other blocks are never run. It is made in a copy of the process that is thrown away (the host-GPU mode's sample), and only
 // the SASS engine's plain block loop makes it: a cooperative or clustered launch, and one whose blocks take turns (lockstep), runs no block at all.
 struct LaunchPart {

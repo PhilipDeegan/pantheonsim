@@ -1,4 +1,4 @@
-// Host-GPU relaxed mode: comparing the card's memory with the simulator's by tolerance (docs/perf-design/12-host-gpu-relaxed.md).
+// Host-GPU turbo mode: comparing the card's memory with the simulator's by tolerance (docs/perf-design/12-host-gpu-turbo.md).
 //
 // Device memory has no types, so the compare guesses. Over a range of bytes, for each 4-byte word (aligned by ADDRESS) whose bits differ:
 //   1. read both as binary32: the word passes when |card - sim| <= atol + rtol * |sim|;

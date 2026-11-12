@@ -2,7 +2,7 @@
 # Round sp60b, the card part: run on the rig (one A10G), from the root of the source tree, after the corpora are in ~/corp
 # (tools/bench/real/pack_corpora.sh's layout, the sm_86 binaries built with nvcc 13.0 and -cudart shared).
 #   docs/perf-design/data/sp60b/card-run.sh <stage> [out dir]        stages: build ci ab early exit all
-# Forms of the A/B (tools/bench/hostgpu/run.py): exact and relaxed sample launches (the default); exact0 and relaxed0 do not
+# Forms of the A/B (tools/bench/hostgpu/run.py): exact and turbo sample launches (the default); exact0 and turbo0 do not
 # (VGPU_HOST_GPU_SAMPLE=0: the rule of Round sp59). All four are interleaved, run by run, with the plain simulator.
 set -u
 stage=${1:?stage}
@@ -25,7 +25,7 @@ ci|all)
   # the stand-in-driver test alone, with its output kept: steps 17 to 20 are new and have run nowhere before
   (cd "$build" && ctest -R 'e2e_host_gpu_stub|test_host_gpu_logic|hostgpu_bench_selftest' --output-on-failure) 2>&1 | tee "$out/stub.txt"
   # the proof of the undo over the corpus, on the rig's own build (no card used): every sample undone and compared
-  for f in exact relaxed; do
+  for f in exact turbo; do
     $H --corpora polybench,rodinia,hecbench --skip "$LONG,$HEC_SKIP" --runs 1 --forms sim,$f --env VGPU_HOST_GPU_SAMPLE=check --timeout 300 \
        --json "$out/check-$f.json" --md "$out/check-$f.md" 2>&1 | tail -3
     # (a failed check ends the program with status 86: its row is then not "identical", and the JSON has the status)
@@ -34,16 +34,16 @@ ci|all)
 ab|all)
   # the A/B: 3 runs a form (1 for a program over 30 s in the simulator), medians
   for suite in rodinia polybench hecbench; do
-    $H --corpora $suite --skip "$HEC_SKIP" --runs 3 --long-secs 30 --long-runs 1 --forms sim,exact,exact0,relaxed,relaxed0 --timeout 600 \
+    $H --corpora $suite --skip "$HEC_SKIP" --runs 3 --long-secs 30 --long-runs 1 --forms sim,exact,exact0,turbo,turbo0 --timeout 600 \
        --json "$out/ab-$suite.json" --md "$out/ab-$suite.md" 2>&1 | tee "$out/ab-$suite.txt" | tail -40
   done
   # the launches each sample sent, and what it measured: one run with the log of the programs that have a sampled launch
-  $H --corpora polybench,rodinia,hecbench --skip "$LONG,$HEC_SKIP" --runs 1 --forms sim,exact,relaxed --env VGPU_HOST_GPU_LOG=1 --timeout 300 \
+  $H --corpora polybench,rodinia,hecbench --skip "$LONG,$HEC_SKIP" --runs 1 --forms sim,exact,turbo --env VGPU_HOST_GPU_LOG=1 --timeout 300 \
      --json "$out/log.json" --md "$out/log.md" 2>&1 | tail -3
   ;;&
 early|all)
   # the driver started early, on its thread (an experiment): the short and middling programs, where a start that is not used shows
-  $H --corpora polybench,rodinia --skip "$LONG" --runs 3 --forms sim,exact,relaxed --env VGPU_HOST_GPU_EARLY_START=1 --timeout 300 \
+  $H --corpora polybench,rodinia --skip "$LONG" --runs 3 --forms sim,exact,turbo --env VGPU_HOST_GPU_EARLY_START=1 --timeout 300 \
      --json "$out/early.json" --md "$out/early.md" 2>&1 | tee "$out/early.txt" | tail -30
   ;;&
 exit|all)
@@ -62,7 +62,7 @@ exit|all)
   for early in 0 1 2; do
     one BICG exact $early "$pb" "$pb/BICG"
     one GESUMMV exact $early "$pb" "$pb/GESUMMV"
-    one srad_v2 relaxed $early "$(mktemp -d)" "$rb/srad_v2" 512 512 0 127 0 127 0.5 2
+    one srad_v2 turbo $early "$(mktemp -d)" "$rb/srad_v2" 512 512 0 127 0 127 0.5 2
   done | tee "$out/exit.txt"
   ;;
 esac

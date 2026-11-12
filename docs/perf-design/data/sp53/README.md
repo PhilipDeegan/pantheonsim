@@ -1,5 +1,7 @@
 Data of round sp53 (the section "Round sp53" of `../../rounds/11-rounds-sp36-sp41.md`). Scripts: `scripts/` (its README says what each does).
 
+BSYNC as a region's op (`VGPU_JIT_LINK_BSYNC=1`) was measured in this round, missed its bar and was removed from the code afterwards: the variable no longer exists, and the files and scripts below that name it are the record of that measurement.
+
 SYR2K with linking:
 * `aslr-syr2k-off.json`: unlinked and linked with address-space randomisation off and the stack moved by 0 to 3,072 bytes (round sp52's build).
 * `bisect-syr2k.txt`: what the objects hold, linking feature by feature, for the two forms of the row copy.

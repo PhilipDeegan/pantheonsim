@@ -27,12 +27,12 @@ FORMS = {
     "off": {},
     "exact0": {"VGPU_HOST_GPU": "exact", "VGPU_HOST_GPU_SAMPLE": "0", "VGPU_HOST_GPU_LOG": "1"},
     "exact": {"VGPU_HOST_GPU": "exact", "VGPU_HOST_GPU_LOG": "1"},
-    "relaxed": {"VGPU_HOST_GPU": "relaxed", "VGPU_HOST_GPU_LOG": "1"},
+    "turbo": {"VGPU_HOST_GPU": "turbo", "VGPU_HOST_GPU_LOG": "1"},
     "log": {"VGPU_HOST_GPU": "exact", "VGPU_HOST_GPU_SAMPLE": "log", "VGPU_HOST_GPU_LOG": "1"},
-    "rlog": {"VGPU_HOST_GPU": "relaxed", "VGPU_HOST_GPU_SAMPLE": "log", "VGPU_HOST_GPU_LOG": "1"},
+    "tlog": {"VGPU_HOST_GPU": "turbo", "VGPU_HOST_GPU_SAMPLE": "log", "VGPU_HOST_GPU_LOG": "1"},
     # the stand-in driver refuses the module: a sampled launch is sent, refused, and run by the simulator
     "stub": dict(STUB, VGPU_HOST_GPU="exact"),
-    "rstub": dict(STUB, VGPU_HOST_GPU="relaxed"),
+    "tstub": dict(STUB, VGPU_HOST_GPU="turbo"),
     # a card that holds memory and computes nothing: a sampled launch that is sent leaves the memory as it was before the launch
     "stubnop": dict(STUB, VGPU_HOST_GPU="exact", STUB_CARD_OK="1", STUB_KEEP_MEMORY="1"),
 }
@@ -108,7 +108,7 @@ def run(real, build, cwd, argv, copy_cwd, form_env, threads, timeout, gpu, stub,
                 d[k] = v if k == "kernel" else float(v) if "." in v else int(v)
             rec["launches"].append(d)
 
-        elif re.match(r"host_gpu_(relaxed|refusals|sampled):", line):
+        elif re.match(r"host_gpu_(turbo|refusals|sampled):", line):
             rec[line.split(":")[0]] = dict(kv.split("=", 1) for kv in line.split()[1:])
         elif "mode off" in line or "sent by the time" in line or "did not load the module" in line:
             rec.setdefault("notes", []).append(line[:300])

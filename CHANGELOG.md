@@ -7,26 +7,26 @@ release says what runs and what it produces, never how fast a real GPU would run
 
 ## Unreleased
 
-- Host-GPU mode (experimental, opt-in), both `exact` and `relaxed`: a launch of a kernel the mode knows nothing of yet is now *sampled*
+- Host-GPU mode (experimental, opt-in), both `exact` and `turbo`: a launch of a kernel the mode knows nothing of yet is now *sampled*
   before the simulator is left to run it. The process is forked, the copy runs the launch's first blocks (up to 32, a few milliseconds), reports
   their times and ends; if they say that the launch repays the card path and the start of the real driver, the card runs the launch, otherwise
   the simulator does. Before, such a launch went to the card only on a static count of the kernel's instructions, which is low by the trip
   count of its loops, so programs that launch each kernel once kept their one long launch in the simulator. `VGPU_HOST_GPU_SAMPLE=0` switches
-  the sampling off; `=log` reports what it would do with no card ([design](docs/perf-design/12-host-gpu-relaxed.md), section 8; pantheonsim #587).
-- Host-GPU mode (experimental, opt-in): `VGPU_HOST_GPU=relaxed` also runs on the machine's real GPU the kernels whose result is the
+  the sampling off; `=log` reports what it would do with no card ([design](docs/perf-design/12-host-gpu-turbo.md), section 8; pantheonsim #587).
+- Host-GPU mode (experimental, opt-in): `VGPU_HOST_GPU=turbo` also runs on the machine's real GPU the kernels whose result is the
   card's own and not the simulator's bits: the approximate functions (`MUFU`), packed half arithmetic, float reductions, calls inside the
   kernel, tensor-core instructions and integer atomics that return a value; float atomics with a returned value, compare-and-swap and
-  exchange only with `VGPU_HOST_GPU_ATOMICS=1`; textures and unnamed instructions never. `VGPU_HOST_GPU_RELAXED_OFF` switches classes
+  exchange only with `VGPU_HOST_GPU_ATOMICS=1`; textures and unnamed instructions never. `VGPU_HOST_GPU_TURBO_OFF` switches classes
   off. With `VGPU_HOST_GPU_VERIFY` the card's memory is compared with the simulator's by tolerance (`VGPU_HOST_GPU_ATOL`,
-  `VGPU_HOST_GPU_RTOL`, `VGPU_HOST_GPU_TOL_TYPE`) instead of byte for byte, and the exit summary has lines for scripts (`host_gpu_relaxed:`, `host_gpu_refusals:`,
+  `VGPU_HOST_GPU_RTOL`, `VGPU_HOST_GPU_TOL_TYPE`) instead of byte for byte, and the exit summary has lines for scripts (`host_gpu_turbo:`, `host_gpu_refusals:`,
   `host_gpu_outside:`). A launch that does not come back from the card ends the process after `VGPU_HOST_GPU_TIMEOUT` seconds (600 in
-  relaxed mode). `exact` mode is unchanged, except for two bugs: a kernel refused for its module is no longer reported as "not in the
+  turbo mode). `exact` mode is unchanged, except for two bugs: a kernel refused for its module is no longer reported as "not in the
   exact set" from its second launch on, and a float reduction (`RED.ADD.F32`, which adds in arrival order) is now refused on sm_75 to
   sm_89 as it was meant to be (the check did not recognise the decoder's spelling of the type). Measured on one A10G (Round sp59): geometric mean 1.23x over 59 programs
   of PolyBench/GPU, Rodinia and HeCBench against 1.12x for `exact`, outputs identical. `VGPU_HOST_GPU_VERIFY` now gives the card copy up before the
   simulator runs the launch, in both modes: the simulator's atomics could lose updates under verify, and the card ran on its own earlier results.
-  [Design and limits](docs/perf-design/12-host-gpu-relaxed.md); the benchmark harness is
-  `tools/bench/hostgpu/run.py`, the card probes `tools/probes/hostgpu_relaxed_card_probes.sh`. `docs/cli.md` now lists every
+  [Design and limits](docs/perf-design/12-host-gpu-turbo.md); the benchmark harness is
+  `tools/bench/hostgpu/run.py`, the card probes `tools/probes/hostgpu_turbo_card_probes.sh`. `docs/cli.md` now lists every
   `VGPU_HOST_GPU_*` variable (pantheonsim #587).
 - AMD: a scalar load whose destination is VCC (`s_load_dwordx2 vcc, s[94:95], 0x0`, which LLVM writes when it runs short of scalar
   registers) fills VCC. It wrote the loaded pair to s0 and s1, which on gfx90a hold the private segment buffer, so the kernel's next

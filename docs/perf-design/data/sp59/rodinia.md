@@ -1,6 +1,6 @@
 Host-GPU benchmark: nvidia/a10g, 3 runs (median wall seconds), timeout 1200 s, atol 1e-08, rtol 1e-05, threads default.
 
-| program | sim s | exact s | x sim | exact card / all launches | exact card s / sim s | exact output | exactdiv s | x sim | exactdiv card / all launches | exactdiv card s / sim s | exactdiv output | relaxed s | x sim | relaxed card / all launches | relaxed card s / sim s | relaxed output | relaxed kept in sim: never/atomics/off/exact/safety/small | verify words different / outside (largest) | verify kernels outside | verify output |
+| program | sim s | exact s | x sim | exact card / all launches | exact card s / sim s | exact output | exactdiv s | x sim | exactdiv card / all launches | exactdiv card s / sim s | exactdiv output | turbo s | x sim | turbo card / all launches | turbo card s / sim s | turbo output | turbo kept in sim: never/atomics/off/exact/safety/small | verify words different / outside (largest) | verify kernels outside | verify output |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | rodinia/backprop | 0.61 | 0.61 | 0.99x | 0 / 2 | 0.00 / 0.44 | identical | 0.61 | 0.99x | 0 / 2 | - | identical | 0.71 | 0.86x | 1 / 2 | 0.02 / 0.27 | identical | 0/0/0/0/0/0 | 0 / 0 (abs 0, rel 0) | 0 | identical |
 | rodinia/gaussian | 4.13 | 0.92 | 4.47x | 495 / 1022 | 0.17 / 0.28 | identical | 0.92 | 4.51x | 495 / 1022 | - | identical | 0.92 | 4.49x | 495 / 1022 | 0.18 / 0.28 | identical | 0/0/0/0/0/523 | 0 / 0 (abs 0, rel 0) | 0 | identical |
@@ -17,7 +17,7 @@ Host-GPU benchmark: nvidia/a10g, 3 runs (median wall seconds), timeout 1200 s, a
 
 exact: geometric mean speed-up over sim 1.17x (12 programs).
 exactdiv: geometric mean speed-up over sim 1.18x (12 programs).
-relaxed: geometric mean speed-up over sim 1.25x (12 programs).
+turbo: geometric mean speed-up over sim 1.25x (12 programs).
 
 Notes:
 

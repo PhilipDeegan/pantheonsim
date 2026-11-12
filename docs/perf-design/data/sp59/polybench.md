@@ -1,6 +1,6 @@
 Host-GPU benchmark: nvidia/a10g, 3 runs (median wall seconds), timeout 1200 s, atol 1e-08, rtol 1e-05, threads default.
 
-| program | sim s | exact s | x sim | exact card / all launches | exact card s / sim s | exact output | exactdiv s | x sim | exactdiv card / all launches | exactdiv card s / sim s | exactdiv output | relaxed s | x sim | relaxed card / all launches | relaxed card s / sim s | relaxed output | relaxed kept in sim: never/atomics/off/exact/safety/small | verify words different / outside (largest) | verify kernels outside | verify output |
+| program | sim s | exact s | x sim | exact card / all launches | exact card s / sim s | exact output | exactdiv s | x sim | exactdiv card / all launches | exactdiv card s / sim s | exactdiv output | turbo s | x sim | turbo card / all launches | turbo card s / sim s | turbo output | turbo kept in sim: never/atomics/off/exact/safety/small | verify words different / outside (largest) | verify kernels outside | verify output |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | polybench/2DCONV | 0.96 | 0.96 | 0.99x | 0 / 1 | 0.00 / 0.38 | identical | 0.96 | 0.99x | 0 / 1 | - | identical | 0.96 | 0.99x | 0 / 1 | 0.00 / 0.38 | identical | 0/0/0/0/0/0 | 0 / 0 (abs 0, rel 0) | 0 | identical |
 | polybench/2MM | 251.16 | 151.79 | 1.66x | 1 / 2 | - | identical | 149.92 | 1.68x | 1 / 2 | - | identical | 152.05 | 1.65x | 1 / 2 | 0.05 / 29.15 | identical | 0/0/0/0/0/0 | TIMEOUT | - | - |
@@ -25,4 +25,4 @@ Host-GPU benchmark: nvidia/a10g, 3 runs (median wall seconds), timeout 1200 s, a
 
 exact: geometric mean speed-up over sim 1.30x (20 programs).
 exactdiv: geometric mean speed-up over sim 1.30x (20 programs).
-relaxed: geometric mean speed-up over sim 1.30x (20 programs).
+turbo: geometric mean speed-up over sim 1.30x (20 programs).

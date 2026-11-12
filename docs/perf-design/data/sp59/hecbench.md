@@ -1,6 +1,6 @@
 Host-GPU benchmark: nvidia/a10g, 3 runs (median wall seconds), timeout 300 s, atol 1e-08, rtol 1e-05, threads default.
 
-| program | sim s | exact s | x sim | exact card / all launches | exact card s / sim s | exact output | exactdiv s | x sim | exactdiv card / all launches | exactdiv card s / sim s | exactdiv output | relaxed s | x sim | relaxed card / all launches | relaxed card s / sim s | relaxed output | relaxed kept in sim: never/atomics/off/exact/safety/small | verify words different / outside (largest) | verify kernels outside | verify output |
+| program | sim s | exact s | x sim | exact card / all launches | exact card s / sim s | exact output | exactdiv s | x sim | exactdiv card / all launches | exactdiv card s / sim s | exactdiv output | turbo s | x sim | turbo card / all launches | turbo card s / sim s | turbo output | turbo kept in sim: never/atomics/off/exact/safety/small | verify words different / outside (largest) | verify kernels outside | verify output |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | hecbench/adam-cuda | 0.03 | 0.03 | 0.99x | 0 / 1 | 0.00 / 0.02 | identical | 0.03 | 0.98x | 0 / 1 | - | identical | 0.03 | 0.99x | 0 / 1 | 0.00 / 0.02 | identical | 0/0/0/0/0/0 | 0 / 0 (abs 0, rel 0) | 0 | identical |
 | hecbench/aidw-cuda | TIMEOUT | TIMEOUT | - | - | - | - | TIMEOUT | - | - | - | - | TIMEOUT | - | - | - | - | - | TIMEOUT | - | - |
@@ -37,9 +37,9 @@ Host-GPU benchmark: nvidia/a10g, 3 runs (median wall seconds), timeout 300 s, at
 
 exact: geometric mean speed-up over sim 0.99x (27 programs).
 exactdiv: geometric mean speed-up over sim 0.98x (27 programs).
-relaxed: geometric mean speed-up over sim 1.18x (27 programs).
+turbo: geometric mean speed-up over sim 1.18x (27 programs).
 
-Kernels relaxed mode kept in the simulator, by class and first refused instruction:
+Kernels turbo mode kept in the simulator, by class and first refused instruction:
 
 * atomics `ATOMG.E.CAS.STRONG.GPU`: 1 kernels (hecbench/bh-cuda)
 * atomics `ATOMS.CAST.SPIN`: 3 kernels (hecbench/atomicPerf-cuda)

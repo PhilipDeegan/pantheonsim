@@ -1204,6 +1204,8 @@ In-code splits (round sp52's `link_nosplit`), the store gate and the links of di
 
 ### 2. BSYNC as a region's op
 
+**Removed after the round.** BSYNC as a region's op was built, was exact and was measured as described in this section, and missed its bar (silu 1.073, bh 1.051, black-scholes 1.044 on top of linking; bitonic-sort 0.945; 12 to 24 % more compile time on the programs that have BSYNCs). After the round it was removed from the code to keep the generator lean: the generator's path (`OpFacts::hostctl` 4), `Ctx::bsync`, `Ctx::over`, `jit_bsync`, `JitFrame::regroup`, the statistics lines `jit: link bsyncs*`, the mutants `link_bsync_*` and `host_bsync_*`, the BSYNC draws of the unit tests, the ctest leg `test_sass_chain_cont_jit_link_nobsync` and the variable `VGPU_JIT_LINK_BSYNC` no longer exist, and the ABI number is 4 again (the context is round sp52's). A BSYNC is the run loop's op, with or without linking, as in round sp52; `diamond_loop_kernel` stays in `test_sass_chain_cont` as a kernel of the run-loop tests. What follows is the record of what was built and measured; the scripts under `docs/perf-design/data/sp53/scripts/` that set the variable are kept as that record and no longer run as written.
+
 Round sp52 left BSYNC as the largest exit of every diverged program (59 % of black-scholes' remaining region calls, 94 % of bilateral's, 72 % of bh's and silu's): the group arrives at the join of an if and its else, the generated code stops, the loop runs the BSYNC, its chain picks the next group and calls generated code again. This part makes the BSYNC an op of the region (`OpFacts::hostctl` 4). It was built and measured as a part of linking; after the measurement it is an opt-in of its own, `VGPU_JIT_LINK_BSYNC=1` beside `VGPU_JIT_LINK=1`, for the reason in the results below.
 
 **What the generated code does.** Before the op it asks what it asks before every op the chain decides: the chain bit or the link bit is up, and the turn has a call left; if not, it leaves with nothing done and the loop runs the BSYNC. Else it calls the host (`Ctx::bsync`, `jit_bsync` in `src/sass/tier_ops.inc`), which does the loop's own lines for a BSYNC and then the chain's pick:
@@ -1363,7 +1365,7 @@ Reading it:
 
 * **SYR2K is where the JIT is: 0.995 (8.862 against 8.910 s, that side with a spread of 7 %; control 1.003), and SYRK 1.003**: the loop rule leaves both unlinked, and their generated text is the unlinked text. With the rule off (`VGPU_JIT_LINK_RULE=0`) the two fixes alone put the linked SYR2K at 0.998 and SYRK at 1.002 in the same batch (second table); earlier measurements of the same code gave 0.991 and 0.977 for SYR2K, against round sp52's 0.967 to 0.978 before the fixes. The resolution of a five-run median on this host is no better than a per cent or two: in the first batch SYR2K's two linked sides ran the same object (it has no BSYNC) and measured 8.811 and 9.017 s, 2.3 % apart, and JACOBI1D's two 1.1 % apart. What is certain is the instruction count (0.66 % more with linking), and that the rule takes the kernel out of the question.
 * **Linking as it is now**: **nine programs gain 5 % or more** (black-scholes 1.229, JACOBI1D 1.144, hotspot 1.130, bilateral 1.128, silu 1.077, JACOBI2D 1.070, gaussian 1.068, bitonic-sort 1.065, LU 1.057), the geometric mean of the 18 is 1.055 (control 0.998), as in round sp52 (1.051), **and no program is below its control.** The lowest are pathfinder 0.987 (control 0.988: its two JIT sides are 0.513 and 0.520 s) and aop 0.996 (control 0.998).
-* **BSYNC as a region's op does not clear its bar.** It gains 5 % or more on two programs, silu (1.073: 0.338 to 0.315 s) and bh (1.051: 0.573 to 0.545 s, the first of these a side with one disturbed run), and 4.4 % on black-scholes (15.70 to 15.04 s; 1.283 against the JIT where linking alone is 1.229). It loses 5.5 % on bitonic-sort (0.189 to 0.200 s: the region calls it adds at the store gate, above) and measures 0.991 on lud, backprop and pathfinder and 0.995 on bilateral, which is inside the noise shown above but below the 0.995 the round asked of every program. The bar was 5 % on three programs with none below 0.995: **it is not on by default.** It stays in the tree as an opt-in of its own, `VGPU_JIT_LINK_BSYNC=1`, with its tests, because it is exact, the three diverged programs it was built for do gain, and the losses have a visible cause that is not BSYNC itself: every function that holds a BSYNC gets the entry table's label (`DISPATCH`) as a way into each of its stretches, and the regions on both sides of the BSYNC become one, so the compiler has a larger function with more paths (the same effect as SYR2K's, part 1), and in bitonic-sort the store gate moves into generated code. Two things would be tried next: going on at the next op directly when the group that goes on stands there (the release and the lanes kept out: most BSYNCs) and leaving for the other cases, so that no entry table is needed; and not making a BSYNC a region's op in a section whose warps mostly leave generated code at barriers. (Whether to keep an opt-in that missed its bar in the tree at all is a decision for the review: it is one commit's worth of code, switched by one function.)
+* **BSYNC as a region's op does not clear its bar.** It gains 5 % or more on two programs, silu (1.073: 0.338 to 0.315 s) and bh (1.051: 0.573 to 0.545 s, the first of these a side with one disturbed run), and 4.4 % on black-scholes (15.70 to 15.04 s; 1.283 against the JIT where linking alone is 1.229). It loses 5.5 % on bitonic-sort (0.189 to 0.200 s: the region calls it adds at the store gate, above) and measures 0.991 on lud, backprop and pathfinder and 0.995 on bilateral, which is inside the noise shown above but below the 0.995 the round asked of every program. The bar was 5 % on three programs with none below 0.995: **it is not on by default.** It stays in the tree as an opt-in of its own, `VGPU_JIT_LINK_BSYNC=1`, with its tests, because it is exact, the three diverged programs it was built for do gain, and the losses have a visible cause that is not BSYNC itself: every function that holds a BSYNC gets the entry table's label (`DISPATCH`) as a way into each of its stretches, and the regions on both sides of the BSYNC become one, so the compiler has a larger function with more paths (the same effect as SYR2K's, part 1), and in bitonic-sort the store gate moves into generated code. Two things would be tried next: going on at the next op directly when the group that goes on stands there (the release and the lanes kept out: most BSYNCs) and leaving for the other cases, so that no entry table is needed; and not making a BSYNC a region's op in a section whose warps mostly leave generated code at barriers. (Whether to keep an opt-in that missed its bar in the tree at all is a decision for the review: it is one commit's worth of code, switched by one function.) (The decision was to remove it: see the note at the head of part 2.)
 
 ### Same bits
 
@@ -1379,7 +1381,7 @@ The A/B compares the normalised output of every run of every side: equal on all 
 
 * **The wrong result CI found (part 0): a real bug of round sp52's merging with register residence, one argument wrong in the generator; fixed, and held by a test of all sixteen forms that fails with the bug put back.** It is confirmed here by the generator's test and on real programs in the full form (bilateral: wrong output with the bug put back, the tier's with the fix); the failing CI stage itself has to confirm it.
 * **SYR2K (part 1): found, fixed where it could be, and ruled out where it could not.** The loss was the compiler's treatment of the generated text in a large function: row copies turned into `rep movsl` in blocks taken for cold (fixed for every object: 1.035 on SYR2K with or without linking), escapes called out of line (fixed), and a worse register allocation for the same loop (7.3 % more instructions in the generated code, 0.66 % in all; not fixable in the generator). The loop rule leaves sections like it unlinked.
-* **BSYNC (part 2): built, exact, measured, below the bar; an opt-in of its own** (`VGPU_JIT_LINK_BSYNC=1`), not part of `VGPU_JIT_LINK=1`.
+* **BSYNC (part 2): built, exact, measured, below the bar; an opt-in of its own** (`VGPU_JIT_LINK_BSYNC=1`), not part of `VGPU_JIT_LINK=1`. **Decided afterwards: removed from the code** (the opt-in missed its bar: silu 1.073, bh 1.051, black-scholes 1.044, bitonic-sort 0.945, 12 to 24 % more compile time); the variable no longer exists, and the measurements above stay as the record.
 * **The linked compile (part 3): broken down; no cheap fix found.** A little more than half of the extra time is more code in the regions and the rest the merged function's size; the compiler flags that take a third off cost 1 to 3 % at run time and were not taken.
 * `VGPU_JIT_LINK=1` stays an opt-in. Of round sp52's three reasons the first is gone (SYR2K); the second (the `e2e_sass_jit` shards with linking have not run: no nvcc on the hosts of these rounds) and the third (the first run pays a longer compile) stand.
 
@@ -1396,19 +1398,19 @@ The A/B compares the normalised output of every run of every side: equal on all 
 * Deviations from the round's rules: one hold of the machine lock ran 26 minutes (a build and sixteen test legs; the limit was about 20) and two others about 20; `cmake` was configured once outside the lock (2 s); a disassembly was written to `/tmp` and removed in the same command.
 * Cleanup: the scratch tree of the round on server3 (`~/.cache/sp53`) was removed by exact path.
 
-## Round sp59 (relaxed host-GPU mode on an A10G)
+## Round sp59 (turbo host-GPU mode on an A10G)
 
-Branch `hostgpu-relaxed`. `VGPU_HOST_GPU=relaxed` ([design](../12-host-gpu-relaxed.md), pantheonsim #587) on one real A10G: the card CI, the probes, and
-PolyBench/GPU, Rodinia and the reduced HeCBench list as plain simulator, `exact`, `exact` with `VGPU_HOST_GPU_DIV=1` and `relaxed`. Data, commands and the
+Branch `hostgpu-turbo`. `VGPU_HOST_GPU=turbo` ([design](../12-host-gpu-turbo.md), pantheonsim #587) on one real A10G: the card CI, the probes, and
+PolyBench/GPU, Rodinia and the reduced HeCBench list as plain simulator, `exact`, `exact` with `VGPU_HOST_GPU_DIV=1` and `turbo`. Data, commands and the
 rig: [`data/sp59/`](../data/sp59/README.md). One rig, single runs for the long programs, one toolkit (13.0): read the caveats.
 
 ### Headline
 
-* **Speed.** Over the 59 programs with a simulator time: geometric mean 1.12x for `exact`, 1.12x for `exact` + DIV, 1.23x for `relaxed`; summed wall time
+* **Speed.** Over the 59 programs with a simulator time: geometric mean 1.12x for `exact`, 1.12x for `exact` + DIV, 1.23x for `turbo`; summed wall time
   1172 s in the simulator, 978 s, 972 s and 669 s (1.20x, 1.21x, 1.75x). Four more programs pass 300 s in the simulator: three finish in 8 to 14 s in
-  every card form, and `binomial` in 7.5 s in `relaxed` only.
-* **Coverage.** Launches on the card: 21,279 of 57,014 (`exact`), 21,290 (`exact` + DIV), 25,221 of 58,014 (`relaxed`); programs with at least one: 13, 13, 22
-  of 64. No launch was refused for an instruction of no class. What keeps launches in the simulator in relaxed mode is the size rule (30,812 launches too
+  every card form, and `binomial` in 7.5 s in `turbo` only.
+* **Coverage.** Launches on the card: 21,279 of 57,014 (`exact`), 21,290 (`exact` + DIV), 25,221 of 58,014 (`turbo`); programs with at least one: 13, 13, 22
+  of 64. No launch was refused for an instruction of no class. What keeps launches in the simulator in turbo mode is the size rule (30,812 launches too
   small), the shared safety checks (1,499), the atomics opt-in (209), and the first-launch rule, which is not counted and which holds most of the time left.
 * **Correctness.** The output of every program that can be compared is the simulator's in every card form: 58 of 59 identical, none merely within
   tolerance, none different. The 59th, Rodinia `particlefilter_float`, does not print the same output twice in the simulator. Verify (52 programs, after the
@@ -1422,7 +1424,7 @@ rig: [`data/sp59/`](../data/sp59/README.md). One rig, single runs for the long p
 
 ### A. Card CI (`tools/card-ci/run-card-ci.sh`)
 
-Passed on the first run, with nothing changed: unit tests, `e2e_host_gpu` (the relaxed steps: the expf kernel on the card, verify with 2,139,207 words
+Passed on the first run, with nothing changed: unit tests, `e2e_host_gpu` (the turbo steps: the expf kernel on the card, verify with 2,139,207 words
 different and none outside tolerance, largest relative difference 1.19e-7), `e2e_host_gpu_stub` (steps 10 to 15, their first run anywhere), the division
 check, the sp44 `MUFU` lines (the same shares as sp44). Passed again on the final sources.
 
@@ -1468,7 +1470,7 @@ every format, so this shows that layouts and exact products agree; it says nothi
 `tools/bench/hostgpu/run.py`, 3 runs a form (1 for a program over 30 s in the simulator), per-run limit 1200 s (PolyBench, Rodinia) or 300 s (HeCBench), median
 wall seconds of the whole process. Tables per program: `data/sp59/{rodinia,polybench,hecbench}.md`.
 
-| suite | programs | `exact` | `exact` + DIV | `relaxed` | summed wall: sim, exact, DIV, relaxed (s) | launches on card: exact, relaxed, of | programs with a card launch: exact, relaxed |
+| suite | programs | `exact` | `exact` + DIV | `turbo` | summed wall: sim, exact, DIV, turbo (s) | launches on card: exact, turbo, of | programs with a card launch: exact, turbo |
 |---|---:|---:|---:|---:|---|---|---|
 | Rodinia | 12 | 1.17x | 1.18x | 1.25x | 17, 13, 13, 12 | 1,632, 2,433 of 3,971 | 3, 5 |
 | PolyBench/GPU | 20 | 1.30x | 1.30x | 1.30x | 786, 595, 589, 582 | 4,965, 4,967 of 34,109 | 6, 6 |
@@ -1477,7 +1479,7 @@ wall seconds of the whole process. Tables per program: `data/sp59/{rodinia,polyb
 
 The programs whose time moved (the rest are within 15% of the simulator in every form):
 
-| program | sim s | exact | exact + DIV | relaxed | launches on card: exact, relaxed, of |
+| program | sim s | exact | exact + DIV | turbo | launches on card: exact, turbo, of |
 |---|---:|---:|---:|---:|---|
 | HeCBench atomicReduction | 297.0 | 1.00x | 1.00x | 78.0x (3.81 s) | 0, 2090 of 2100 |
 | PolyBench FDTD-2D | 106.1 | 22.9x | 21.7x | 22.9x | 1494, 1494 of 1500 |
@@ -1500,7 +1502,7 @@ The programs whose time moved (the rest are within 15% of the simulator in every
 | HeCBench base64e | over 300 | 8.75 s | 8.75 s | 8.76 s | 514 of 516 |
 | HeCBench binomial | over 300 | over 300 | over 300 | 7.45 s | 998 of 1000 |
 
-What relaxed adds over exact is five programs: `atomicReduction` (78x), `binomial` (from over 300 s to 7.5 s), `atomicAggregate`, `hotspot`, `bh`. On
+What turbo adds over exact is five programs: `atomicReduction` (78x), `binomial` (from over 300 s to 7.5 s), `atomicAggregate`, `hotspot`, `bh`. On
 PolyBench it adds nothing: no PolyBench launch that exact refuses for its code is large enough to go. `exact` + DIV adds 45 launches of Rodinia `lud`. The
 losses are short programs that pay the driver start for a launch or two (`bitonic-sort` 0.32 s to 0.52 s, `backprop`, `atomicPerf`, `axpby` in every form):
 the start-cost rule lets them through because their kernels' time adds up to the 0.25 s account while the gain does not.
@@ -1512,12 +1514,12 @@ With the atomics opt-in (`VGPU_HOST_GPU_ATOMICS=1`, the three programs that had 
 launches on the card), `atomicPerf` 1.12 s to 0.78 s (1.44x), `bh` unchanged at 1.25x (one more kernel admitted, too small to go). The outputs are the
 simulator's in all three. Verify: `aop` 32,785 words different and none outside tolerance; `bh` as below.
 
-#### Where the simulator's time is left under relaxed mode
+#### Where the simulator's time is left under turbo mode
 
 Not in refused instructions: `host_gpu_refused` named 12 kernels in all (5 of `aop`, 6 of `atomicPerf`, 1 of `bh`), every one for `ATOMS.CAST.SPIN` or
 `ATOMG.CAS` (the opt-in), none for the `never` class. The time is in launches the size rule keeps:
 
-| program | relaxed s | launches on card | seconds in the simulator's launches | why |
+| program | turbo s | launches on card | seconds in the simulator's launches | why |
 |---|---:|---|---:|---|
 | PolyBench 2MM | 152.0 | 1 of 2 | 29.1 | the first kernel's only launch is not sent |
 | PolyBench COVAR, CORR | 62.9, 62.7 | 0 of 3, 0 of 4 | 23.3 | every kernel launches once |
@@ -1528,8 +1530,8 @@ Not in refused instructions: `host_gpu_refused` named 12 kernels in all (5 of `a
 A kernel's first launch goes to the card only when the static estimate of its simulator time beats the card path with the driver start charged (sp43), and
 that estimate is far too low for a kernel with a loop: SYR2K's launch is estimated at 45 ms and takes 7.7 s. With `VGPU_HOST_GPU_START_COST=0` (one run, 28
 PolyBench and Rodinia programs, `data/sp59/start-cost-0.md`): SYR2K 9.78 s to 2.30 s, SYRK 5.19 s to 1.28 s, GEMM 1.3x, JACOBI2D 1.7x, 3MM 1.6x, hotspot 3.6x
-in relaxed, and the geometric mean of the 28 goes from 1.27x (exact) and 1.30x (relaxed) to 1.47x in both, with identical outputs; it also brings back
-the losses the start cost was made for (`pathfinder` 0.85x, `srad_v2` 0.06 s to 0.44 s in relaxed). This rule is shared by both modes and was not changed.
+in turbo, and the geometric mean of the 28 goes from 1.27x (exact) and 1.30x (turbo) to 1.47x in both, with identical outputs; it also brings back
+the losses the start cost was made for (`pathfinder` 0.85x, `srad_v2` 0.06 s to 0.44 s in turbo). This rule is shared by both modes and was not changed.
 
 One more thing that is not the mode: the plain simulator is slower than a host-GPU run that sends nothing to the card (SYRK 6.48 s against 5.19 s with
 0 launches on the card, CORR 78 s against 63 s). `runtime.cpp` switches launch-level result caching on only when `VGPU_HOST_GPU` is unset; that is the likely
@@ -1552,8 +1554,8 @@ under verify have none outside tolerance.
 
 Under `VGPU_HOST_GPU_VERIFY` the card copy of each allocation stayed valid while the simulator ran the same launch, so the simulator's accesses went through
 the gate's slow path, where an atomic of one host thread could lose the update of another. `atomicAggregate` under `VERIFY=all`: FAIL in
-each of 4 runs with 4 host threads (3 in exact mode, 1 in relaxed), PASS in 2 of 2 with `VGPU_THREADS=1`; after the fix PASS in 6 of 6 with 4 threads (3 and 3). It also
-meant that the next launch on the card started from the card's own earlier results, so in relaxed mode differences carried from launch to launch on the
+each of 4 runs with 4 host threads (3 in exact mode, 1 in turbo), PASS in 2 of 2 with `VGPU_THREADS=1`; after the fix PASS in 6 of 6 with 4 threads (3 and 3). It also
+meant that the next launch on the card started from the card's own earlier results, so in turbo mode differences carried from launch to launch on the
 card's side, which is not what the design said. Fix: the copy is given up before the simulator runs (nothing is pulled: the simulator's memory is the
 truth), so a verify run now pushes all live memory before every launch. Plain runs are not touched. The verify numbers of this section are from a second
 pass with the fix (52 programs; the long ones were not repeated). A step was added to the stand-in-driver test (a contended integer reduction under verify);
@@ -1595,12 +1597,12 @@ it passes, but it also passed on the library before the fix in 10 runs, so it do
 
 * The build is clean (0 warnings); `host_gpu.cpp` and `config.cpp` also compile alone with `-Wall -Wextra -Werror -Wformat-security`.
 * `ctest -R 'host_gpu|card_gate|hostgpu'`: 8 tests, 6 pass (`test_host_gpu_logic` 62 cases, `test_host_gpu_ref` 7, `test_host_gpu_tol` 15,
-  `test_host_gpu_track` 17, `test_card_gate` 10, `hostgpu_bench_selftest`), 2 skip (`e2e_host_gpu`: no card; `e2e_host_gpu_stub`: no nvcc). The relaxed steps
+  `test_host_gpu_track` 17, `test_card_gate` 10, `hostgpu_bench_selftest`), 2 skip (`e2e_host_gpu`: no card; `e2e_host_gpu_stub`: no nvcc). The turbo steps
   10 to 15 of the stand-in-driver test have therefore never run: CI is their first run.
 * Mutants, each a copy of one file with one change, built outside the tree: 91 of 91 killed (41 of the compare by tolerance, 34 of the classes and
   switches, 4 of exact mode's reduction check, 12 of the harness). None of `host_gpu.cpp`: what could kill them is the stand-in-driver test.
-* No driver on the machine: PolyBench 2DCONV, ATAX and GESUMMV, each with the mode off, `exact`, `exact` with the log, `relaxed` (with and without
-  `VGPU_HOST_GPU_START_COST=0`), `relaxed` with verify, `VGPU_HOST_GPU=approx` and a bad `VGPU_HOST_GPU_ATOL`. The program's output is the mode-off
+* No driver on the machine: PolyBench 2DCONV, ATAX and GESUMMV, each with the mode off, `exact`, `exact` with the log, `turbo` (with and without
+  `VGPU_HOST_GPU_START_COST=0`), `turbo` with verify, `VGPU_HOST_GPU=approx` and a bad `VGPU_HOST_GPU_ATOL`. The program's output is the mode-off
   output in all 27 runs; the mode says `cannot load the real driver ...; mode off` where a launch was sent, the summary with 0 launches on the card
   where none was, and `not a mode` / `not a number` for the last two. The stderr of the `exact` runs equals, line for line, that of an earlier build of
   main (another round's baseline tree on the same machine), apart from the two lines for scripts that `VGPU_HOST_GPU_LOG` now adds.

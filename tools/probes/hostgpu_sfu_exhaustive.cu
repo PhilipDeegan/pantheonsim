@@ -7,14 +7,14 @@
 //        div                    IEEE a / b (div.rn.f32) for 12 dividends (8 finite, 0, +-inf, NaN) and every divisor           (the division idiom: must be 0 different)
 //        sqrtrn, rcprn          IEEE sqrt (sqrt.rn.f32, __fsqrt_rn) and IEEE reciprocal (rcp.rn.f32, __frcp_rn) of every pattern    (the sqrt and reciprocal idioms: must be 0 different; sp43)
 //        idiv, sidiv            32-bit integer x / y, unsigned and signed, for 12 dividends and every nonzero divisor            (the integer division idiom: must be 0 different; sp43)
-//        sin cos tanh           sin.approx.ftz.f32, cos.approx.ftz.f32, tanh.approx.f32 against the simulator's             (relaxed mode, docs/perf-design/12-host-gpu-relaxed.md:
-//                               expected to differ; the count, the share and the largest distance are what relaxed mode's tolerance has to cover)
+//        sin cos tanh           sin.approx.ftz.f32, cos.approx.ftz.f32, tanh.approx.f32 against the simulator's             (turbo mode, docs/perf-design/12-host-gpu-turbo.md:
+//                               expected to differ; the count, the share and the largest distance are what turbo mode's tolerance has to cover)
 //                               The compiler turns sin and cos into FMUL.RZ by 1/(2 pi) (the float 0x3e22f983, rounded toward zero) and MUFU.SIN / MUFU.COS, whose
 //                               argument is in turns; the simulator side here is that product and then the simulator's MUFU (the SASS was read on an A10G rig
 //                               with VGPU_HOST_GPU_LOG=2; a toolkit that compiles it otherwise needs the model changed).
 //   stride: test every stride-th pattern (default 1 = all 2^32; a smoke run uses 4099)
 //
-// Output, one line per op and dividend: "RESULT op=<op> [a=0x...] tested=N differ=N max_ulp=N first=0x<in>:card=0x<bits>:sim=0x<bits> share=<percent> outside_tol=N max_abs=X" (outside_tol: results outside relaxed mode's default tolerance,
+// Output, one line per op and dividend: "RESULT op=<op> [a=0x...] tested=N differ=N max_ulp=N first=0x<in>:card=0x<bits>:sim=0x<bits> share=<percent> outside_tol=N max_abs=X" (outside_tol: results outside turbo mode's default tolerance,
 // atol 1e-8 and rtol 1e-5; max_abs: the largest difference of two finite results; ordinary_*: the same two over the inputs with 2^-20 <= |x| < 2^10,
 // 30/256 of the patterns); the exit status is 0 when
 // differ=0 for every line, 1 otherwise. A mutation of the card side (e.g. a one-ulp nudge of the quotient) must make `div` report differ>0; run with
@@ -131,7 +131,7 @@ int main(int argc, char** argv) {
             if (!bad[t]++ || i < fidx[t]) { fidx[t] = i; fi[t] = in; fc[t] = card; fs[t] = sim; }
             const uint32_t u = ref::ulp_distance(card, sim);
             if (u > mx[t]) mx[t] = u;
-            // (the same pair by relaxed mode's default tolerance: the ulp distance of two results near zero says little)
+            // (the same pair by turbo mode's default tolerance: the ulp distance of two results near zero says little)
             float cf, sf;
             std::memcpy(&cf, &card, 4);
             std::memcpy(&sf, &sim, 4);

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# The card runs behind relaxed host-GPU mode (docs/perf-design/12-host-gpu-relaxed.md, "What a card has to say"). Needs ONE NVIDIA card and a CUDA toolkit;
+# The card runs behind turbo host-GPU mode (docs/perf-design/12-host-gpu-turbo.md, "What a card has to say"). Needs ONE NVIDIA card and a CUDA toolkit;
 # the `tensor` part also needs the simulator built (<build-dir>/shim) and a profile for the card under nvidia/profiles. Nothing here was run when it was
 # written (no card): the simulator side of each comparison is unit tested (tests/unit/test_host_gpu_ref.cpp, test_host_gpu_tol.cpp).
 #
-#   tools/probes/hostgpu_relaxed_card_probes.sh sfu     <out-dir> [stride]        sin, cos, tanh over all 2^32 float patterns (stride 1; about 5 minutes on an A10G)
-#   tools/probes/hostgpu_relaxed_card_probes.sh atomics <out-dir> [runs]          does the card repeat itself on each kind of atomic (default 8 runs)
-#   tools/probes/hostgpu_relaxed_card_probes.sh tensor  <out-dir> <build-dir>     HMMA / IMMA / DMMA kernels: the card's memory against the simulator's, by tolerance
-#   tools/probes/hostgpu_relaxed_card_probes.sh all     <out-dir> <build-dir>     the three, with the defaults
+#   tools/probes/hostgpu_turbo_card_probes.sh sfu     <out-dir> [stride]        sin, cos, tanh over all 2^32 float patterns (stride 1; about 5 minutes on an A10G)
+#   tools/probes/hostgpu_turbo_card_probes.sh atomics <out-dir> [runs]          does the card repeat itself on each kind of atomic (default 8 runs)
+#   tools/probes/hostgpu_turbo_card_probes.sh tensor  <out-dir> <build-dir>     HMMA / IMMA / DMMA kernels: the card's memory against the simulator's, by tolerance
+#   tools/probes/hostgpu_turbo_card_probes.sh all     <out-dir> <build-dir>     the three, with the defaults
 #
 # Output, on stdout and in <out-dir>:
 #   sfu      "RESULT op=sin tested=4294967296 differ=N max_ulp=N first=0x<in>:card=0x<bits>:sim=0x<bits> share=P%" for sin, cos and tanh. Reported, not judged:
@@ -16,7 +16,7 @@
 #   tensor   per program (wmma_gemm, wmma_types, mma_forms) and tolerance (rtol=1e-5: the default; rtol=2e-3: one ulp of a binary16 is 1e-3; rtol=f16:
 #            2e-3 with VGPU_HOST_GPU_TOL_TYPE=f16, every word read as two halves, which is the only reading that judges half results; float and
 #            integer memory of the same launch then shows as outside, so read the three lines together):
-#            "TENSOR <program> rtol=<r>: host_gpu_relaxed: ... words_different=N words_outside=N ... max_rel=R", the host_gpu_outside and host_gpu_refused
+#            "TENSOR <program> rtol=<r>: host_gpu_turbo: ... words_different=N words_outside=N ... max_rel=R", the host_gpu_outside and host_gpu_refused
 #            lines, and "TENSOR <program> output: same|DIFFERENT" (the program's own output against a run with the mode off; under verify it must be the same).
 set -uo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -66,9 +66,9 @@ tensor() {
     for rtol in 1e-5 2e-3 f16; do
       tol_env=(VGPU_HOST_GPU_RTOL="$rtol")
       [[ $rtol == f16 ]] && tol_env=(VGPU_HOST_GPU_RTOL=2e-3 VGPU_HOST_GPU_TOL_TYPE=f16)
-      env VGPU_GPU="$profile" LD_LIBRARY_PATH="$build/shim" VGPU_HOST_GPU=relaxed VGPU_HOST_GPU_VERIFY=all "${tol_env[@]}" "$out/$p" > "$out/$p.$rtol.out" 2> "$out/$p.$rtol.err"
+      env VGPU_GPU="$profile" LD_LIBRARY_PATH="$build/shim" VGPU_HOST_GPU=turbo VGPU_HOST_GPU_VERIFY=all "${tol_env[@]}" "$out/$p" > "$out/$p.$rtol.out" 2> "$out/$p.$rtol.err"
       if grep -q 'mode off' "$out/$p.$rtol.err"; then echo "TENSOR $p rtol=$rtol: $(grep -m1 'mode off' "$out/$p.$rtol.err")"; status=1; continue; fi
-      echo "TENSOR $p rtol=$rtol: $(grep '^host_gpu_relaxed:' "$out/$p.$rtol.err" | tail -1)"
+      echo "TENSOR $p rtol=$rtol: $(grep '^host_gpu_turbo:' "$out/$p.$rtol.err" | tail -1)"
       echo "TENSOR $p rtol=$rtol: $(grep '^host_gpu_verify:' "$out/$p.$rtol.err" | tail -1)"
       grep '^host_gpu_outside:\|^host_gpu_refused:\|^host_gpu_refusals:' "$out/$p.$rtol.err" | sed "s/^/TENSOR $p rtol=$rtol: /"
       if cmp -s "$out/$p.off.out" "$out/$p.$rtol.out"; then echo "TENSOR $p rtol=$rtol output: same"; else echo "TENSOR $p rtol=$rtol output: DIFFERENT"; status=1; fi
