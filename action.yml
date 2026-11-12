@@ -39,6 +39,13 @@ inputs:
       the linker resolves their dependencies to the simulator's libraries and
       the link fails.
     default: 'true'
+  prebuilt:
+    description: >
+      `true` uses the prebuilt simulator attached to the release this action
+      is pinned at, when the release has one for this runner and toolkit and
+      its sha256 checks out, and builds from source otherwise. `false` always
+      builds from source.
+    default: 'true'
 
 outputs:
   build-dir:
@@ -54,6 +61,14 @@ outputs:
   shim-dir:
     description: The simulator's CUDA libraries, for LD_LIBRARY_PATH when not using `vgpu run`.
     value: ${{ steps.paths.outputs.shim }}
+  prebuilt:
+    description: "`true` when the simulator came from a release's prebuilt tarball, `false` when it was restored from the cache or built."
+    value: ${{ steps.prebuilt.outputs.used == 'true' }}
+  prebuilt-asset:
+    description: >
+      The name of the release asset that holds this simulator prebuilt for this runner and toolkit
+      (empty where none is published). The release-binaries workflow publishes the build under it.
+    value: ${{ steps.paths.outputs.asset }}
 
 runs:
   using: composite
@@ -193,32 +208,72 @@ runs:
         SRC: ${{ github.action_path }}
       run: |
         build="$RUNNER_TEMP/pantheonsim-build"
-        # The cache key is the source itself, so a moving ref like @main rebuilds
-        # exactly when the simulator changed -- and the toolkit version, because
-        # the CUDA libraries are built against its headers.
-        src=$(cd "$SRC" && find CMakeLists.txt src include nvidia amd tools scripts -type f -print0 \
-              | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-20)
-        # No nvcc (an AMD job, or cuda-toolkit: none without one) is a
-        # toolkit version of none, not a failed step.
-        nvcc_version=$( { nvcc --version 2>/dev/null || true; } | sed -n 's/.*release \([0-9.]*\).*/\1/p' | head -1)
         {
           echo "build=$build"
           echo "source=$SRC"
           echo "shim=$build/shim"
-          # The OS release too: a build from 24.04 does not load on 22.04.
-          . /etc/os-release
-          echo "key=pantheonsim-${RUNNER_OS}-${RUNNER_ARCH}-${ID}${VERSION_ID}-${src}-cuda${nvcc_version:-none}"
+          # The cache key and the release asset name are the source itself, so a moving ref like @main
+          # rebuilds exactly when the simulator changed -- and the toolkit version, because the CUDA
+          # libraries are built against its headers, and the OS release.
+          "$SRC/scripts/action-build-id.sh" "$SRC"
         } >> "$GITHUB_OUTPUT"
+
+    # A release carries the simulator prebuilt for the runners and toolkits the action sets up
+    # (.github/workflows/release-binaries.yml), which saves the 8 to 20 minute build. Any miss -- no
+    # such asset, a failed download, a wrong checksum, a build that does not run here -- falls back to
+    # the cache and the source build below.
+    - name: Fetch the prebuilt simulator
+      id: prebuilt
+      if: inputs.prebuilt != 'false'
+      shell: bash
+      env:
+        BUILD: ${{ steps.paths.outputs.build }}
+        VERSION: ${{ steps.paths.outputs.version }}
+        ASSET: ${{ steps.paths.outputs.asset }}
+        REPO: ${{ github.action_repository || 'pantheongpu/pantheonsim' }}
+        PREBUILT_INPUT: ${{ inputs.prebuilt }}
+      run: |
+        [[ "$PREBUILT_INPUT" == true ]] || { echo "::error::prebuilt must be true or false, not '$PREBUILT_INPUT'"; exit 1; }
+        fallback() { echo "::notice::No prebuilt simulator: $1. Building it from source instead."; rm -rf "$BUILD" "$tmp"; exit 0; }
+        tmp="$RUNNER_TEMP/pantheonsim-prebuilt"
+        [[ -n "$ASSET" ]] || fallback "none is published for $RUNNER_OS on $RUNNER_ARCH"
+        # PANTHEONSIM_PREBUILT_URL points at another copy of the release's assets (a mirror, or a test).
+        base="${PANTHEONSIM_PREBUILT_URL:-https://github.com/$REPO/releases/download/v$VERSION}"
+        fetch() {
+          if command -v curl > /dev/null; then
+            curl -fsSL --retry 3 --connect-timeout 20 --max-time "$1" -o "$3" "$2"
+          else
+            wget -q --tries=3 --timeout=20 -O "$3" "$2"
+          fi
+        }
+        rm -rf "$tmp"; mkdir -p "$tmp"
+        fetch 60 "$base/$ASSET.sha256" "$tmp/sha256" || fallback "release v$VERSION has no $ASSET"
+        read -r sum name < "$tmp/sha256" || true
+        [[ "$sum" =~ ^[0-9a-f]{64}$ && "$name" == "$ASSET" ]] || fallback "$ASSET.sha256 does not name $ASSET"
+        start=$SECONDS
+        fetch 900 "$base/$ASSET" "$tmp/$ASSET" || fallback "the download of $ASSET failed"
+        echo "$sum  $tmp/$ASSET" | sha256sum -c --status || fallback "$ASSET does not match its sha256"
+        rm -rf "$BUILD"; mkdir -p "$BUILD"
+        tar -xzf "$tmp/$ASSET" -C "$BUILD" || fallback "$ASSET did not unpack"
+        # Its libraries find each other by the absolute path they were built at (RUNPATH), so it is
+        # used only there: on a hosted runner that is this job's path, in a container job it is not.
+        built_at=$(sed -n 's/^build-dir=//p' "$BUILD/.pantheonsim-prebuilt" 2>/dev/null || true)
+        [[ "$built_at" == "$BUILD" ]] || fallback "$ASSET was built in ${built_at:-an unknown directory}, not $BUILD"
+        "$BUILD/vgpu" list-gpus > /dev/null || fallback "the prebuilt vgpu does not run on this runner"
+        rm -rf "$tmp"
+        echo "Using the prebuilt simulator $ASSET from $base ($((SECONDS - start)) s to fetch and unpack)."
+        echo "used=true" >> "$GITHUB_OUTPUT"
 
     - name: Restore a previous build
       id: cache
+      if: steps.prebuilt.outputs.used != 'true'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ steps.paths.outputs.build }}
         key: ${{ steps.paths.outputs.key }}
 
     - name: Build the simulator
-      if: steps.cache.outputs.cache-hit != 'true'
+      if: steps.prebuilt.outputs.used != 'true' && steps.cache.outputs.cache-hit != 'true'
       shell: bash
       env:
         SRC: ${{ github.action_path }}
@@ -234,9 +289,9 @@ runs:
 
     # Saved here, right after the build, and not by actions/cache's post step: that one runs only when the
     # whole job succeeds, so a caller's failing test threw the build away and the next run built it again
-    # (about 15 minutes). The key is the source itself, so a save on a miss is always the right content.
+    # (8 to 20 minutes). The key is the source itself, so a save on a miss is always the right content.
     - name: Save the build
-      if: steps.cache.outputs.cache-hit != 'true'
+      if: steps.prebuilt.outputs.used != 'true' && steps.cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ steps.paths.outputs.build }}
