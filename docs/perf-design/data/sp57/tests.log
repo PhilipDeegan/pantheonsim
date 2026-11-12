@@ -1,0 +1,26 @@
+Test  #59: test_sass_alu_runs ......................   Passed    0.16 sec
+Test  #62: test_sass_store_gate ....................   Passed    0.01 sec
+Test  #61: test_sass_alu_runs_simd_base ............   Passed    0.17 sec
+Test  #63: test_sass_store_gate_tier0 ..............   Passed    0.01 sec
+Test  #60: test_sass_alu_runs_tier0 ................   Passed    0.18 sec
+Test  #65: test_sass_dispatch_counts ...............   Passed    0.04 sec
+Test  #66: test_sass_dispatch_counts_tier0 .........   Passed    0.04 sec
+Test  #67: test_sass_dispatch_counts_simd_base .....   Passed    0.04 sec
+Test  #64: test_sass_chain_cont ....................   Passed    0.16 sec
+Test  #69: test_sass_store_gate_jit ................   Passed   28.24 sec
+Test  #68: test_sass_chain_cont_jit ................   Passed  123.04 sec
+Test  #72: test_sass_chain_cont_jit_wait ...........   Passed   11.97 sec
+Test  #71: test_sass_dispatch_counts_jit ...........   Passed  148.75 sec
+Test  #74: test_sass_store_gate_jit_link ...........   Passed   18.68 sec
+Test  #73: test_sass_chain_cont_jit_link ...........   Passed   78.98 sec
+Test  #76: test_sass_dispatch_counts_jit_link ......   Passed  131.82 sec
+Test  #77: test_sass_chain_cont_jit_link_nobsync ...   Passed   73.43 sec
+Test  #70: test_sass_alu_runs_jit ..................   Passed  475.33 sec
+Test #180: test_jit ................................   Passed    6.22 sec
+Test #181: test_jit_share ..........................   Passed    0.63 sec
+Test #182: test_jit_wait ...........................   Passed    1.21 sec
+Test  #78: test_sass_chain_cont_jit_link_rule ......   Passed   75.83 sec
+Test #183: test_jit_resid ..........................   Passed  193.97 sec
+Test  #75: test_sass_alu_runs_jit_link .............   Passed  483.57 sec
+100% tests passed, 0 tests failed out of 24
+Total Test time (real) = 679.51 sec

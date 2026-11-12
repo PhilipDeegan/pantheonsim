@@ -326,7 +326,13 @@ struct Region {
 // the cache had nothing, counting towards the compile; Queued: a compile is queued or running.
 // Failed: nothing to compile, or the compile failed. Declined: the sample found the section's regions too small a share of its work to be worth the
 // hook (the share rule below). Both go back to the plain run loop for good.
-enum class State : int { Idle, Looking, Counting, Queued, Ready, Failed, Declined };
+// Waiting (round sp57): the cache had nothing and the threshold is far: the section runs on the plain loop, which costs nothing, and only the warp
+// instructions of each of its calls are added up (Unit::wait_note); `profile` instructions before the threshold it is Counting again, with the hook, so
+// that the regions' counts of the compile are fresh. (Until that round a section counted in the hook loop all the way: 2 to 12 % of a program that
+// never reaches the threshold.)
+enum class State : int { Idle, Looking, Counting, Queued, Ready, Failed, Declined, Waiting };
+inline constexpr uint64_t kWaitBatch = 65536;        // warp instructions a thread adds up by itself while a section waits
+inline constexpr uint64_t kWaitBatchFrom = 1 << 20;  // ... when the wait is at least this long
 
 // The share rule (round 14). The hook (tier_run_t<true>, the counting, the cache lookup) costs the instructions of a section that are not in a compiled
 // region something, and a section whose regions are a small part of its work never earns it back (`warp`, `shared`, `f64_fma`, `divergent`, `texture`
@@ -362,6 +368,10 @@ struct Unit : std::enable_shared_from_this<Unit> {
   std::atomic<bool> sampling{false};   // the share rule has not decided yet (set by make_unit when the rule is on)
   std::atomic<uint64_t> sampled{0};    // warp instructions run in the hook loop while sampling
   std::unique_ptr<std::atomic<uint64_t>[]> counts;   // ... per region: which ones are hot decides which are compiled
+  std::atomic<uint64_t> waited{0};     // warp instructions of the section run on the plain loop while Waiting (all of them, in regions or not)
+  std::atomic<uint64_t> wait_for{0};   // ... and how many of them end the wait
+  std::atomic<uint64_t> wait_batch{1}; // ... and how many a thread adds up before it brings them to `waited` (set with wait_for)
+  std::atomic<uint64_t> credit{0};     // what the wait counts for towards the threshold once it is over (wait_for; Unit::note adds it to the regions' counts)
   // Merging (linking): `regions` has one more element than spec.regions, a placeholder until a merged selection is published; then it is the merged region
   // (its spec is `merged`), the only one with entries in active_at and a function.
   RegionSpec merged;
@@ -371,6 +381,14 @@ struct Unit : std::enable_shared_from_this<Unit> {
   bool counting() const { return state.load(std::memory_order_relaxed) <= static_cast<int>(State::Counting); }
   // Whether the run loop with the region hook is wanted: not once the section has failed or been declined (the plain loop is then used: step_warp asks).
   bool hook() const { return state.load(std::memory_order_relaxed) <= static_cast<int>(State::Ready); }
+  // Waiting: the plain loop is used, and step_warp tells wait_note what each call of it ran.
+  bool waiting() const { return state.load(std::memory_order_relaxed) == static_cast<int>(State::Waiting); }
+  // The plain loop ran `instr` warp instructions of this section while it was Waiting. Each thread adds them up by itself and brings them to the shared
+  // count a batch at a time (kWaitBatch instructions when the wait is a long one, so that sixteen threads running short calls do not pass the count's cache
+  // line around: that cost a 16-thread run up to 13 %; at once when the wait is short, as in the tests). The thread whose batch completes the wait makes
+  // the section Counting again, up to a batch a thread late.
+  void wait_note(uint64_t instr);
+  void wait_over();
   // The hook loop ran `instr` warp instructions of this section (the whole pass, regions or not). The one that brings the sample to `sample_after` decides.
   void sample(uint64_t instr);
   // The work generated code would do for what the regions ran while counting: sum over regions of entries * gen, entries = counts / k.
@@ -403,6 +421,7 @@ struct Stats {
   std::atomic<uint64_t> regions_run{0}, instructions_run{0}, generated_run{0}, region_throws{0};   // calls of generated regions, and the warp instructions in them
   std::atomic<uint64_t> compile_us{0}, lookup_us{0}, units_ready{0};
   std::atomic<uint64_t> declined{0}, accepted{0};   // the share rule's decisions
+  std::atomic<uint64_t> waits{0}, wait_ends{0};     // sections that went to the plain loop on the way to the threshold (State::Waiting), and those that came back to count
   std::atomic<uint64_t> continued{0};   // branches and register-only ops the generated code went on past (the loop's chain steps it took over)
   // Why generated code was left (round sp52), per reason (ExitWhy): [0] the group was every runnable lane of the warp, [1] other runnable lanes stood elsewhere
   // (a diverged warp: the loop's chain conditions do not hold), [2] the calls of these that left at their entry with nothing run.

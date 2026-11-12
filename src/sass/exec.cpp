@@ -2124,7 +2124,16 @@ bool Runner::step_warp(Block& blk, Warp& w) {
     w.code_hint = code;
   }
   if (tier_ && !w.mactive_force) {
-    if (const tier::Program* tp = code->tier_program()) return (tp->jit && tp->jit->hook()) ? tier_run_jit(blk, w, group, pick, *code, *tp) : tier_run(blk, w, group, pick, *code, *tp);
+    if (const tier::Program* tp = code->tier_program()) {
+      jit::Unit* const ju = tp->jit.get();
+      if (ju && ju->hook()) return tier_run_jit(blk, w, group, pick, *code, *tp);
+      // (One call of the plain loop, so that it stays inlined here. A section that waits for its compile threshold on it -- round sp57, jit::State::Waiting --
+      // is told what the call ran.)
+      const uint64_t steps0 = w.steps;
+      const bool r = tier_run(blk, w, group, pick, *code, *tp);
+      if (ju && ju->waiting()) [[unlikely]] ju->wait_note(w.steps - steps0);
+      return r;
+    }
   }
   const Instr* ins = &code->instr((pc - code->base) / 16);
   const uint64_t end = code->base + 16 * code->count;

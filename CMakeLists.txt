@@ -1553,6 +1553,11 @@ foreach(_t test_sass_chain_cont test_sass_store_gate test_sass_alu_runs test_sas
   set_tests_properties(${_t}_jit PROPERTIES ENVIRONMENT
     "VGPU_JIT=1;VGPU_JIT_THRESHOLD=1;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-${_t}")
 endforeach()
+# The wait on the plain loop (round sp57): a threshold that is far and a short profile, so that the sections of these kernels are hooked, wait on the plain
+# loop, are hooked again and compiled, all inside one kernel; test_sass_chain_cont checks that sections did wait and came back (VGPU_JIT_EXPECT_WAIT).
+add_test(NAME test_sass_chain_cont_jit_wait COMMAND test_sass_chain_cont)
+set_tests_properties(test_sass_chain_cont_jit_wait PROPERTIES ENVIRONMENT
+  "VGPU_JIT=1;VGPU_JIT_EXPECT_WAIT=1;VGPU_JIT_THRESHOLD=20000;VGPU_JIT_LOOKUP_AFTER=256;VGPU_JIT_PROFILE=2000;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-wait-test_sass_chain_cont")
 # And with linking (VGPU_JIT_LINK=1, round sp52: the generated code goes on past a branch or cont op in a diverged warp while the chain would pick its group again):
 # test_sass_chain_cont's kernels diverge, loop apart and meet; the same words, counters and clocks as the interpreter, and the linking must have happened.
 # (VGPU_JIT_LINK_RULE=0: every section linked. The loop rule of round sp53 leaves a section with a loop and no BSSY, BSYNC, CALL or RET unlinked, and several of
@@ -1802,6 +1807,9 @@ target_include_directories(test_jit PRIVATE src)
 # Tier 2, round 14: the share rule (a section whose regions are a small part of its work is declined and runs on the plain loop).
 vgpu_unit_test(test_jit_share)
 target_include_directories(test_jit_share PRIVATE src)
+# Tier 2, round sp57: a section far from its compile threshold waits for it on the plain loop (State::Waiting) and counts again just before it.
+vgpu_unit_test(test_jit_wait)
+target_include_directories(test_jit_wait PRIVATE src)
 # Register residence of the generated code against the register-file code, on random regions (VGPU_JIT_RANDOM_UNITS=<n> for more).
 vgpu_unit_test(test_jit_resid)
 target_include_directories(test_jit_resid PRIVATE src)
