@@ -721,7 +721,7 @@ inline uint64_t sample_stride(uint64_t blocks) {
 // A sample costs the fork, the copy's decode and set-up and the sampled blocks, whatever the launch turns out to be, and the process waits for it:
 // 1 to 12 ms in Round sp60b's corpus. It also costs afterwards: the fork write-protects the process's pages, and each page the process writes later
 // takes a fault (Rodinia backprop, 36 MiB live: 6 ms waited and 19 ms more over the run, on the A10G rig). The copy is given kSampleTimeoutSeconds
-// at most; one that has not answered by then is ended and the launch is the simulator's. What keeps a short program from paying for samples it
+// at most (sample_timeout_seconds: more with much live memory); one that has not answered by then is ended and the launch is the simulator's. What keeps a short program from paying for samples it
 // cannot use:
 //  * only a kernel with a loop is sampled (code_has_loop). Without one a warp runs each instruction once at most, the static count bounds its work,
 //    and the launches of such kernels took 0.4 to 1.2 times their static estimate: none is long without a long estimate, which the rules above see;
@@ -731,6 +731,12 @@ inline uint64_t sample_stride(uint64_t blocks) {
 //    the process has run (`expected_s`: the dearest sample of the process so far, or kSampleCostGuessSeconds and the faults before the first).
 // The floor is a rule of thumb fitted to this corpus, not a bound: the static estimate of a kernel with a loop says little (0.2 to 80 times off).
 inline constexpr double kSampleTimeoutSeconds = 0.050;
+// ... and longer with much live memory, whose page tables the fork copies: HeCBench black-scholes (1.9 GiB live) had not answered after 50 ms on
+// the A10G rig and was not sent. 0.2 ms more per MiB: 0.43 s for it, a ninth of the static estimate the floor asks of such a launch.
+inline constexpr double kSampleTimeoutSecondsPerLiveByte = 2e-10;
+inline double sample_timeout_seconds(uint64_t live_bytes) {
+  return kSampleTimeoutSeconds + kSampleTimeoutSecondsPerLiveByte * static_cast<double>(live_bytes);
+}
 inline constexpr double kSampleStaticFloorSeconds = 0.030;
 inline constexpr double kSampleShareOfAge = 0.02;
 inline constexpr double kSampleCostGuessSeconds = 0.003;

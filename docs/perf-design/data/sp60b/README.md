@@ -12,14 +12,14 @@ HeCBench list, with the arguments of `tools/bench/real/real.py`.
 |---|---|
 | `samplelog.py` | runs the corpus in forms of the mode (off, `exact`, `turbo`, `VGPU_HOST_GPU_SAMPLE=0`, `=log`, a stand-in driver that refuses, one that keeps memory and computes nothing) and keeps wall time, an output hash, the mode's lines and every `host_gpu_sample:` line |
 | `model.py` | per sampled launch: the static estimate, the sample's cost, the estimate from the sample, what the launch took |
-| `model-exact.md`, `model-turbo.md` | its tables for `VGPU_HOST_GPU_SAMPLE=log` in exact and in turbo mode (every candidate launch is sampled in `log`, whatever the floor says): 16 and 52 launches |
-| `mutants.py`, `mutants.txt` | 58 mutants of the rule in `include/vgpu/host_gpu.hpp`, each a copy of the header outside the tree: 58 killed by `test_host_gpu_logic` |
+| `model-exact.md`, `model-turbo.md` | its tables for `VGPU_HOST_GPU_SAMPLE=log` in exact and in turbo mode (every candidate launch is sampled in `log`, whatever the loop test and the floor say): 16 and 52 launches. Made before the loop test was added, so they have no column for it |
+| `mutants.py`, `mutants.txt` | 66 mutants of the rule in `include/vgpu/host_gpu.hpp` (how many blocks, the stride, the floor, the loop test, the estimate, the card path, when to sample), each a copy of the header outside the tree: 66 killed by `test_host_gpu_logic` |
 | `card-run.sh` | the card part: the card CI, the A/B of `exact` and `turbo` against `exact0` and `turbo0` (no sampling), the log of what was sent, the early-start experiment |
 
 What the tables say: the eight launches the rule would send (SYRK, SYR2K, the first kernel of 2MM, in both modes; black-scholes, binomial,
 shmembench in turbo) took 0.9 to 1.6 times the sample's estimate; no launch under 0.25 s was estimated over the bar. A sample cost 0.9 to 12 ms
-(27 ms with 1.9 GiB live: the fork). By default (the static floor of 30 ms, or 2% of the process's age) the programs that were sampled and kept
-paid at most 1.5% of their wall time (Rodinia backprop, 4.2 ms of 273 ms); the 13 ms and 22 ms HeCBench programs are not sampled.
+(27 ms with 1.9 GiB live: the fork). That is the time waited; the page faults after the fork cost more (Rodinia backprop: 4 ms waited and 12 ms
+more over the run, median of 12 interleaved runs), which is why the rule also asks for a loop and scales the floor with the live memory.
 
 Against the stand-in driver: a sampled launch that the driver refuses is run by the simulator and the output is the mode-off output (SYRK,
 SYR2K, GEMVER, black-scholes, shmembench); a sampled launch sent to a stand-in that keeps memory and computes nothing leaves the program

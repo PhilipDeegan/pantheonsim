@@ -1031,6 +1031,7 @@ VTEST(sample_constants_are_the_ones_the_round_measured) {
   VCHECK(kSampleMinBlocks == 256 && kSampleMaxBlocks == 32);
   VCHECK(kSampleBudgetSeconds == 0.002 && kSampleTimeoutSeconds == 0.050 && kSampleShareOfAge == 0.02 && kSampleCostGuessSeconds == 0.003);
   VCHECK(kSampleStaticFloorSeconds == 0.030 && kSampleSecondsPerLiveByte == 6e-10 && kSampleCardSpeedup == 8.0);
+  VCHECK(kSampleTimeoutSecondsPerLiveByte == 2e-10);
 }
 
 VTEST(sample_runs_a_few_blocks_and_none_of_a_small_grid) {
@@ -1040,6 +1041,15 @@ VTEST(sample_runs_a_few_blocks_and_none_of_a_small_grid) {
   VCHECK(sample_blocks(uint64_t{1} << 40) == kSampleMaxBlocks);       // never more
   for (uint64_t b : {kSampleMinBlocks, uint64_t{300}, uint64_t{4096}, uint64_t{1} << 30})
     VCHECK(sample_blocks(b) >= 2 && sample_blocks(b) * 2 <= b);       // half the grid at most
+}
+
+VTEST(a_copy_is_given_longer_to_answer_with_more_live_memory) {
+  VCHECK(sample_timeout_seconds(0) == kSampleTimeoutSeconds);
+  VCHECK(sample_timeout_seconds(8ull << 20) > 0.0516 && sample_timeout_seconds(8ull << 20) < 0.0517);   // SYRK: 8 MiB
+  VCHECK(sample_timeout_seconds(2000ull << 20) > 0.469 && sample_timeout_seconds(2000ull << 20) < 0.470);   // black-scholes: 1.9 GiB
+  // never more than a ninth of the static estimate the floor asks for (the wait is lost when the copy does not answer)
+  for (uint64_t live : {uint64_t{0}, 8ull << 20, 80ull << 20, 1ull << 30, 16ull << 30})
+    VCHECK(sample_timeout_seconds(live) - kSampleTimeoutSeconds <= sample_static_floor(live) / 9 + 1e-12);
 }
 
 VTEST(sampled_blocks_are_spread_over_the_grid) {

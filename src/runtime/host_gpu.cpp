@@ -1286,7 +1286,7 @@ bool Runtime::sample_plan(const ptx::EntryFn&, SamplePlan* plan) {
   plan->limit = sample_blocks(t_sample_hint.blocks);
   plan->stride = sample_stride(t_sample_hint.blocks);
   plan->budget_s = kSampleBudgetSeconds;
-  plan->timeout_s = kSampleTimeoutSeconds;
+  plan->timeout_s = sample_timeout_seconds(t_sample_hint.live);
   return plan->limit != 0;
 }
 

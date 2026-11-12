@@ -46,14 +46,22 @@
 45 killed by sim_time_table_peeks_at_one_sample_and_takes_an_extrapolation_as_history: record_extrapolated: one sample like any other
 46 killed by sim_time_table_peeks_at_one_sample_and_takes_an_extrapolation_as_history: record_extrapolated: records nothing
 47 killed by sampling_needs_a_long_static_estimate_or_a_process_that_can_afford_it: floor: the live memory does not raise it
-48 killed by sampling_needs_a_long_static_estimate_or_a_process_that_can_afford_it: floor: the fork's cost alone, not ten times it
-49 killed by sample_constants_are_the_ones_the_round_measured, sampling_needs_a_long_static_estimate_or_a_process_that_can_afford_it: constant: the fork's cost per byte
-50 killed by sample_constants_are_the_ones_the_round_measured, sampling_needs_a_long_static_estimate_or_a_process_that_can_afford_it: constant: the static floor
-51 killed by sample_constants_are_the_ones_the_round_measured, sample_charges_the_memory_and_an_unknown_card_time: constant: the card's assumed speed-up
-52 killed by sample_constants_are_the_ones_the_round_measured, sample_runs_a_few_blocks_and_none_of_a_small_grid, sampled_blocks_are_spread_over_the_grid: constant: the most blocks
-53 killed by sample_constants_are_the_ones_the_round_measured, sample_runs_a_few_blocks_and_none_of_a_small_grid, sampled_blocks_are_spread_over_the_grid: constant: the smallest grid
-54 killed by sample_constants_are_the_ones_the_round_measured: constant: the budget
-55 killed by sample_constants_are_the_ones_the_round_measured: constant: the timeout
-56 killed by sample_constants_are_the_ones_the_round_measured, samples_may_cost_a_share_of_the_time_the_process_has_run, sampling_needs_a_long_static_estimate_or_a_process_that_can_afford_it: constant: the share of the age
-57 killed by sample_constants_are_the_ones_the_round_measured, samples_may_cost_a_share_of_the_time_the_process_has_run, sampling_needs_a_long_static_estimate_or_a_process_that_can_afford_it: constant: the first sample's guess
-58 of 58 killed
+48 killed by sampling_needs_a_long_static_estimate_or_a_process_that_can_afford_it: floor: the faults' cost alone, not three times it
+49 killed by sampling_needs_a_long_static_estimate_or_a_process_that_can_afford_it: floor: the two added
+50 killed by sample_constants_are_the_ones_the_round_measured, sampling_needs_a_long_static_estimate_or_a_process_that_can_afford_it: constant: the faults' cost per byte
+51 killed by sampling_needs_a_long_static_estimate_or_a_process_that_can_afford_it: worth: a kernel with no loop is sampled
+52 killed by a_loop_is_a_cycle_the_entry_reaches: loop: a cycle the entry cannot reach counts
+53 killed by a_loop_is_a_cycle_the_entry_reaches: loop: an instruction seen before counts as a cycle
+54 killed by a_loop_is_a_cycle_the_entry_reaches: loop: no cycle is ever found
+55 killed by a_loop_is_a_cycle_the_entry_reaches: loop: an exit goes on
+56 killed by a_loop_is_a_cycle_the_entry_reaches: loop: a branch is never taken
+57 killed by a_loop_is_a_cycle_the_entry_reaches: loop: indirect flow is ignored
+58 killed by sample_constants_are_the_ones_the_round_measured, sampling_needs_a_long_static_estimate_or_a_process_that_can_afford_it: constant: the static floor
+59 killed by sample_constants_are_the_ones_the_round_measured, sample_charges_the_memory_and_an_unknown_card_time: constant: the card's assumed speed-up
+60 killed by sample_constants_are_the_ones_the_round_measured, sample_runs_a_few_blocks_and_none_of_a_small_grid, sampled_blocks_are_spread_over_the_grid: constant: the most blocks
+61 killed by sample_constants_are_the_ones_the_round_measured, sample_runs_a_few_blocks_and_none_of_a_small_grid, sampled_blocks_are_spread_over_the_grid: constant: the smallest grid
+62 killed by sample_constants_are_the_ones_the_round_measured: constant: the budget
+63 killed by sample_constants_are_the_ones_the_round_measured: constant: the timeout
+64 killed by sample_constants_are_the_ones_the_round_measured, samples_may_cost_a_share_of_the_time_the_process_has_run, sampling_needs_a_long_static_estimate_or_a_process_that_can_afford_it: constant: the share of the age
+65 killed by sample_constants_are_the_ones_the_round_measured, samples_may_cost_a_share_of_the_time_the_process_has_run, sampling_needs_a_long_static_estimate_or_a_process_that_can_afford_it: constant: the first sample's guess
+66 of 66 killed

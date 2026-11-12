@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Round sp60b, the card part: run on the rig (one A10G), from the root of the source tree, after the corpora are in ~/corp
 # (tools/bench/real/pack_corpora.sh's layout, the sm_86 binaries built with nvcc 13.0 and -cudart shared).
-#   docs/perf-design/data/sp60b/card-run.sh <stage> [out dir]        stages: build ci ab early exit all
+#   docs/perf-design/data/sp60b/card-run.sh <stage> [out dir]        stages: build ci ab early exit all, and repeat (not part of all)
 # Forms of the A/B (tools/bench/hostgpu/run.py): exact and turbo sample launches (the default); exact0 and turbo0 do not
 # (VGPU_HOST_GPU_SAMPLE=0: the rule of Round sp59). All four are interleaved, run by run, with the plain simulator.
 set -u
@@ -71,5 +71,13 @@ exit|all)
     one GESUMMV exact $early "$pb" "$pb/GESUMMV"
     one srad_v2 turbo $early "$(mktemp -d)" "$rb/srad_v2" 512 512 0 127 0 127 0.5 2
   done | tee "$out/exit.txt"
+  ;;
+repeat)
+  # The programs the A/B showed more than 3% apart with NO launch sampled in either form (the two forms then run the same code): 10 more runs of
+  # each form, interleaved, to see the spread of one form against the gap between the two. Then what the machine has left of the runs: zombies
+  # and processes of the corpus still there.
+  $H --programs rodinia/backprop,rodinia/sc_gpu,polybench/JACOBI2D,rodinia/hotspot --runs 10 --forms sim,exact,exact0,turbo,turbo0 --timeout 300 --no-exact-stats \
+     --json "$out/repeat.json" --md "$out/repeat.md" 2>&1 | tee "$out/repeat.txt" | tail -12
+  { echo "zombies: $(ps -eo stat= | grep -c '^Z')"; echo "processes of the corpus left: $(ps -eo args= | grep -c "^$corp/")"; } | tee "$out/leftover.txt"
   ;;
 esac
