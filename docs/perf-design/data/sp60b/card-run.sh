@@ -26,11 +26,15 @@ ci|all)
   (cd "$build" && ctest -R 'e2e_host_gpu_stub|test_host_gpu_logic|hostgpu_bench_selftest' --output-on-failure) 2>&1 | tee "$out/stub.txt"
   ;;&
 ab|all)
-  # the A/B: 3 runs a form (1 for a program over 30 s in the simulator), medians
-  for suite in rodinia polybench hecbench; do
-    $H --corpora $suite --skip "$HEC_SKIP" --runs 3 --long-secs 30 --long-runs 1 --forms sim,exact,exact0,turbo,turbo0 --timeout 600 \
-       --json "$out/ab-$suite.json" --md "$out/ab-$suite.md" 2>&1 | tee "$out/ab-$suite.txt" | tail -40
-  done
+  # the A/B: 3 runs a form (1 for a program over 30 s in the simulator), medians. Cut for the rig's hours: GRAMSCHM is left out (229 s in the
+  # simulator and more in every card form: 25 minutes), and HeCBench runs are limited to 120 s (the simulator's runs of the programs that take
+  # longer are cut there and give no reference time).
+  $H --corpora rodinia --runs 3 --long-secs 30 --long-runs 1 --forms sim,exact,exact0,turbo,turbo0 --timeout 600 \
+     --json "$out/ab-rodinia.json" --md "$out/ab-rodinia.md" 2>&1 | tee "$out/ab-rodinia.txt" | tail -40
+  $H --corpora polybench --skip GRAMSCHM --runs 3 --long-secs 30 --long-runs 1 --forms sim,exact,exact0,turbo,turbo0 --timeout 600 \
+     --json "$out/ab-polybench.json" --md "$out/ab-polybench.md" 2>&1 | tee "$out/ab-polybench.txt" | tail -40
+  $H --corpora hecbench --skip "$HEC_SKIP" --runs 3 --long-secs 30 --long-runs 1 --forms sim,exact,exact0,turbo,turbo0 --timeout 120 \
+     --json "$out/ab-hecbench.json" --md "$out/ab-hecbench.md" 2>&1 | tee "$out/ab-hecbench.txt" | tail -40
   # what each sample measured and what was sent: one run with the log (also gives the forks' cost and the estimates on the rig's own CPU)
   for p in polybench/SYRK polybench/SYR2K polybench/2MM polybench/GEMM polybench/2DCONV polybench/GEMVER rodinia/backprop hecbench/black-scholes-cuda hecbench/binomial-cuda; do
     case $p in

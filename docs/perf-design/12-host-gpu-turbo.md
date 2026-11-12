@@ -226,7 +226,7 @@ when a static estimate said so, and that estimate counts every instruction of th
 loops, and programs that launch each kernel once never get a second chance. Nothing static says how long a thread runs; the launch does.
 
 **The rule.** A launch that the history rule and the static first-launch rule leave to the simulator for want of an estimate, of an admitted kernel
-on a grid of at least 256 blocks, in a process whose driver has not been started, is *sampled* before the simulator runs it:
+that has a loop, on a grid of at least 256 blocks, in a process whose driver has not been started, is *sampled* before the simulator runs it:
 
 1. The process is forked. The copy runs up to 32 blocks of the launch on its one thread, spread evenly over the grid (the blocks of a grid need
    not be alike). It runs each block twice and times the second run: the first pays what a launch pays once (decode, set-up, the chunks of
@@ -261,14 +261,29 @@ What the copy can do outside its memory, and why it does not:
 * *Other threads.* The copy has the calling thread only. The sampled blocks run on that thread (the engine's one-thread loop; a cooperative,
   clustered or lockstep launch runs no block in a part and so gives no estimate). If another thread held a lock the copy needs when the process
   was forked, the copy waits for ever, the process stops waiting after 50 ms and ends it: a lost sample, not a wrong one.
-* *The program's own handling of children.* The copy is reaped by the process (`waitpid` on its pid). A program that waits for any child
-  (`wait`, a `SIGCHLD` handler that reaps) can see a child it did not make: `VGPU_HOST_GPU_SAMPLE=0` is for such a program.
+* *The caches on disk.* The copy queues no compile for the code cache and adds no key to the cache of modules, so it leaves no file, whole or
+  partial, when it ends or is ended. (Both caches write a temporary file and rename it, or append one 16-byte key, so a copy that did write
+  could not have left a broken one; it now writes nothing.)
+* *The program's own handling of children.* The copy is reaped by the process (`waitpid` on its pid): at once if it has ended when it
+  answers, else at the next sample or by the mode's exit handler, which waits for it, so no child is left when the process ends. A program
+  that waits for any child (`wait`, a `SIGCHLD` handler that reaps) can see a child it did not make: `VGPU_HOST_GPU_SAMPLE=0` is for such a
+  program.
 
-**What a sample costs** is the fork, the copy's decode and set-up and the sampled blocks: a few milliseconds whatever the launch turns out to be.
-Two things keep a short program from paying for samples it cannot use; a launch is sampled when either holds: its static estimate is at
-least 30 ms (ten times a sample's usual cost; more with much live memory, because the fork copies page tables: 1.2 ms per 100 MiB), or what the
-process's samples have cost so far, plus this one, is within 2% of the time the process has run. Most programs launch within milliseconds of
-their start, so in practice the first of the two decides. `VGPU_HOST_GPU_SAMPLE=0` switches sampling off.
+**What a sample costs.** The fork, the copy's decode and set-up and the sampled blocks: 1 to 12 ms waited, whatever the launch turns out to
+be. And more afterwards: the fork write-protects the process's pages, and every page the process writes later takes a fault (Rodinia backprop
+with 36 MiB live: 6 ms waited, 19 ms more over the rest of the run, on the A10G rig). Three things keep a short program from paying for samples
+it cannot use:
+
+* *Only a kernel with a loop is sampled*: a cycle in its control flow that the entry reaches. Without one a warp runs each instruction once at
+  most, so the static count bounds the work, and such kernels took 0.4 to 1.2 times their static estimate over the corpus. (The older test, "a
+  branch to a lower address", is true of every kernel: compilers end each one with a branch to itself after its `EXIT`.)
+* *Its static estimate is at least 30 ms*, ten times the cost of a small sample, and at least three times what the faults afterwards are
+  expected to cost (0.6 ms per MiB of live memory).
+* *Or the process can afford it*: what its samples have cost so far, plus this one, is within 2% of the time the process has run. Most programs
+  launch within milliseconds of their start, so in practice the estimate decides.
+
+The floor is a rule of thumb fitted to this corpus, not a bound: the static estimate of a kernel with a loop was 0.2 to 80 times off.
+`VGPU_HOST_GPU_SAMPLE=0` switches sampling off.
 
 **What it does not reach.** A grid of fewer than 256 blocks has too few blocks to time: a copy would have to run one of them to its end, and
 on such a grid a block is a large share of the launch. PolyBench COVAR and CORR spend their time in a kernel launched on 8 blocks of 256

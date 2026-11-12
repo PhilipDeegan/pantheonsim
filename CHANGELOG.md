@@ -7,8 +7,8 @@ release says what runs and what it produces, never how fast a real GPU would run
 
 ## Unreleased
 
-- Host-GPU mode (experimental, opt-in), both `exact` and `turbo`: a launch of a kernel the mode knows nothing of yet is now *sampled*
-  before the simulator is left to run it. The process is forked, the copy runs the launch's first blocks (up to 32, a few milliseconds), reports
+- Host-GPU mode (experimental, opt-in), both `exact` and `turbo`: a launch of a kernel with a loop that the mode knows nothing of yet is now *sampled*
+  before the simulator is left to run it. The process is forked, the copy runs a few of the launch's blocks (up to 32, a few milliseconds), reports
   their times and ends; if they say that the launch repays the card path and the start of the real driver, the card runs the launch, otherwise
   the simulator does. Before, such a launch went to the card only on a static count of the kernel's instructions, which is low by the trip
   count of its loops, so programs that launch each kernel once kept their one long launch in the simulator. `VGPU_HOST_GPU_SAMPLE=0` switches
