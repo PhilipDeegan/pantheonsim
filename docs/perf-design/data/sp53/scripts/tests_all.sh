@@ -1,4 +1,5 @@
 #!/bin/bash
+# NOTE: VGPU_JIT_LINK_BSYNC (BSYNC as a region's op) was removed from the code after round sp53; this script is kept as the record of that round and no longer runs as written.
 # tests_all.sh <build> <work dir> <log>: the JIT's unit tests and the run-loop tests in every leg ctest has for them (plain, the JIT forced on, with linking,
 # VGPU_JIT_LINK_BSYNC=1 and VGPU_JIT_LINK_RULE=0, and test_sass_chain_cont with linking alone and with the loop rule on), one line a leg. The caller holds the machine lock.
 b=$1; w=$2; log=$3

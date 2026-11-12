@@ -2243,7 +2243,6 @@ struct JitHost {
   uint64_t pc0;   // the address of the first op of the region being run (a split in generated code sets lanes' addresses)
   uint64_t base;  // the section's address, and how many ops it has
   uint64_t count;
-  bool regroup = false;   // a BSYNC was run in the region call (jit_bsync): Ctx::group, pcs_at and olo say what the loop goes on with, even when the group is the same
 };
 
 // The tier's statistics of an op the generated code has run, an escape's or its own (reported even when no lane executed it, as the loop reports them).
@@ -2311,44 +2310,6 @@ int64_t jit_ret(jit::Ctx* j, uint32_t i, uint32_t ex, uint32_t group) {
   return h.c->r->jit_ret_target(*h.c->w, op.dst, ex, group, h.base, h.count, h.pc0);
 }
 
-// A BSYNC inside a region (linking, jit.hpp, Ctx::bsync): the run loop's own lines for it, then its chain's pick. The group's lanes stand at the BSYNC
-// (the loop sets them when its pass has moved; here they are always set: the same state), the lanes of `ex` wait at the barrier and are released with
-// its other lanes once all of them have arrived, the lanes the guard kept out go on. Then the chain: the runnable lanes at the lowest address are the
-// next pass's group, if any can run and that address is an op of the section; the lanes that can run outside it are the "other lanes" of that pass.
-int64_t jit_bsync(jit::Ctx* j, uint32_t i, uint32_t ex, uint32_t group) {
-  JitHost& h = *static_cast<JitHost*>(j->host);
-  Warp& w = *h.c->w;
-  const tier::MOp& op = reinterpret_cast<const tier::MOp*>(j->ops)[i];
-  const uint32_t mut = jit::host_mutants();
-  const uint64_t here = h.pc0 + 16 * uint64_t{i};
-  if (!(mut & jit::kMutHostBsyncPcs)) tier_set_pcs(w, group, here);
-  tier_bsync(w, ex, op.c);
-  for (Mask m = group & ~ex; m; m &= m - 1) w.pc[std::countr_zero(m)] += 16;
-  h.regroup = true;
-  if (jit::stats_on()) [[unlikely]] jit::stats().bsyncs.fetch_add(1, std::memory_order_relaxed);
-  const Mask run = w.runnable();
-  uint64_t lo = 0;
-  Mask next = 0;
-  if (run) next = exec::sasslanes::pick_group(w.pc, run, lo);
-  if (!run || lo - h.base >= 16 * h.count || ((lo - h.base) & 15)) {
-    if (jit::stats_on()) [[unlikely]] jit::stats().bsync_over.fetch_add(1, std::memory_order_relaxed);
-    return jit::kBsyncOver;
-  }
-  const int64_t x = (static_cast<int64_t>(lo) - static_cast<int64_t>(h.pc0)) / 16;
-  if (jit::stats_on() && next != group) [[unlikely]] jit::stats().bsync_groups.fetch_add(1, std::memory_order_relaxed);
-  j->group = next;
-  j->pcs_at = static_cast<int32_t>(x);
-  if (const Mask rest = run & ~next; rest && !(mut & jit::kMutHostBsyncOlo)) {
-    uint64_t olo;
-    (void)exec::sasslanes::pick_group(w.pc, rest, olo);
-    const int64_t first = static_cast<int64_t>((h.pc0 - h.base) / 16);
-    j->olo = (olo < h.base ? std::numeric_limits<int64_t>::min() / 2 : static_cast<int64_t>((olo - h.base + 15) / 16)) - first;
-  } else {
-    j->olo = jit::kNoOthers;
-  }
-  return x;
-}
-
 uint32_t jit_exit0(jit::Ctx* j) {
   JitHost& h = *static_cast<JitHost*>(j->host);
   return h.c->r->jit_exit_none(*h.c->blk, *h.c->w) ? 1u : 0u;
@@ -2388,10 +2349,6 @@ struct JitFrame {
   int64_t olo = 0;
   uint64_t base = 0;    // the section's address
   size_t pcs_first = 0; // after a region call that split the group (jc.group is not the group it was called with): the section's op the new group's lanes' addresses were set to
-  // After a region call that ran a split or a BSYNC: the loop goes on with jc.group, whose lanes' addresses are those of pcs_first, as a diverged warp's group
-  // (regroup 2: lstate 1 and `olo`) or as the warp's only runnable lanes (regroup 1: a BSYNC after which no other lane can run). 0: nothing of the kind.
-  uint8_t regroup = 0;
-  bool over = false;    // the region call ran a BSYNC after which the chain starts no pass (jit.hpp, Ctx::over): the loop returns
 };
 
 // Why a region call ended at the region-relative op `ei` (the statistics only: jit::ExitWhy). Worked out from the state the generated code left, which is
@@ -2404,7 +2361,6 @@ struct JitFrame {
     const jit::OpFacts& f = rs.ops[static_cast<uint32_t>(ei)];
     const tier::MOp& op = ops[rg.first + static_cast<uint32_t>(ei)];
     if (f.call || f.hostctl == 3) return jit::kExCallRet;   // a CALL or RET in a region (linking)
-    if (f.hostctl == 4) return jit::kExBsync;               // a BSYNC in a region (linking): the chain's conditions did not hold, or the turn has no call left
     if (f.br) {
       const Mask ex = op.unguarded ? group : tier_guard(w, *op.ins, group);
       Mask take = ex;
@@ -2502,7 +2458,6 @@ struct JitFrame {
     jc.exit0 = &jit_exit0;
     jc.callok = &jit_callok;
     jc.ret = &jit_ret;
-    jc.bsync = &jit_bsync;
     if (f.mut & jit::kMutHostSpins) [[unlikely]] {
       static thread_local uint32_t elsewhere;
       elsewhere = 0;
@@ -2519,9 +2474,6 @@ struct JitFrame {
   f.jc.ops = reinterpret_cast<const uint8_t*>(&ops[rg.first]);
   f.jc.last = ~0u;
   f.jc.group = group;
-  f.jc.over = 0;
-  f.jh.regroup = false;
-  f.regroup = 0;
   f.jh.pc0 = f.base + 16 * static_cast<uint64_t>(rg.first);
   const uint32_t entry = static_cast<uint32_t>(idx - rg.first);
   [[maybe_unused]] uint64_t insts0 = 0;
@@ -2538,25 +2490,15 @@ struct JitFrame {
     throw;
   }
   const int32_t ei = f.jc.exit_idx, eps = f.jc.exit_ps;
-  f.over = f.jc.over != 0;
-  if (f.jc.group != group || f.jh.regroup) [[unlikely]] {
-    // A split was run in there: the loop goes on with the half the generated code went on with, in a diverged warp. Or a BSYNC: with the group the chain
-    // picked after it, which is a diverged warp's group when other lanes can run (their lowest place in Ctx::olo) and the warp's only runnable lanes otherwise.
+  if (f.jc.group != group) [[unlikely]] {   // a split was run in there: the loop goes on with the half the generated code went on with, in a diverged warp
     f.pcs_first = static_cast<size_t>(static_cast<int64_t>(rg.first) + f.jc.pcs_at);
-    if (f.jc.olo == jit::kNoOthers) {
-      f.regroup = 1;
-      f.lstate = 2;
-      chain = true;
-    } else {
-      f.regroup = 2;
-      f.olo = f.jc.olo + static_cast<int64_t>(rg.first);
-      f.lstate = 1;
-      chain = false;
-    }
-    if (jit::stats_on() && f.jc.group != group && !f.jh.regroup) jit::stats().splits.fetch_add(1, std::memory_order_relaxed);
+    f.olo = f.jc.olo + static_cast<int64_t>(rg.first);
+    f.lstate = 1;
+    chain = false;
+    if (jit::stats_on()) jit::stats().splits.fetch_add(1, std::memory_order_relaxed);
   }
   if (jit::stats_on()) [[unlikely]] {
-    const unsigned why = f.over ? static_cast<unsigned>(jit::kExBsync) : jit_exit_why(ju, ri, ops, ei, c, w, f.jc.group, chain, max_steps);
+    const unsigned why = jit_exit_why(ju, ri, ops, ei, c, w, f.jc.group, chain, max_steps);
     jit::stats().exits[why][w.runnable() != f.jc.group ? 1 : 0].fetch_add(1, std::memory_order_relaxed);
     if (ei == static_cast<int32_t>(entry) && eps == jit::kNoPassStart) jit::stats().exits[why][2].fetch_add(1, std::memory_order_relaxed);
   }
@@ -2765,16 +2707,14 @@ bool Runner::tier_run_t(Block& blk, Warp& w, Mask group, uint64_t pick, const Co
           if (ran) {
             o = ops + next;
             cur = o;
-            if (jf.over) [[unlikely]] return true;   // a BSYNC in there left no lane to run: the chain below would start no pass
-            if (jf.regroup) [[unlikely]] {
+            if (jf.jc.group != group) [[unlikely]] {
               // The generated code ran a branch that split the group and went on with the half at the lower address (linking): that half is the group now, its
-              // lanes' addresses are those of the op it went on at (the pass's first op, for what follows), and the warp is a diverged one. Or it ran a BSYNC
-              // and went on with the group the chain picks after it: a diverged warp's group, or (regroup 1) every lane of the warp that can run.
+              // lanes' addresses are those of the op it went on at (the pass's first op, for what follows), and the warp is a diverged one.
               group = jf.jc.group;
               glanes = popc(group);
               first = jf.pcs_first;
               o0 = ops + first;
-              cstate = jf.regroup == 1 ? 1 : 2;
+              cstate = 2;
             }
             if (pass_start >= 0) {   // a branch or an op that is not straight restarted the 256-op run, as the loop's own cont path does
               psp = ops + pass_start;

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# NOTE: VGPU_JIT_LINK_BSYNC (BSYNC as a region's op) was removed from the code after round sp53; this script is kept as the record of that round and no longer runs as written.
 """table18.py ab-18.json ab-18-b.json ab-rule.json: round sp53's table of the 18 programs from sp33.py's files. Sides 0 to 3 of the first two files are
 JIT, JIT again (the control), linked with VGPU_JIT_LINK_BSYNC=1, linked (BSYNC the run loop's: what VGPU_JIT_LINK=1 alone is); SYR2K and SYRK are taken
 from the third file (the build with the loop rule: JIT, JIT again, linked, linked with VGPU_JIT_LINK_RULE=0). Medians of whole-process wall seconds

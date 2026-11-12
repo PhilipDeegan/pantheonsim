@@ -318,7 +318,7 @@ std::vector<uint32_t> Engine::meta(const UnitSpec& spec) {
       m.push_back(static_cast<uint32_t>(o.hi));
       m.push_back(static_cast<uint32_t>(o.hi >> 32));
       m.push_back(o.cls | uint32_t{o.guard} << 8 | uint32_t{o.guard_not} << 16 | uint32_t{o.guard_uniform} << 17 | uint32_t{o.unguarded} << 18 | uint32_t{o.cont} << 19 |
-                  uint32_t{o.br} << 20 | uint32_t{o.store} << 21 | uint32_t{o.call} << 24 | uint32_t{o.stop} << 25 | uint32_t{o.hostctl} << 26);
+                  uint32_t{o.br} << 20 | uint32_t{o.store} << 21 | uint32_t{o.hostctl} << 22 | uint32_t{o.call} << 24 | uint32_t{o.stop} << 25);
       m.push_back(o.form);
       if (o.hostctl == 2) {   // an EXIT: its conditions
         for (const SrcFacts* x : {&o.p, &o.p2}) {
@@ -378,12 +378,12 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool
        "  uint64_t* thread_instructions;\n  uint64_t* by_class;\n  void* tctx;\n  const uint8_t* ops;\n"
        "  void (*note)(Ctx*, uint32_t op);\n  void* host;\n"
        "  uint32_t* R;\n  const uint8_t* b0;\n  uint64_t b0n;\n  const void* pool;\n"
-       "  uint64_t* divergent;\n  bool* gate;\n  uint32_t* budget;\n  uint32_t* extra;\n  uint64_t* gen_run;\n  void (*sreg)(Ctx*, uint32_t, uint32_t*, uint32_t);\n  uint64_t max_steps;\n  int32_t exit_idx;\n  int32_t exit_ps;\n  uint32_t last;\n  int64_t olo;\n  uint32_t* spins;\n  void (*ctl)(Ctx*, uint32_t, uint32_t);\n  void (*split)(Ctx*, uint32_t, uint32_t, int32_t, int32_t);\n  uint32_t group;\n  int32_t pcs_at;\n  uint32_t (*exit0)(Ctx*);\n  uint32_t (*callok)(Ctx*, uint32_t);\n  int64_t (*ret)(Ctx*, uint32_t, uint32_t, uint32_t);\n  int64_t (*bsync)(Ctx*, uint32_t, uint32_t, uint32_t);\n  uint32_t over;\n};\n";
+       "  uint64_t* divergent;\n  bool* gate;\n  uint32_t* budget;\n  uint32_t* extra;\n  uint64_t* gen_run;\n  void (*sreg)(Ctx*, uint32_t, uint32_t*, uint32_t);\n  uint64_t max_steps;\n  int32_t exit_idx;\n  int32_t exit_ps;\n  uint32_t last;\n  int64_t olo;\n  uint32_t* spins;\n  void (*ctl)(Ctx*, uint32_t, uint32_t);\n  void (*split)(Ctx*, uint32_t, uint32_t, int32_t, int32_t);\n  uint32_t group;\n  int32_t pcs_at;\n  uint32_t (*exit0)(Ctx*);\n  uint32_t (*callok)(Ctx*, uint32_t);\n  int64_t (*ret)(Ctx*, uint32_t, uint32_t, uint32_t);\n};\n";
   put("static_assert(sizeof(Ctx) == %zu, \"Ctx layout\");\n", sizeof(Ctx));
 #define VJ_FIELD(f) put("static_assert(offsetof(Ctx, " #f ") == %zu, \"Ctx::" #f "\");\n", offsetof(Ctx, f))
   VJ_FIELD(abi); VJ_FIELD(flags); VJ_FIELD(up); VJ_FIELD(p); VJ_FIELD(ur); VJ_FIELD(steps); VJ_FIELD(instructions); VJ_FIELD(thread_instructions);
   VJ_FIELD(by_class); VJ_FIELD(tctx); VJ_FIELD(ops); VJ_FIELD(note); VJ_FIELD(host); VJ_FIELD(R); VJ_FIELD(b0); VJ_FIELD(b0n); VJ_FIELD(pool);
-  VJ_FIELD(divergent); VJ_FIELD(gate); VJ_FIELD(budget); VJ_FIELD(extra); VJ_FIELD(gen_run); VJ_FIELD(sreg); VJ_FIELD(max_steps); VJ_FIELD(exit_idx); VJ_FIELD(exit_ps); VJ_FIELD(last); VJ_FIELD(olo); VJ_FIELD(spins); VJ_FIELD(ctl); VJ_FIELD(split); VJ_FIELD(group); VJ_FIELD(pcs_at); VJ_FIELD(exit0); VJ_FIELD(callok); VJ_FIELD(ret); VJ_FIELD(bsync); VJ_FIELD(over);
+  VJ_FIELD(divergent); VJ_FIELD(gate); VJ_FIELD(budget); VJ_FIELD(extra); VJ_FIELD(gen_run); VJ_FIELD(sreg); VJ_FIELD(max_steps); VJ_FIELD(exit_idx); VJ_FIELD(exit_ps); VJ_FIELD(last); VJ_FIELD(olo); VJ_FIELD(spins); VJ_FIELD(ctl); VJ_FIELD(split); VJ_FIELD(group); VJ_FIELD(pcs_at); VJ_FIELD(exit0); VJ_FIELD(callok); VJ_FIELD(ret);
 #undef VJ_FIELD
   // The helpers of this file are always inlined, as those of vgpu_jit_rt.h are (round sp53). Left to the compiler, the escapes of a large function stop
   // being inlined once its growth limit is reached (SYR2K's kernel as one linked function: 16 of its 42 escapes called run_op out of line), and the
@@ -536,7 +536,7 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool
     std::set<uint32_t> is_start(starts.begin(), starts.end());
     {   // (a RET the generated code runs looks its target up among the entries: it comes back here)
       bool any_ret = false;
-      for (const OpFacts& o : r.ops) any_ret |= o.hostctl == 3 || o.hostctl == 4;   // (and a BSYNC: the group it goes on with may stand anywhere)
+      for (const OpFacts& o : r.ops) any_ret |= o.hostctl == 3;
       if (link && any_ret) s += "DISPATCH:;\n";
     }
     if (starts.size() == 1 && starts[0] == 0) {   // (a region that is entered at its first op only: no jump table)
@@ -752,42 +752,6 @@ std::string Engine::source(const UnitSpec& spec, bool avx2, bool residence, bool
           count(o);
           flush();
           s += "    --*c->budget; ++*c->extra; n0 = 0;\n    ps = static_cast<int32_t>(x);\n";
-          put("    if (x >= 0 && x < %ull) {\n      entry = static_cast<uint32_t>(x);\n      goto DISPATCH;\n    }\n", k);
-          leave("static_cast<int32_t>(x)", "    ");
-        }
-        s += "  }\n";
-        fell = false;
-        continue;
-      }
-      if (o.hostctl == 4) {
-        // A BSYNC (linking, round sp53). The loop counts it, the lanes its guard lets run wait at the barrier (released at once when they complete it), the pass
-        // ends, and the chain starts the next one with the runnable lanes at the lowest address: the joined lanes at the next op, the lanes the guard kept out,
-        // or another group of the warp. The host's Ctx::bsync does the op and that pick, and the generated code goes on with the group it names where it
-        // stands (among this region's entries; elsewhere it leaves there), with the chain bit when no other lane can run and the link bit and the others' lowest
-        // place when some can. When the chain's conditions do not hold beforehand, or the turn has no call left, it stops before the op; when the pick finds no
-        // lane to run, the op is counted and the pass is over (Ctx::over).
-        guard(o);
-        flush();
-        rc.sync(s, true);
-        if (!link) {
-          leave(std::to_string(i), "    ");
-        } else {
-          std::string cond = std::string(mutant("link_flag") ? "false" : "!(fl & 12u)") + (mutant("link_bsync_budget") ? "" : " || *c->budget == 0u");
-          put("    if (%s) {\n", cond.c_str());
-          leave(std::to_string(i), "      ");
-          s += "    }\n";
-          put("    const int64_t x = c->bsync(c, %uu, ex, group);\n", i);
-          count(o);   // (with the group that ran it: before the group changes)
-          flush();
-          s += "    if (x == INT64_MIN) {\n      c->over = 1u;\n";
-          leave(std::to_string(i + 1), "      ");
-          s += "    }\n";
-          s += std::string("    ") + (mutant("link_bsync_charge") ? "" : "--*c->budget; ++*c->extra; ") + "n0 = 0;\n";
-          if (!mutant("link_bsync_group")) s += "    group = c->group;\n";
-          if (!mutant("link_bsync_glanes")) s += "    glanes = static_cast<uint32_t>(__builtin_popcount(group));\n";
-          if (!mutant("link_bsync_olo")) s += "    olo = c->olo;\n";
-          if (!mutant("link_bsync_fl")) s += "    fl = (fl & ~12u) | (c->olo == INT64_MAX ? 4u : 8u);\n";
-          s += "    ps = static_cast<int32_t>(x);\n";
           put("    if (x >= 0 && x < %ull) {\n      entry = static_cast<uint32_t>(x);\n      goto DISPATCH;\n    }\n", k);
           leave("static_cast<int32_t>(x)", "    ");
         }
@@ -1708,10 +1672,8 @@ void Manager::report() {
     if (std::FILE* g = std::fopen(f, "a")) out = g;
   Stats& s = stats();
   if (link_requested())
-    std::fprintf(out, "jit: link in-diverged-warps: %llu\njit: link calls-with-a-split: %llu\njit: link bsyncs: %llu\njit: link bsyncs-to-another-group: %llu\njit: link bsyncs-pass-over: %llu\n"
-                      "jit: link sections-left-unlinked-by-the-loop-rule: %llu\n",
-                 (unsigned long long)s.linked.load(), (unsigned long long)s.splits.load(), (unsigned long long)s.bsyncs.load(), (unsigned long long)s.bsync_groups.load(),
-                 (unsigned long long)s.bsync_over.load(), (unsigned long long)s.link_declined.load());
+    std::fprintf(out, "jit: link in-diverged-warps: %llu\njit: link calls-with-a-split: %llu\njit: link sections-left-unlinked-by-the-loop-rule: %llu\n",
+                 (unsigned long long)s.linked.load(), (unsigned long long)s.splits.load(), (unsigned long long)s.link_declined.load());
   // Why the region calls ended (one line a reason that occurred): all, of them in a diverged warp, of them at the entry with nothing run. These lines
   // come before the summary: what reads a statistics file takes its last "jit: " line for the summary (run_sass_jit.sh).
   for (unsigned w = 0; w < kExCount; ++w) {
@@ -1739,8 +1701,6 @@ uint32_t host_mutants() {
     if (mutant("host_n0")) v |= kMutHostN0;
     if (mutant("host_olo")) v |= kMutHostOlo;
     if (mutant("host_spins")) v |= kMutHostSpins;
-    if (mutant("host_bsync_olo")) v |= kMutHostBsyncOlo;
-    if (mutant("host_bsync_pcs")) v |= kMutHostBsyncPcs;
     return v;
   }();
   return m;
@@ -1804,18 +1764,6 @@ static bool link_exit(const tier::MOp& op, bool on) { return on && link_exit_on(
 
 // ... and a CALL.REL to a fixed place of the section and a RET.REL (the loop's tier_ctl): a branch the lanes its guard lets run take, and a branch to the
 // address a register pair holds (OpFacts::call, hostctl 3). With these a kernel and the functions it calls are regions the generated code moves between.
-// ... and, with VGPU_JIT_LINK_BSYNC=1 as well, a BSYNC (round sp53): the host runs it and names the group the chain would run next (OpFacts::hostctl 4). It is
-// an opt-in of its own, off by default: it gains 5 % and more on the programs whose region calls end at BSYNCs (silu, bh, black-scholes), and the larger
-// functions it makes cost up to 1 % on programs that have BSYNCs but leave generated code elsewhere (lud, backprop, pathfinder), which is below the bar the
-// round set for it.
-static bool link_bsync_on() {
-  static const bool on = [] {
-    const char* v = std::getenv("VGPU_JIT_LINK_BSYNC");
-    return v && v[0] == '1' && !v[1];
-  }();
-  return on;
-}
-static bool link_bsync(const tier::MOp& op, bool on) { return on && link_bsync_on() && op.form == tier::Form::Bsync && !op.fn && !op.straight; }
 static bool link_call(const tier::MOp& op, bool on) { return on && op.form == tier::Form::Call && !op.fn && !op.straight; }
 static bool link_ret(const tier::MOp& op, bool on) { return on && op.form == tier::Form::Ret && !op.fn && !op.straight; }
 
@@ -1864,7 +1812,7 @@ std::shared_ptr<Unit> make_unit(const tier::Program& prog, int sm) {
     // only writes registers (MOp::cont).
     if (i + 1 >= count) return false;
     if (op.form == tier::Form::Bra) return branch_ok(op);
-    if (link_bssy(op, link_on) || link_exit(op, link_on) || link_ret(op, link_on) || link_bsync(op, link_on)) return true;
+    if (link_bssy(op, link_on) || link_exit(op, link_on) || link_ret(op, link_on)) return true;
     if (link_call(op, link_on)) return op.imm >= 0 && (op.imm & 15) == 0 && static_cast<uint64_t>(op.imm) / 16 < count;
     if (op.straight) return op.fn || op.never;
     return jit_cont(op);
@@ -1902,7 +1850,6 @@ std::shared_ptr<Unit> make_unit(const tier::Program& prog, int sm) {
         f.unguarded = op.unguarded;
         f.cont = jit_cont(op) && !op.straight;
         if (link_bssy(op, link_on)) f.cont = true, f.hostctl = 1;
-        if (link_bsync(op, link_on)) f.cont = true, f.hostctl = 4;
         f.store = op.store;
         const auto src = [&](const tier::Src& in, SrcFacts& out) {
           out.kind = static_cast<uint8_t>(in.kind);
