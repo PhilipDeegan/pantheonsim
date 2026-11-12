@@ -632,6 +632,47 @@ inline bool has_back_edge(const std::vector<std::pair<uint64_t, uint64_t>>& bran
   return false;
 }
 
+// Whether the code can run an instruction twice: a cycle in its flow that the entry reaches. has_back_edge says yes for any branch to itself or a
+// lower address, and compilers end every kernel with a branch to itself after its EXIT (PolyBench 2DCONV, 3DCONV and GEMVER have a back edge and no loop). Each
+// instruction is given by where it may go next: the one after it (`falls_through`), a known `target` (an index, or -1), or anywhere (`indirect`:
+// a jump through a register, or a call, is taken to close a loop).
+struct FlowInsn {
+  int64_t target = -1;
+  bool falls_through = true;
+  bool indirect = false;
+};
+inline bool code_has_loop(const std::vector<FlowInsn>& code) {
+  const size_t n = code.size();
+  std::vector<uint8_t> state(n, 0);   // 0 not seen, 1 on the path being walked, 2 done
+  std::vector<std::pair<size_t, int>> stack;   // (instruction, which of its edges comes next)
+  for (const FlowInsn& f : code)
+    if (f.indirect) return true;
+  // From the entry only: what cannot be reached is not run (compilers end a kernel with a branch to itself, after its EXIT).
+  for (size_t root = 0; root < std::min<size_t>(n, 1); ++root) {
+    stack.emplace_back(root, 0);
+    state[root] = 1;
+    while (!stack.empty()) {
+      auto& [i, edge] = stack.back();
+      size_t next = n;
+      for (; edge < 2 && next == n; ++edge) {
+        if (edge == 0 && code[i].falls_through && i + 1 < n) next = i + 1;
+        if (edge == 1 && code[i].target >= 0 && static_cast<size_t>(code[i].target) < n) next = static_cast<size_t>(code[i].target);
+      }
+      if (next == n) {
+        state[i] = 2;
+        stack.pop_back();
+        continue;
+      }
+      if (state[next] == 1) return true;
+      if (state[next] == 0) {
+        state[next] = 1;
+        stack.emplace_back(next, 0);
+      }
+    }
+  }
+  return false;
+}
+
 struct FirstLaunch {
   uint64_t blocks = 0;
   uint32_t threads_per_block = 0;
@@ -678,21 +719,24 @@ inline uint64_t sample_stride(uint64_t blocks) {
   return n ? blocks / n : 1;
 }
 // A sample costs the fork, the copy's decode and set-up and the sampled blocks, whatever the launch turns out to be, and the process waits for it:
-// 1 to 8 ms in Round sp60b's corpus. The copy is given kSampleTimeoutSeconds at most; one that has not answered by then is ended and the launch is the
-// simulator's. Two things keep a short program from paying for samples it cannot use; a launch is sampled when EITHER holds:
-//  * its static estimate (static_sim_seconds) is at least sample_static_floor, ten times the usual cost of a sample. The static estimate is no
-//    bound, but over the corpus a launch took 0.4 to 80 times it, so such a launch is itself many times longer than its sample;
-//  * the process can afford it: what its samples cost so far, plus what this one is expected to cost, is within kSampleShareOfAge of the time the
-//    process has run (`expected_s`: the dearest sample of the process so far, or kSampleCostGuessSeconds before the first).
+// 1 to 12 ms in Round sp60b's corpus. It also costs afterwards: the fork write-protects the process's pages, and each page the process writes later
+// takes a fault (Rodinia backprop, 36 MiB live: 6 ms waited and 19 ms more over the run, on the A10G rig). The copy is given kSampleTimeoutSeconds
+// at most; one that has not answered by then is ended and the launch is the simulator's. What keeps a short program from paying for samples it
+// cannot use:
+//  * only a kernel with a loop is sampled (code_has_loop). Without one a warp runs each instruction once at most, the static count bounds its work,
+//    and the launches of such kernels took 0.4 to 1.2 times their static estimate: none is long without a long estimate, which the rules above see;
+//  * and EITHER its static estimate (static_sim_seconds) is at least sample_static_floor: 30 ms, ten times the cost of a small sample, and at
+//    least three times what the faults afterwards are expected to cost (kSampleSecondsPerLiveByte);
+//  * OR the process can afford it: what its samples cost so far, plus what this one is expected to cost, is within kSampleShareOfAge of the time
+//    the process has run (`expected_s`: the dearest sample of the process so far, or kSampleCostGuessSeconds and the faults before the first).
+// The floor is a rule of thumb fitted to this corpus, not a bound: the static estimate of a kernel with a loop says little (0.2 to 80 times off).
 inline constexpr double kSampleTimeoutSeconds = 0.050;
 inline constexpr double kSampleStaticFloorSeconds = 0.030;
 inline constexpr double kSampleShareOfAge = 0.02;
 inline constexpr double kSampleCostGuessSeconds = 0.003;
-// The fork copies the process's page tables, which grow with what it has mapped: about 1.2 ms per 100 MiB of live device memory in Round sp60b
-// (0.14 ms with 3 MiB live, 1.8 ms with 128 MiB). The floor rises by ten times that, as it is ten times the cost of a small process's sample.
-inline constexpr double kSampleForkSecondsPerByte = 1.2e-11;
+inline constexpr double kSampleSecondsPerLiveByte = 6e-10;
 inline double sample_static_floor(uint64_t live_bytes) {
-  return kSampleStaticFloorSeconds + 10.0 * kSampleForkSecondsPerByte * static_cast<double>(live_bytes);
+  return std::max(kSampleStaticFloorSeconds, 3.0 * kSampleSecondsPerLiveByte * static_cast<double>(live_bytes));
 }
 inline bool sample_affordable(double age_s, double spent_s, double expected_s) {
   return spent_s + std::max(expected_s, 0.0) <= kSampleShareOfAge * age_s;
@@ -742,13 +786,14 @@ inline bool sample_offload(const Sample& s, uint64_t push_bytes, uint64_t live_b
 }
 
 // Whether a launch with no estimate is sampled at all:
-//  * the grid has blocks to sample;
+//  * the kernel has a loop and the grid has blocks to sample;
 //  * what is known of the kernel does not already say it is short: `whole_s` is what its whole launches so far give for this grid (SimTimeTable::peek);
 //    a kernel whose earlier launch was short is not sampled again (PolyBench 3DCONV: 254 launches of 3 ms);
 //  * its static estimate reaches the floor, or the process can afford it (sample_affordable).
 // `card_path_s` is the card path of this launch with the whole live memory moved each way and the driver start if it is not up.
 struct SampleCandidate {
   uint64_t blocks = 0;
+  bool loop = false;        // code_has_loop
   uint64_t live_bytes = 0;
   std::optional<double> whole_s;
   double static_s = 0;      // the launch's static estimate (static_sim_seconds)
@@ -757,7 +802,7 @@ struct SampleCandidate {
   double expected_s = kSampleCostGuessSeconds;
 };
 inline bool worth_sampling(const SampleCandidate& w, const Costs& c, double card_path_s) {
-  if (sample_blocks(w.blocks) == 0) return false;
+  if (!w.loop || sample_blocks(w.blocks) == 0) return false;
   if (w.whole_s && *w.whole_s <= c.margin * card_path_s) return false;
   return w.static_s >= sample_static_floor(w.live_bytes) || sample_affordable(w.age_s, w.spent_s, w.expected_s);
 }

@@ -131,10 +131,11 @@ struct SampleHint {
   uint64_t blocks = 0, live = 0, instrs = 0;
   uint32_t threads_per_block = 0;
   bool back_edge = false;
+  bool loop = false;
   double static_s = 0;       // the static estimate (static_sim_seconds)
   unsigned samples = 0;
   double age_s = 0;
-  bool affordable = true;    // whether the static floor or the process's age allows the sample (log and always sample without asking)
+  bool affordable = true;    // whether the kernel's loop and the static floor or the process's age allow the sample (log and always sample without asking)
 };
 thread_local SampleHint t_sample_hint;
 // The sample of the launch this thread's simulator is about to run whole, for the log line note_simulated prints (what it said, what the launch took).
@@ -185,6 +186,7 @@ struct Runtime::Impl : CardGate {
     uint64_t instrs = 0;
     bool runnable = false;   // everything but the instruction scan passed: the card could run it
     bool back_edge = false;  // the code has a loop (a branch to itself or an earlier instruction)
+    bool loop = false;       // ... a real one: a cycle in its flow (code_has_loop)
     Refused kind = Refused::No;
     TurboRefusal rr = TurboRefusal::None;   // Code: which class of instruction (in exact mode: what turbo mode would say with its defaults)
     const char* why = "";                       // the reason given on a later launch of the same kernel
@@ -531,7 +533,7 @@ struct Runtime::Impl : CardGate {
     Refused kind = Refused::No;
     TurboRefusal rr = TurboRefusal::None;
     uint64_t instrs = 0;
-    bool runnable = false, back_edge = false;
+    bool runnable = false, back_edge = false, loop = false;
   };
 
   Decision kernel_eligible(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, const std::vector<std::vector<uint8_t>>& args, MemoryManager& mem) {
@@ -565,6 +567,7 @@ struct Runtime::Impl : CardGate {
       d.instrs = v.instrs;
       d.runnable = v.runnable;
       d.back_edge = v.back_edge;
+      d.loop = v.loop;
       return d;
     };
     if (const auto it = eligible.find(key); it != eligible.end()) return decision_of(it->second);
@@ -677,6 +680,33 @@ struct Runtime::Impl : CardGate {
     v.ok = ok;
     v.runnable = runnable_here;
     v.back_edge = has_back_edge(branches);
+    if (runnable_here) {
+      const sass::Code& code = m.code[ci->second];
+      std::map<uint64_t, int64_t> index_of;
+      for (size_t i = 0; i < code.count; ++i) index_of[code.instr(i).pc] = static_cast<int64_t>(i);
+      std::vector<FlowInsn> flow(code.count);
+      for (size_t i = 0; i < code.count; ++i) {
+        const sass::Instr& ins = code.instr(i);
+        const bool always = ins.guard == sass::kPT;
+        if (ins.op == sass::Op::BRA) {
+          int64_t label = -1;
+          bool other = false;   // an operand besides the label: a condition
+          for (const auto& o : ins.src) {
+            if (o.kind == sass::Kind::Label) label = o.imm;
+            else other = true;
+          }
+          const auto it = index_of.find(static_cast<uint64_t>(label));
+          if (label < 0 || it == index_of.end()) flow[i].indirect = true;
+          else flow[i].target = it->second;
+          flow[i].falls_through = !always || other;
+        } else if (ins.op == sass::Op::BRX || ins.op == sass::Op::CALL || ins.op == sass::Op::RET) {
+          flow[i].indirect = true;
+        } else if (ins.op == sass::Op::EXIT) {
+          flow[i].falls_through = !always;
+        }
+      }
+      v.loop = code_has_loop(flow);
+    }
     eligible[key] = v;
     decision_of(v);
     d.why = why;   // the first launch says the reason in full
@@ -924,9 +954,9 @@ void Runtime::note_simulated(const ptx::EntryFn& fn, const exec::LaunchConfig& c
     const LastSample& l = t_last_sample;
     if (logging() || impl_->sample_mode == Impl::SampleMode::Log)
       std::fprintf(stderr,
-                   "host_gpu_sample: kernel=%s blocks=%llu threads_per_block=%u instrs=%llu back_edge=%d whole_samples=%u live_bytes=%llu static_s=%.6f age_s=%.6f affordable=%d answered=%d ran=%llu first_block_s=%.6f timed_s=%.6f cost_s=%.6f fork_s=%.6f threads=%u estimate_s=%.6f would_send=%d launch_s=%.6f\n",
+                   "host_gpu_sample: kernel=%s blocks=%llu threads_per_block=%u instrs=%llu back_edge=%d loop=%d whole_samples=%u live_bytes=%llu static_s=%.6f age_s=%.6f affordable=%d answered=%d ran=%llu first_block_s=%.6f timed_s=%.6f cost_s=%.6f fork_s=%.6f threads=%u estimate_s=%.6f would_send=%d launch_s=%.6f\n",
                    fn.name.c_str(), static_cast<unsigned long long>(l.hint.blocks), l.hint.threads_per_block, static_cast<unsigned long long>(l.hint.instrs),
-                   l.hint.back_edge ? 1 : 0, l.hint.samples, static_cast<unsigned long long>(l.hint.live), l.hint.static_s, l.hint.age_s, l.hint.affordable ? 1 : 0, l.answered ? 1 : 0,
+                   l.hint.back_edge ? 1 : 0, l.hint.loop ? 1 : 0, l.hint.samples, static_cast<unsigned long long>(l.hint.live), l.hint.static_s, l.hint.age_s, l.hint.affordable ? 1 : 0, l.answered ? 1 : 0,
                    static_cast<unsigned long long>(l.ran), l.first_block_s, l.sample.seconds, l.wall_s, l.fork_s, l.sample.threads, l.estimate_s, l.would_send ? 1 : 0,
                    sim_seconds);
     t_last_sample = {};
@@ -1215,14 +1245,18 @@ void Runtime::Impl::consider_sample(const ptx::EntryFn& fn, const exec::LaunchCo
   e.start_s = std::max(costs.start_cost_s, 0.0);
   SampleCandidate c;
   c.blocks = blocks;
+  c.loop = dec.loop;
   c.live_bytes = live;
   c.whole_s = sim_times.peek(fn.name, blocks);
   c.age_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_loaded).count();
   c.spent_s = sample_spent_s;
-  c.expected_s = std::max(sample_dearest_s, kSampleCostGuessSeconds + kSampleForkSecondsPerByte * static_cast<double>(live));
+  c.expected_s = std::max(sample_dearest_s, kSampleCostGuessSeconds + kSampleSecondsPerLiveByte * static_cast<double>(live));
   c.static_s = static_sim_seconds(blocks, cfg.block[0] * cfg.block[1] * cfg.block[2], dec.instrs, costs);
-  const bool affordable = c.static_s >= sample_static_floor(live) || sample_affordable(c.age_s, c.spent_s, c.expected_s);
-  if (sample_mode != SampleMode::On) c.age_s = 1e18;   // (log, always: neither the floor nor the process's age is asked)
+  const bool affordable = c.loop && (c.static_s >= sample_static_floor(live) || sample_affordable(c.age_s, c.spent_s, c.expected_s));
+  if (sample_mode != SampleMode::On) {   // (log, always: neither the loop, nor the floor, nor the process's age is asked)
+    c.age_s = 1e18;
+    c.loop = true;
+  }
   if (!worth_sampling(c, costs, card_path_seconds(e, costs))) return;
   SampleHint h;
   h.affordable = affordable;
@@ -1232,6 +1266,7 @@ void Runtime::Impl::consider_sample(const ptx::EntryFn& fn, const exec::LaunchCo
   h.instrs = dec.instrs;
   h.threads_per_block = cfg.block[0] * cfg.block[1] * cfg.block[2];
   h.back_edge = dec.back_edge;
+  h.loop = dec.loop;
   h.static_s = c.static_s;
   h.samples = sim_times.samples(fn.name);
   h.age_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_loaded).count();
@@ -1314,8 +1349,8 @@ bool Runtime::sample_decide(const ptx::EntryFn& fn, const exec::LaunchConfig& cf
   im.sim_times.record_extrapolated(fn.name, hint.blocks, sim_s);
   if (logging())
     std::fprintf(stderr,
-                 "host_gpu_sample: kernel=%s blocks=%llu threads_per_block=%u instrs=%llu back_edge=%d whole_samples=%u live_bytes=%llu static_s=%.6f age_s=%.6f affordable=%d answered=1 ran=%llu first_block_s=%.6f timed_s=%.6f cost_s=%.6f fork_s=%.6f threads=%u estimate_s=%.6f would_send=1 launch_s=-1\n",
-                 fn.name.c_str(), static_cast<unsigned long long>(hint.blocks), hint.threads_per_block, static_cast<unsigned long long>(hint.instrs), hint.back_edge ? 1 : 0,
+                 "host_gpu_sample: kernel=%s blocks=%llu threads_per_block=%u instrs=%llu back_edge=%d loop=%d whole_samples=%u live_bytes=%llu static_s=%.6f age_s=%.6f affordable=%d answered=1 ran=%llu first_block_s=%.6f timed_s=%.6f cost_s=%.6f fork_s=%.6f threads=%u estimate_s=%.6f would_send=1 launch_s=-1\n",
+                 fn.name.c_str(), static_cast<unsigned long long>(hint.blocks), hint.threads_per_block, static_cast<unsigned long long>(hint.instrs), hint.back_edge ? 1 : 0, hint.loop ? 1 : 0,
                  hint.samples, static_cast<unsigned long long>(hint.live), hint.static_s, hint.age_s, hint.affordable ? 1 : 0, static_cast<unsigned long long>(run.part.next),
                  run.part.first_block_s, smp.seconds, run.wall_s, run.fork_s, smp.threads, sim_s);
   t_last_sample = {};

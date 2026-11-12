@@ -1030,7 +1030,7 @@ VTEST(sample_constants_are_the_ones_the_round_measured) {
   // (the text of Round sp60b and docs/perf-design/12-host-gpu-turbo.md quote these: a change here is a change there)
   VCHECK(kSampleMinBlocks == 256 && kSampleMaxBlocks == 32);
   VCHECK(kSampleBudgetSeconds == 0.002 && kSampleTimeoutSeconds == 0.050 && kSampleShareOfAge == 0.02 && kSampleCostGuessSeconds == 0.003);
-  VCHECK(kSampleStaticFloorSeconds == 0.030 && kSampleForkSecondsPerByte == 1.2e-11 && kSampleCardSpeedup == 8.0);
+  VCHECK(kSampleStaticFloorSeconds == 0.030 && kSampleSecondsPerLiveByte == 6e-10 && kSampleCardSpeedup == 8.0);
 }
 
 VTEST(sample_runs_a_few_blocks_and_none_of_a_small_grid) {
@@ -1071,6 +1071,44 @@ VTEST(samples_may_cost_a_share_of_the_time_the_process_has_run) {
 }
 
 // `timed` blocks, whose second runs took `seconds`.
+// ---- code_has_loop: a cycle that the entry reaches ----
+
+static FlowInsn flow(int64_t target, bool falls_through = true, bool indirect = false) {
+  FlowInsn f;
+  f.target = target;
+  f.falls_through = falls_through;
+  f.indirect = indirect;
+  return f;
+}
+
+VTEST(a_loop_is_a_cycle_the_entry_reaches) {
+  VCHECK(!code_has_loop({}));
+  VCHECK(!code_has_loop({flow(-1), flow(-1), flow(-1, false)}));                       // straight code, EXIT
+  // a bounds check that skips to the exit, then the compiler's branch to itself after the EXIT: a back edge, no loop (2DCONV, GEMVER)
+  VCHECK(!code_has_loop({flow(3), flow(-1), flow(-1), flow(-1, false), flow(4, false)}));
+  // a shared exit placed first, reached by a branch back: still no loop (the exit does not go on)
+  VCHECK(!code_has_loop({flow(2, false), flow(-1, false), flow(-1), flow(1, false)}));
+  // a counted loop: the conditional branch at 3 goes back to 1 (SYRK, SYR2K)
+  VCHECK(code_has_loop({flow(-1), flow(-1), flow(-1), flow(1), flow(-1, false)}));
+  // a loop closed by an unconditional branch, left by a conditional one
+  VCHECK(code_has_loop({flow(-1), flow(4), flow(-1), flow(1, false), flow(-1, false)}));
+  // a branch to itself that IS reached (a spin)
+  VCHECK(code_has_loop({flow(-1), flow(1)}));
+  // a cycle the entry cannot reach is not one
+  VCHECK(!code_has_loop({flow(-1), flow(-1, false), flow(-1), flow(2, false)}));
+  // a diamond (two paths that meet) is not a cycle
+  VCHECK(!code_has_loop({flow(2), flow(3, false), flow(-1), flow(-1, false)}));
+  // anything indirect (a jump through a register, a call) is taken to be one
+  VCHECK(code_has_loop({flow(-1), flow(-1, true, true), flow(-1, false)}));
+  // a target outside the code is no edge; the last instruction falling off the end is none either
+  VCHECK(!code_has_loop({flow(99), flow(-1)}));
+  // a long straight run does not overflow anything (the walk is not recursive)
+  std::vector<FlowInsn> big(200000, flow(-1));
+  VCHECK(!code_has_loop(big));
+  big.back() = flow(0);
+  VCHECK(code_has_loop(big));
+}
+
 static Sample sample_of(double seconds, uint64_t timed, uint64_t total, unsigned threads = 4) {
   Sample s;
   s.seconds = seconds;
@@ -1162,6 +1200,7 @@ VTEST(sample_charges_the_memory_and_an_unknown_card_time) {
 static SampleCandidate old_enough(uint64_t blocks) {
   SampleCandidate w;
   w.blocks = blocks;
+  w.loop = true;
   w.age_s = 10.0;
   return w;
 }
@@ -1200,15 +1239,24 @@ VTEST(sampling_needs_a_long_static_estimate_or_a_process_that_can_afford_it) {
   VCHECK(worth_sampling(w, c, 0.26));
   w.static_s = kSampleStaticFloorSeconds * 0.999;
   VCHECK(!worth_sampling(w, c, 0.26));
-  // the floor rises with the live memory (the fork costs more): 1 GiB adds 0.129 s
-  VCHECK(sample_static_floor(0) == kSampleStaticFloorSeconds);
-  VCHECK(sample_static_floor(1ull << 30) > 0.158 && sample_static_floor(1ull << 30) < 0.160);
+  // the floor rises with the live memory (the faults after the fork): three times 0.6 ms a MiB, once that is over 30 ms
+  VCHECK(sample_static_floor(0) == kSampleStaticFloorSeconds && sample_static_floor(12ull << 20) == kSampleStaticFloorSeconds);   // SYR2K: 12 MiB, 45 ms
+  VCHECK(sample_static_floor(80ull << 20) > 0.150 && sample_static_floor(80ull << 20) < 0.152);    // 2MM's first kernel: 80 MiB, 335 ms
+  VCHECK(sample_static_floor(1ull << 30) > 1.93 && sample_static_floor(1ull << 30) < 1.94);
   w.live_bytes = 1ull << 30;
-  w.static_s = 0.150;
+  w.static_s = 1.9;
   VCHECK(!worth_sampling(w, c, 0.26));
-  w.static_s = 0.160;
+  w.static_s = 2.0;
   VCHECK(worth_sampling(w, c, 0.26));
   w.live_bytes = 0;
+  // a kernel with no loop is not sampled, whatever its estimate and however old the process (Rodinia backprop: 105 ms, 36 MiB, no loop)
+  w.static_s = 0.105;
+  w.age_s = 100.0;
+  w.loop = false;
+  VCHECK(!worth_sampling(w, c, 0.26));
+  w.loop = true;
+  VCHECK(worth_sampling(w, c, 0.26));
+  w.age_s = 0.015;
   w.static_s = 1.0;                                // the floor does not lift the other conditions
   w.whole_s = 0.003;
   VCHECK(!worth_sampling(w, c, 0.26));
