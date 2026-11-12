@@ -13,8 +13,9 @@ HeCBench list, with the arguments of `tools/bench/real/real.py`.
 | `samplelog.py` | runs the corpus in forms of the mode (off, `exact`, `turbo`, `VGPU_HOST_GPU_SAMPLE=0`, `=log`, a stand-in driver that refuses, one that keeps memory and computes nothing) and keeps wall time, an output hash, the mode's lines and every `host_gpu_sample:` line |
 | `model.py` | per sampled launch: the static estimate, the sample's cost, the estimate from the sample, what the launch took |
 | `model-exact.md`, `model-turbo.md` | its tables for `VGPU_HOST_GPU_SAMPLE=log` in exact and in turbo mode (every candidate launch is sampled in `log`, whatever the loop test and the floor say): 16 and 52 launches. Made before the loop test was added, so they have no column for it |
-| `mutants.py`, `mutants.txt` | 66 mutants of the rule in `include/vgpu/host_gpu.hpp` (how many blocks, the stride, the floor, the loop test, the estimate, the card path, when to sample), each a copy of the header outside the tree: 66 killed by `test_host_gpu_logic` |
-| `card-run.sh` | the card part: the card CI, the A/B of `exact` and `turbo` against `exact0` and `turbo0` (no sampling), the log of what was sent, the early-start experiment |
+| `mutants.py`, `mutants.txt` | 69 mutants of the rule in `include/vgpu/host_gpu.hpp` (how many blocks, the stride, the floor, the loop test, the estimate, the card path, when to sample), each a copy of the header outside the tree: 69 killed by `test_host_gpu_logic`, none by failing to compile |
+| `card-run.sh` | the card part, by stage: `build` (the card CI), `ci`, `ab` (the A/B of `exact` and `turbo` against `exact0` and `turbo0`, which do not sample, and the log of what was sent), `early` and `exit` (the early-start experiment, whose switch was then removed), `repeat` |
+| `summary.py` | the A/B's tables and checks from the harness's JSON |
 
 What the tables say: the eight launches the rule would send (SYRK, SYR2K, the first kernel of 2MM, in both modes; black-scholes, binomial,
 shmembench in turbo) took 0.9 to 1.6 times the sample's estimate; no launch under 0.25 s was estimated over the bar. A sample cost 0.9 to 12 ms
@@ -26,6 +27,27 @@ SYR2K, GEMVER, black-scholes, shmembench); a sampled launch sent to a stand-in t
 reading the memory of before the launch (SYRK and SYR2K: every one of the 1,046,529 compared elements differs from the CPU reference).
 
 Not reached: PolyBench COVAR and CORR (their long kernel runs on 8 blocks of 256 threads; in exact mode CORR's kernels are not admitted at all).
+
+## On the card (AWS g5.xlarge, us-east-1, instance i-004f225995427c7ac: A10G, driver 595.112.07, 4 vCPU, nvcc 13.0; 2026-11-12)
+
+Simulator: `RelWithDebInfo`, no LTO (what `tools/card-ci/run-card-ci.sh` configures), profile `nvidia/a10g`; the same corpus binaries.
+
+| file | what |
+|---|---|
+| `ab.md` | `summary.py --md` over the three suites: per program the simulator's seconds, `exact`, `exact0`, `turbo`, `turbo0` (medians of 3 runs, 1 for a program over 30 s), the launches sampled and sent, the launches on the card, the outputs; the geometric means; the programs more than 3% apart; the fork checks |
+| `ab.json` | the same records, compact: per program and form the median seconds, `<form>_sampled` = [sampled, sent, copies that did not answer, cost in ms], `<form>_card` the launches on the card, `<form>_out` only where it is not `identical` |
+| `sample-log.txt` | `VGPU_HOST_GPU_LOG=1` runs of nine programs: the `host_gpu_sample:` line of each sampled launch (blocks, static estimate, the process's age, the fork, the timed runs, the estimate) and what the card then took; 4 lines a program at most |
+| `repeat.txt` | ten runs of each form of the three programs that the A/B showed more than 3% apart with no launch sampled, and of hotspot; then the zombies and corpus processes left on the rig after everything (0 and 0) |
+| `final.txt` | the seven programs run again on the last build, black-scholes's log there, the tests on that build, what was left on the rig |
+| `early.txt` | `VGPU_HOST_GPU_EARLY_START=1` against the default on the 26 PolyBench and Rodinia programs under 30 s |
+
+Order of the runs: the card CI and `e2e_host_gpu_stub` passed on the first build; a first A/B of Rodinia (the floor alone, no loop test) showed
+backprop 4% slower in exact mode and was stopped; the rule got the loop test and the floor its memory term, the rig was rebuilt, `ci` passed
+again, and the A/B in `ab.md` ran on that build. The timeout that grows with the live memory and the removal of the early-start switch came
+after it: the rig was rebuilt once more and seven programs were run again (the round's text has their numbers), with the unit tests,
+`e2e_host_gpu` and `e2e_host_gpu_stub`.
+
+Cut for the rig's hours: PolyBench GRAMSCHM was not run; HeCBench runs were limited to 120 s (five programs have no simulator time); no verify pass.
 
 ## What was built first and removed
 

@@ -45,7 +45,19 @@ def main():
                         if k in s:
                             checks[k] += s[k]
             rows.append(r)
-            keep[prog] = {k: v for k, v in r.items() if v is not None and k not in ("program", "suite")}
+            # compact: the medians, the launches on the card, and what was sampled (sampled, sent, copies that did not answer, cost in ms)
+            k = {}
+            for form in ("sim", "exact", "exact0", "turbo", "turbo0"):
+                if r[form] is not None:
+                    k[form] = round(r[form], 3)
+                sm = r[form + "_sampled"]
+                if sm and sm.get("sampled"):
+                    k[form + "_sampled"] = [sm["sampled"], sm["sent"], sm["timeouts"], round(sm["cost_s"] * 1e3, 1)]
+                if r[form + "_card"]:
+                    k[form + "_card"] = r[form + "_card"]
+                if r[form + "_out"] not in (None, "identical"):
+                    k[form + "_out"] = r[form + "_out"]
+            keep[prog] = k
     sep = " | " if md else "\t"
     head = ["program", "sim s", "exact s", "exact0 s", "exact0 / exact", "turbo s", "turbo0 s", "turbo0 / turbo", "sampled, sent (exact; turbo)",
             "on card of launches (exact; turbo)", "output (exact; turbo)"]
