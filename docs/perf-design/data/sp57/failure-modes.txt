@@ -1,0 +1,47 @@
+tier rc=0
+cold, compiler present (sync)      rc=0 output=same wall=3.03s
+    jit: 1 units (12 regions), 1 ready, 0 cache hits, 1 compiles (1956.4 ms), 0 failures, 0 damaged objects replaced; 3354983 region calls ran 47161306 warp instructions (38342515 
+warm                               rc=0 output=same wall=0.88s
+    jit: 1 units (12 regions), 1 ready, 1 cache hits, 0 compiles (0.0 ms), 0 failures, 0 damaged objects replaced; 3354983 region calls ran 47161306 warp instructions (38342515 com
+    cache: 6 files, 236 KiB:       1 cid-fc802094fcbe42544b9c1fb11d740c4b.txt       1 <key>.lock       1 <key>.sel       1 <key>.so       1 <key>.sum       1 rt-d4cb57bd73e3f7a9 
+object cut in half                 rc=0 output=same wall=2.88s
+    jit: 1 units (12 regions), 1 ready, 0 cache hits, 1 compiles (2004.2 ms), 0 failures, 1 damaged objects replaced; 3354983 region calls ran 47161306 warp instructions (38342515 
+after it (warm again?)             rc=0 output=same wall=1.06s
+    jit: 1 units (12 regions), 1 ready, 1 cache hits, 0 compiles (0.0 ms), 0 failures, 0 damaged objects replaced; 3354983 region calls ran 47161306 warp instructions (38342515 com
+no compiler on PATH, cold          rc=0 output=same wall=0.99s
+    pantheonsim: JIT: no C++ compiler (c++, g++, clang++) on PATH; set VGPU_JIT_CXX; those regions stay on the tier
+    jit: 1 units (12 regions), 0 ready, 0 cache hits, 0 compiles (0.0 ms), 1 failures, 0 damaged objects replaced; 0 region calls ran 0 warp instructions (0 computed by generated c
+no compiler on PATH, warm cache    rc=0 output=same wall=0.99s
+    pantheonsim: JIT: no C++ compiler (c++, g++, clang++) on PATH; set VGPU_JIT_CXX; those regions stay on the tier
+    jit: 1 units (12 regions), 0 ready, 0 cache hits, 0 compiles (0.0 ms), 1 failures, 0 damaged objects replaced; 0 region calls ran 0 warp instructions (0 computed by generated c
+no compiler, default threshold     rc=0 output=same wall=1.01s
+    pantheonsim: JIT: no C++ compiler (c++, g++, clang++) on PATH; set VGPU_JIT_CXX; those regions stay on the tier
+    jit: 1 units (12 regions), 0 ready, 0 cache hits, 0 compiles (0.0 ms), 1 failures, 0 damaged objects replaced; 0 region calls ran 0 warp instructions (0 computed by generated c
+compiler fails                     rc=0 output=same wall=1.00s
+    pantheonsim: JIT: the compiler failed (status 1): boom
+    jit: 1 units (12 regions), 0 ready, 0 cache hits, 1 compiles (2.5 ms), 1 failures, 0 damaged objects replaced; 0 region calls ran 0 warp instructions (0 computed by generated c
+compiler hangs (async)             rc=0 output=same wall=1.09s
+    pantheonsim: JIT: the compile was cancelled; those regions stay on the tier
+    jit: 1 units (12 regions), 0 ready, 0 cache hits, 1 compiles (1073.3 ms), 1 failures, 0 damaged objects replaced; 0 region calls ran 0 warp instructions (0 computed by generate
+    left behind: 0 processes of the hanging compiler, 3 files in its cache: 916f0bc48ad360e394753488ffb0f644.lock cid-8b521635c512767dbf9a9386476bde05.txt rt-d4cb57bd73e3f7a9 
+HOME read-only                     rc=0 output=same wall=1.03s
+    pantheonsim: JIT: cannot create <scratch>/fm/rohome/.cache: Permission denied; those regions stay on the tier
+    jit: 1 units (12 regions), 0 ready, 0 cache hits, 0 compiles (0.0 ms), 1 failures, 0 damaged objects replaced; 0 region calls ran 0 warp instructions (0 computed by generated c
+HOME does not exist                rc=0 output=same wall=2.94s
+    jit: 1 units (12 regions), 1 ready, 0 cache hits, 1 compiles (1938.6 ms), 0 failures, 0 damaged objects replaced; 3354983 region calls ran 47161306 warp instructions (38342515 
+    created: 5 directories under it, mode of jit/: 700
+cache directory world-writable     rc=0 output=same wall=1.00s
+    pantheonsim: JIT: <scratch>/fm/ww is writable by others; those regions stay on the tier
+    jit: 1 units (12 regions), 0 ready, 0 cache hits, 0 compiles (0.0 ms), 1 failures, 0 damaged objects replaced; 0 region calls ran 0 warp instructions (0 computed by generated c
+four at once (VGPU_JIT_SYNC=1): rc 0 0 0 0  outputs same same same same  cache: 1 objects, 2 stray files
+    jit: 1 units (12 regions), 1 ready, 1 cache hits, 0 compiles (0.0 ms), 0 failures, 0 damaged objects replaced; 3354983 r
+    jit: 1 units (12 regions), 1 ready, 1 cache hits, 0 compiles (0.0 ms), 0 failures, 0 damaged objects replaced; 3354983 r
+    jit: 1 units (12 regions), 1 ready, 0 cache hits, 1 compiles (2232.4 ms), 0 failures, 0 damaged objects replaced; 335498
+    jit: 1 units (12 regions), 1 ready, 1 cache hits, 0 compiles (0.0 ms), 0 failures, 0 damaged objects replaced; 3354983 r
+four at once (VGPU_JIT_SYNC=0): rc 0 0 0 0  outputs same same same same  cache: 0 objects, 2 stray files
+    jit: 1 units (12 regions), 0 ready, 0 cache hits, 1 compiles (1643.9 ms), 1 failures, 0 damaged objects replaced; 0 regi
+    jit: 1 units (12 regions), 0 ready, 0 cache hits, 1 compiles (1630.7 ms), 1 failures, 0 damaged objects replaced; 0 regi
+    jit: 1 units (12 regions), 0 ready, 0 cache hits, 1 compiles (1654.5 ms), 1 failures, 0 damaged objects replaced; 0 regi
+    jit: 1 units (12 regions), 0 ready, 0 cache hits, 1 compiles (1666.3 ms), 1 failures, 0 damaged objects replaced; 0 regi
+after four at once (warm)          rc=0 output=same wall=1.04s
+    jit: 1 units (12 regions), 1 ready, 1 cache hits, 0 compiles (0.0 ms), 0 failures, 0 damaged objects replaced; 3354983 region calls ran 47161306 warp instructions (38342515 com
