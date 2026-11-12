@@ -4,7 +4,7 @@
   model.py out.json [--form log]  [--md]
 
 Columns: the static estimate (static_sim_seconds), the process's age at the launch, what the sample cost (fork to answer), the time of the copy's first
-block and of the blocks after it, the plain extrapolation from those (per-block time x blocks / host threads: the rule's estimate), what the simulator then took for the launch, and their ratio: under 1 the launch
+block and of the timed (second) runs of its blocks, the plain extrapolation from those (per-block time x blocks / host threads: the rule's estimate), what the simulator then took for the launch, and their ratio: under 1 the launch
 was estimated low (towards the simulator), over 1 high.
 """
 import argparse
@@ -26,7 +26,7 @@ def main():
         if not rec:
             continue
         for l in rec["launches"]:
-            timed = l["ran"] - 1
+            timed = l["ran"]
             if not l["answered"] or timed < 1 or l["launch_s"] <= 0 or l["timed_s"] <= 0:
                 rows.append((prog, l["kernel"][:40], l["blocks"], l["live_bytes"] / 1048576.0, l["static_s"], l["age_s"], l["cost_s"] * 1e3, l["fork_s"] * 1e3, l["ran"],
                              l["first_block_s"] * 1e3, 0.0, 0.0, l["launch_s"], 0.0, l["launch_s"] / max(l["static_s"], 1e-9), 0.0, l["would_send"]))
@@ -37,7 +37,7 @@ def main():
             rows.append((prog, l["kernel"][:40], l["blocks"], l["live_bytes"] / 1048576.0, l["static_s"], l["age_s"], l["cost_s"] * 1e3, l["fork_s"] * 1e3, l["ran"],
                          l["first_block_s"] * 1e3, l["timed_s"] * 1e3, plain, l["launch_s"], plain / l["launch_s"], l["launch_s"] / max(l["static_s"], 1e-9),
                          plain / a.slowdown, l["would_send"]))
-    head = ["program", "kernel", "blocks", "live MiB", "static est s", "age s", "sample cost ms", "fork ms", "blocks run", "first block ms", "blocks after ms",
+    head = ["program", "kernel", "blocks", "live MiB", "static est s", "age s", "sample cost ms", "fork ms", "blocks timed", "first block ms", "timed runs ms",
             "plain extrapolation s", "launch took s", "ratio", "launch / static", "estimate s", "would send"]
     fmt = ["%s", "%s", "%d", "%.1f", "%.4f", "%.3f", "%.2f", "%.2f", "%d", "%.3f", "%.3f", "%.4f", "%.4f", "%.2f", "%.1f", "%.4f", "%d"]
     sep = " | " if a.md else "\t"

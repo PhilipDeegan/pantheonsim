@@ -1537,9 +1537,7 @@ exec::LaunchStats Runner::run() {
       if (part) {
         const uint64_t taken = next.load(std::memory_order_relaxed);
         if (taken >= part->limit) return;
-        if (part->budget_s > 0 && taken >= 2 &&
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - part_t0).count() - part->first_block_s >= part->budget_s)
-          return;
+        if (part->budget_s > 0 && taken >= 1 && (part->timed_s >= part->budget_s || part->run_s >= 5 * part->budget_s)) return;
       }
       uint64_t i = next.fetch_add(1);
       if (part) i *= std::max<uint64_t>(part->stride, 1);
@@ -1559,8 +1557,15 @@ exec::LaunchStats Runner::run() {
         if (solo) {
           stats_.add(blk.st);
           if (part) {
-            part->run_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - part_t0).count();
-            if (part->first_block_s < 0) part->first_block_s = part->run_s;
+            // The block again, timed: its first run paid what the launch pays once.
+            const auto again = std::chrono::steady_clock::now();
+            if (part->first_block_s < 0) part->first_block_s = std::chrono::duration<double>(again - part_t0).count();
+            init_block(blk, i);
+            blk.worker = t;
+            run_block(blk);
+            const auto end = std::chrono::steady_clock::now();
+            part->timed_s += std::chrono::duration<double>(end - again).count();
+            part->run_s = std::chrono::duration<double>(end - part_t0).count();
             ++part->next;
           }
         } else {

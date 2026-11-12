@@ -24,12 +24,6 @@ build|all)
 ci|all)
   # the stand-in-driver test alone, with its output kept: steps 17 to 20 are new and have run nowhere before
   (cd "$build" && ctest -R 'e2e_host_gpu_stub|test_host_gpu_logic|hostgpu_bench_selftest' --output-on-failure) 2>&1 | tee "$out/stub.txt"
-  # the proof of the undo over the corpus, on the rig's own build (no card used): every sample undone and compared
-  for f in exact turbo; do
-    $H --corpora polybench,rodinia,hecbench --skip "$LONG,$HEC_SKIP" --runs 1 --forms sim,$f --env VGPU_HOST_GPU_SAMPLE=check --timeout 300 \
-       --json "$out/check-$f.json" --md "$out/check-$f.md" 2>&1 | tail -3
-    # (a failed check ends the program with status 86: its row is then not "identical", and the JSON has the status)
-  done
   ;;&
 ab|all)
   # the A/B: 3 runs a form (1 for a program over 30 s in the simulator), medians
@@ -37,9 +31,18 @@ ab|all)
     $H --corpora $suite --skip "$HEC_SKIP" --runs 3 --long-secs 30 --long-runs 1 --forms sim,exact,exact0,turbo,turbo0 --timeout 600 \
        --json "$out/ab-$suite.json" --md "$out/ab-$suite.md" 2>&1 | tee "$out/ab-$suite.txt" | tail -40
   done
-  # the launches each sample sent, and what it measured: one run with the log of the programs that have a sampled launch
-  $H --corpora polybench,rodinia,hecbench --skip "$LONG,$HEC_SKIP" --runs 1 --forms sim,exact,turbo --env VGPU_HOST_GPU_LOG=1 --timeout 300 \
-     --json "$out/log.json" --md "$out/log.md" 2>&1 | tail -3
+  # what each sample measured and what was sent: one run with the log (also gives the forks' cost and the estimates on the rig's own CPU)
+  for p in polybench/SYRK polybench/SYR2K polybench/2MM polybench/GEMM polybench/2DCONV polybench/GEMVER rodinia/backprop hecbench/black-scholes-cuda hecbench/binomial-cuda; do
+    case $p in
+      polybench/*) d=$corp/polybench/bin; cmd="$d/${p#*/}";;
+      rodinia/*) d=$(mktemp -d); cmd="$corp/rodinia/bin/backprop 262144";;
+      *) d=$corp/hec/src/${p#*/}; cmd="$d/main $(grep "^${p#*/}|" $corp/hec/reduced.txt | cut -d'|' -f2)";;
+    esac
+    for m in exact turbo; do
+      echo "== $p $m"
+      ( cd "$d" && env VGPU_QUIET=1 VGPU_GPU=nvidia/a10g LD_LIBRARY_PATH=$build/shim VGPU_HOST_GPU=$m VGPU_HOST_GPU_LOG=1 timeout 600 $cmd 2>&1 | grep -E "^host_gpu(_sample|_sampled|_turbo|: .*(sent by|on the card|failed))" | cut -c1-600 )
+    done
+  done > "$out/sample-log.txt" 2>&1
   ;;&
 early|all)
   # the driver started early, on its thread (an experiment): the short and middling programs, where a start that is not used shows

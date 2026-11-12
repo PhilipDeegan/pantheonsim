@@ -226,16 +226,18 @@ when a static estimate said so, and that estimate counts every instruction of th
 loops, and programs that launch each kernel once never get a second chance. Nothing static says how long a thread runs; the launch does.
 
 **The rule.** A launch that the history rule and the static first-launch rule leave to the simulator for want of an estimate, of an admitted kernel
-on a grid of at least @MINBLOCKS@ blocks with at most 256 MiB live, in a process whose driver has not been started, is *sampled* before the simulator
-runs it:
+on a grid of at least 256 blocks, in a process whose driver has not been started, is *sampled* before the simulator runs it:
 
-1. The process is forked. The copy runs the launch's first blocks on its one thread (up to 32, and no more once the blocks after the first have
-   taken 2 ms), writes the times to a pipe and ends with `_exit`. The process waits for the answer, 50 ms at most; a copy that has not answered
+1. The process is forked. The copy runs up to 32 blocks of the launch on its one thread, spread evenly over the grid (the blocks of a grid need
+   not be alike). It runs each block twice and times the second run: the first pays what a launch pays once (decode, set-up, the chunks of
+   memory the launch is the first to write). It takes no further block once the timed runs have taken 2 ms, writes the times to a pipe and
+   ends with `_exit`. The process waits for the answer, 50 ms at most; a copy that has not answered
    is ended and the launch is the simulator's.
-2. The time of the blocks after the first (the first pays decode and set-up) gives a per-block time, and the launch is extrapolated from it:
-   per-block time x blocks / host threads@SLOWDOWN@.
+2. The timed runs give a per-block time, and the launch is extrapolated from it:
+   per-block time x blocks / host threads. Host threads do not scale perfectly, so this errs low, towards the simulator.
 3. If that estimate is more than twice the card path (the driver start, the live memory each way, the launch, and a card kernel time assumed to
    be 1/8 of the estimate, the least that [07](07-host-gpu.md) measured), the card runs the launch. Otherwise the simulator does, all of it.
+   The first-launch rule's cap of 256 MiB of live memory is not applied here: the copies are charged against a measured time.
 
 The driver start is charged in full against this one launch. The account of simulator time already spent (the ski-rental rule of sp43) is not
 consulted here: it is what let short programs pay for a start they could not use.
@@ -263,7 +265,15 @@ What the copy can do outside its memory, and why it does not:
   (`wait`, a `SIGCHLD` handler that reaps) can see a child it did not make: `VGPU_HOST_GPU_SAMPLE=0` is for such a program.
 
 **What a sample costs** is the fork, the copy's decode and set-up and the sampled blocks: a few milliseconds whatever the launch turns out to be.
-@COST@
+Two things keep a short program from paying for samples it cannot use; a launch is sampled when either holds: its static estimate is at
+least 30 ms (ten times a sample's usual cost; more with much live memory, because the fork copies page tables: 1.2 ms per 100 MiB), or what the
+process's samples have cost so far, plus this one, is within 2% of the time the process has run. Most programs launch within milliseconds of
+their start, so in practice the first of the two decides. `VGPU_HOST_GPU_SAMPLE=0` switches sampling off.
+
+**What it does not reach.** A grid of fewer than 256 blocks has too few blocks to time: a copy would have to run one of them to its end, and
+on such a grid a block is a large share of the launch. PolyBench COVAR and CORR spend their time in a kernel launched on 8 blocks of 256
+threads (each thread loops over the whole matrix), so they are not sampled and stay in the simulator, as before. Reaching them needs progress
+inside a block (a loop's trip count), which nothing here measures.
 
 **What was tried first and removed** (Round sp60b has the numbers): moving a launch while the simulator runs it (a watcher thread, a copy of the
 whole live memory before the launch, the simulator stopped between two blocks) worked against the stand-in driver, and the copy cost too much

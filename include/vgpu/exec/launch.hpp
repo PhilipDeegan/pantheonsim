@@ -67,12 +67,14 @@ struct LaunchPart {
   // In:
   uint64_t limit = 0;               // how many blocks are run at most
   uint64_t stride = 1;              // the blocks run are 0, stride, 2 x stride, ...: spread over the grid, whose blocks need not be alike
-  double budget_s = 0;              // above 0: no further block is taken once the blocks after the first have lasted this long (two are taken at least)
+  double budget_s = 0;              // above 0: no further block is taken once the timed runs have lasted this long, or the whole run five times it
   // Out, written by the run before it returns:
-  uint64_t next = 0;                // how many blocks ran to their end, on the calling thread
+  uint64_t next = 0;                // how many blocks were run and timed, on the calling thread
+  double timed_s = 0;               // the sum of their timed runs: each block is run twice and its second run is the timed one (the first pays
+                                    // what a launch pays once: decode, set-up, memory the launch is the first to write)
   uint64_t total = 0;               // the blocks of the grid
   unsigned threads = 0;             // the host threads the whole launch would run on
-  double first_block_s = -1;        // when the first block ended, in seconds from the run's start (the first block pays decode and set-up)
+  double first_block_s = -1;        // when the first run of the first block ended, in seconds from the run's start
   double run_s = 0;                 // when the last block ended, on the same clock
 };
 

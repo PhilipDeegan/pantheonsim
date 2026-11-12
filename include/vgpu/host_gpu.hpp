@@ -654,7 +654,7 @@ inline bool first_launch_offload(const FirstLaunch& f, const Costs& c, bool driv
 // The static estimate of first_launch_offload counts every instruction of the code once a warp, so it is low by the trip count of the kernel's loops,
 // and the history rule needs launches that some programs never make again (one launch a kernel). Nothing static says how long a thread runs; the
 // launch itself does. So a launch the rules above leave to the simulator for want of an estimate is SAMPLED before the simulator runs it: the process
-// is forked, the copy runs the launch's first few blocks on one thread, timed, reports the times and ends. Nothing the copy did exists in the process
+// is forked, the copy runs a few of the launch's blocks on one thread, each twice with the second run timed, reports the times and ends. Nothing the copy did exists in the process
 // that goes on (its memory is its own, copy-on-write), so there is nothing to undo: if the times say that the launch repays the card path, the
 // driver start included, the card runs the launch; if not the simulator does, all of it, as it would have.
 // The decision is from measured time, so it cannot be low by a loop's trip count, and it charges the driver start in full against this one launch:
@@ -663,8 +663,9 @@ inline bool first_launch_offload(const FirstLaunch& f, const Costs& c, bool driv
 
 // How many blocks the copy runs: none for a grid of fewer than kSampleMinBlocks; else up to kSampleMaxBlocks, spread evenly over the grid (block 0,
 // then every sample_stride-th: the blocks of a grid need not be alike, Rodinia gaussian's first blocks do nine times the work of its average one),
-// and no further block once the blocks after the first have taken kSampleBudgetSeconds (two are run at least: the first block pays decode and
-// set-up and is not part of the measure).
+// and no further block once the timed runs have taken kSampleBudgetSeconds. Each block is run twice and the second run is the timed one: the
+// first pays what a launch pays once (decode, set-up, the chunks of memory the launch is the first to write), which made PolyBench GEMVER's
+// blocks look seven times as long as they are.
 inline constexpr uint64_t kSampleMinBlocks = 256;
 inline constexpr uint64_t kSampleMaxBlocks = 32;
 inline constexpr double kSampleBudgetSeconds = 0.002;
@@ -704,15 +705,15 @@ inline constexpr double kSampleCardSpeedup = 8.0;
 // this one charges the copies each way against a measured time (HeCBench black-scholes has 1 GiB live and 6 s in one launch).
 
 struct Sample {
-  double seconds = 0;       // the blocks after the first: how long they ran
-  uint64_t timed = 0;       // how many they are (one less than the blocks the copy ran)
+  double seconds = 0;       // the timed (second) runs of the sampled blocks: their sum
+  uint64_t timed = 0;       // how many blocks were sampled
   uint64_t total = 0;       // blocks of the grid
   unsigned threads = 1;     // host threads the whole launch would run on
 };
 
 // The seconds the simulator needs for the launch, from the sample: the per-block time over the whole grid, shared among the host threads as if
 // they scaled perfectly. They do not, so the estimate errs low, towards the simulator: over the kernels with a loop that Round sp60b sampled, the
-// launch took 1.0 to 1.7 times it (docs/perf-design/data/sp60b/). None when no block after the first was timed.
+// launch took 1.0 to 1.5 times it (docs/perf-design/data/sp60b/). None when no block was timed.
 inline std::optional<double> sampled_launch_seconds(const Sample& s) {
   if (s.timed == 0 || s.total == 0 || !(s.seconds > 0)) return std::nullopt;
   const double per_block = s.seconds / static_cast<double>(s.timed);
@@ -735,7 +736,7 @@ inline Estimate sample_estimate(const Sample& s, uint64_t push_bytes, uint64_t l
 // Whether a sampled launch goes to the card: the simulator's time must repay the card path, with the driver start if it is not up, by the usual margin.
 inline bool sample_offload(const Sample& s, uint64_t push_bytes, uint64_t live_bytes, const Costs& c, bool driver_started,
                            std::optional<double> card_kernel_s = std::nullopt) {
-  if (!sampled_launch_seconds(s)) return false;
+  // (a sample with no estimate has a simulator time of 0, which no card path is under)
   return should_offload(sample_estimate(s, push_bytes, live_bytes, c, driver_started, card_kernel_s), c);
 }
 

@@ -1256,12 +1256,12 @@ bool Runtime::sample_decide(const ptx::EntryFn& fn, const exec::LaunchConfig& cf
   im.sample_spent_s += run.wall_s;
   im.sample_dearest_s = std::max(im.sample_dearest_s, run.wall_s);
   if (!run.answered) ++im.stats.sample_timeouts;
-  // The measure is of the blocks after the first (which pays decode and set-up).
+  // The measure is of each sampled block's second run (the first pays what the launch pays once).
   Sample smp;
-  smp.timed = run.answered && run.part.next > 1 && run.part.first_block_s >= 0 ? run.part.next - 1 : 0;
+  smp.timed = run.answered ? run.part.next : 0;
   smp.total = hint.blocks;
   smp.threads = std::max(1u, run.part.threads);
-  smp.seconds = smp.timed ? std::max(run.part.run_s - run.part.first_block_s, 1e-9) : 0;
+  smp.seconds = smp.timed ? std::max(run.part.timed_s, 1e-9) : 0;
   const auto whole = sampled_launch_seconds(smp);
   // What the card would have to be sent: the chunks it does not hold (all of the live memory before its first launch).
   uint64_t live = 0, push = 0;

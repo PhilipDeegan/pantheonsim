@@ -1377,7 +1377,7 @@ bool Device::sample_in_copy(const ptx::EntryFn& fn, const exec::LaunchConfig& cf
   struct Message {
     uint64_t next, total;
     uint32_t threads;
-    double first_block_s, run_s;
+    double first_block_s, run_s, timed_s;
   } msg{};
   const auto t0 = std::chrono::steady_clock::now();
   const auto since = [&] { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };
@@ -1405,6 +1405,7 @@ bool Device::sample_in_copy(const ptx::EntryFn& fn, const exec::LaunchConfig& cf
       msg.threads = part.threads;
       msg.first_block_s = part.first_block_s;
       msg.run_s = part.run_s;
+      msg.timed_s = part.timed_s;
       status = write(fds[1], &msg, sizeof msg) == static_cast<ssize_t>(sizeof msg) ? 0 : 4;
     } catch (const std::exception& e) {
       // (a launch that faults says so when the simulator runs it for the program; here only under VGPU_HOST_GPU_LOG=2)
@@ -1449,6 +1450,7 @@ bool Device::sample_in_copy(const ptx::EntryFn& fn, const exec::LaunchConfig& cf
     out->threads = msg.threads;
     out->first_block_s = msg.first_block_s;
     out->run_s = msg.run_s;
+    out->timed_s = msg.timed_s;
   }
   *wall_s = since();
   return got == sizeof msg;

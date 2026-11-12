@@ -1039,7 +1039,7 @@ VTEST(sample_runs_a_few_blocks_and_none_of_a_small_grid) {
   VCHECK(sample_blocks(4096) == kSampleMaxBlocks);                    // PolyBench SYRK's grid
   VCHECK(sample_blocks(uint64_t{1} << 40) == kSampleMaxBlocks);       // never more
   for (uint64_t b : {kSampleMinBlocks, uint64_t{300}, uint64_t{4096}, uint64_t{1} << 30})
-    VCHECK(sample_blocks(b) >= 2 && sample_blocks(b) * 2 <= b);       // two at least (the first is not part of the measure), half the grid at most
+    VCHECK(sample_blocks(b) >= 2 && sample_blocks(b) * 2 <= b);       // half the grid at most
 }
 
 VTEST(sampled_blocks_are_spread_over_the_grid) {
@@ -1070,7 +1070,7 @@ VTEST(samples_may_cost_a_share_of_the_time_the_process_has_run) {
   VCHECK(sample_affordable(1.0, 0.019, -1.0));
 }
 
-// `timed` blocks after the first, in `seconds`.
+// `timed` blocks, whose second runs took `seconds`.
 static Sample sample_of(double seconds, uint64_t timed, uint64_t total, unsigned threads = 4) {
   Sample s;
   s.seconds = seconds;
@@ -1080,8 +1080,8 @@ static Sample sample_of(double seconds, uint64_t timed, uint64_t total, unsigned
   return s;
 }
 
-VTEST(sample_extrapolates_the_launch_from_the_blocks_after_the_first) {
-  // 15 blocks after the first of 4096 in 15 ms, for what would be 4 threads: 1 ms a block, 4096 blocks, shared among the threads
+VTEST(sample_extrapolates_the_launch_from_the_timed_blocks) {
+  // 15 blocks of 4096 in 15 ms, for what would be 4 threads: 1 ms a block, 4096 blocks, shared among the threads
   const auto whole = sampled_launch_seconds(sample_of(0.015, 15, 4096, 4));
   VCHECK(whole.has_value());
   const double want = 0.001 * 4096 / 4;
@@ -1093,14 +1093,14 @@ VTEST(sample_extrapolates_the_launch_from_the_blocks_after_the_first) {
   VCHECK(*sampled_launch_seconds(sample_of(0.015, 15, 4096, 0)) == *sampled_launch_seconds(sample_of(0.015, 15, 4096, 1)));
   // per timed block: the same time over fewer blocks is more per block
   VCHECK(*sampled_launch_seconds(sample_of(0.015, 5, 4096, 4)) > 2.99 * *whole && *sampled_launch_seconds(sample_of(0.015, 5, 4096, 4)) < 3.01 * *whole);
-  // nothing to say when no block after the first was timed (the copy did not answer, or the launch's blocks take turns), or there is no time or grid
+  // nothing to say when no block was timed (the copy did not answer, or the launch's blocks take turns), or there is no time or grid
   VCHECK(!sampled_launch_seconds(sample_of(0.015, 0, 4096)));
   VCHECK(!sampled_launch_seconds(sample_of(0.0, 15, 4096)));
   VCHECK(!sampled_launch_seconds(sample_of(-1.0, 15, 4096)));
   VCHECK(!sampled_launch_seconds(sample_of(0.015, 15, 0)));
 }
 
-// A sample whose low estimate of the launch is `launch_s` (4 threads, 15 blocks after the first of 4096).
+// A sample whose estimate of the launch is `launch_s` (4 threads, 15 blocks of 4096).
 static Sample sample_saying(double launch_s) { return sample_of(launch_s * 15 * 4 / 4096, 15, 4096, 4); }
 
 VTEST(sample_sends_only_what_repays_the_driver_start_and_the_card_path) {
@@ -1111,6 +1111,8 @@ VTEST(sample_sends_only_what_repays_the_driver_start_and_the_card_path) {
   VCHECK(!sample_offload(sample_saying(0.3), live, live, c, false));     // 0.3 s: the start alone (0.25 s, margin 2) is more
   VCHECK(sample_offload(sample_saying(0.3), live, live, c, true));       // ... worth it once the driver is up
   VCHECK(!sample_offload(sample_saying(0.0001), live, live, c, true));   // under the floor of any offload
+  VCHECK(!sample_offload(sample_of(0.0, 0, 4096), 0, 0, c, true));       // a copy that did not answer: no estimate, nothing sent
+  VCHECK(!sample_offload(sample_of(0.015, 0, 4096), 0, 0, c, true));
   // the bar, by bisection: the launch must take more than margin x (start + copies each way + launch + the card's assumed kernel time)
   double lo = 0.3, hi = 4.0;
   for (int i = 0; i < 60; ++i) {
