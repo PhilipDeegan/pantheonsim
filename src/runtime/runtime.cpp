@@ -1365,11 +1365,10 @@ void Device::launch(const ptx::EntryFn& fn, const exec::LaunchConfig& in_cfg,
 namespace {
 std::mutex g_copies_mu;
 std::vector<pid_t> g_copies;   // sampled copies that answered and had not ended when last asked
-}  // namespace
 
 // Reaps the sampled copies that have ended; with `wait`, waits for the others too (they have answered and are on their way out). Returns how
 // many were still running when it was called.
-size_t hostgpu::sample_copies_reap(bool wait) {
+size_t reap_sample_copies(bool wait) {
   std::lock_guard<std::mutex> g(g_copies_mu);
   size_t running = 0;
   for (size_t i = 0; i < g_copies.size();) {
@@ -1385,14 +1384,15 @@ size_t hostgpu::sample_copies_reap(bool wait) {
   }
   return running;
 }
+}  // namespace
 
 bool Device::sample_in_copy(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, const std::vector<std::vector<uint8_t>>& args,
                             const exec::SymbolTable* syms, uint64_t limit, uint64_t stride, double budget_s, double timeout_s, exec::LaunchPart* out, double* wall_s,
                             double* fork_s) {
   *wall_s = *fork_s = 0;
   // Copies that answered are not waited for (a process takes a millisecond to be torn down): they are reaped at the next sample, and the mode's
-  // exit handler waits for the ones still there (hostgpu::sample_copies_reap), so the process leaves no child behind.
-  hostgpu::sample_copies_reap(false);
+  // exit handler waits for the ones still there (reap_sample_copies), so the process leaves no child behind.
+  reap_sample_copies(false);
   struct Message {
     uint64_t next, total;
     uint32_t threads;
@@ -1574,3 +1574,5 @@ Device& Runtime::device(int ordinal) {
 }
 
 }  // namespace vgpu::runtime
+
+size_t vgpu::hostgpu::sample_copies_reap(bool wait) { return vgpu::runtime::reap_sample_copies(wait); }
