@@ -1395,3 +1395,102 @@ The A/B compares the normalised output of every run of every side: equal on all 
 * The mutants of BSYNC and of the row copy were run on the build before the loop rule (`mutants.log`, whose columns the script cut to a fixed width); the generator's text for them did not change afterwards. After the fix of part 0 (which changes generated text only with residence) `test_jit_resid` was run again in full (7 tests pass, `matrix.log`), the rule's mutants, the counts, SYR2K's and SYRK's timing and the same-bits runs are of that final build, and the SASS-level legs were not run again. `tests.log` is of the build before BSYNC became an opt-in: the linking legs of the other three run-loop tests (store gate, ALU runs, dispatch counts) were not run again on the final build, where their environment (`VGPU_JIT_LINK_BSYNC=1`) means what the default meant before.
 * Deviations from the round's rules: one hold of the machine lock ran 26 minutes (a build and sixteen test legs; the limit was about 20) and two others about 20; `cmake` was configured once outside the lock (2 s); a disassembly was written to `/tmp` and removed in the same command.
 * Cleanup: the scratch tree of the round on server3 (`~/.cache/sp53`) was removed by exact path.
+
+## Round sp60a (does launch-level result caching slow the default simulator? the baseline of round sp59): measured, it does not; nothing to fix (branch `sp60a-memo-cost`, base `origin/main` 1baa3ad3)
+
+Round sp59 (branch `hostgpu-relaxed`, an A10G rig) saw a host-GPU run that sent nothing to the card finish before the plain simulator (PolyBench SYRK 5.19 s
+against 6.48 s, CORR 63 s against 78 s) and named a likely cause it did not measure: `runtime.cpp` attaches launch-level result caching only when
+`VGPU_HOST_GPU` is unset, so the plain simulator would pay for a cache that never hits. Two questions followed: are sp59's speed-ups overstated, and is the
+default simulator slower than it need be for everyone? Data, scripts and the box: [`data/sp60a/`](../data/sp60a/README.md). No source file changed.
+
+### Answer
+
+* **The cache is not on in the default simulator, so it cannot be the cause.** `memo::Config::from_env` sets `enabled` only for `VGPU_MEMO=1`
+  (`src/runtime/memo.cpp`); the test of `VGPU_HOST_GPU` in `Device::Device` is a second condition on a switch that is already off. The harness of sp59 removes
+  every `VGPU_` variable before a run, so its plain form had no cache. The same lines are on `hostgpu-relaxed`. What is left of the cache when it is off: one
+  hash of each module's image at load (14 GB/s, round sp35) and null tests in the memory manager's cold paths.
+* **Measured: default, `VGPU_MEMO=0` and `VGPU_HOST_GPU=exact` take the same time.** 56 programs at default threads, 55 at `VGPU_THREADS=1`, alternating
+  runs, medians of 5 (3 over 4 s, 1 over 30 s):
+
+  | threads | programs of 0.3 s or more | default / `VGPU_MEMO=0`, geometric mean (range) | default / `VGPU_HOST_GPU=exact` | summed medians: default, memo off, host-GPU (s) |
+  |---|---:|---:|---:|---:|
+  | default | 27 | 1.003 (0.977 to 1.040) | 1.005 (0.994 to 1.033) | 181.3, 180.6, 179.9 |
+  | 1, pinned | 40 | 0.999 (0.959 to 1.032) | 1.003 (0.949 to 1.150) | 291.0, 293.0, 277.4 |
+
+  No program is outside its own spread. The largest ratios are GEMVER (1.040 and 1.033 at spreads of 8 to 16 %) and, at one thread, COVAR 1.150 and CORR
+  1.052, which are single runs made while two other programs ran on neighbouring cores (the same pair reads 1.010 and 1.033 at default threads, and CORR
+  reads 0.959 against `VGPU_MEMO=0` in that same pass). SYRK: 1.000 and 0.999 at default threads, 0.985 and 0.996 at one. With no driver on the box the mode
+  stays armed for the whole run (its own account with `VGPU_HOST_GPU_LOG=1`: 27,252 launches, all in the simulator, none failed, no "mode off"), so form `c`
+  is the path of a card run that sends nothing.
+* **Nothing was fixed, because there is no loss to remove.** The bar (5 % on three programs) has nothing to reach, and no profile was taken: there is no gap
+  to attribute.
+* **sp59's speed-ups are not overstated across the board.** Its own records show it (next section): of the 34 programs of 0.3 s or more to which the exact
+  form sent no launch, 32 are within 5 % of the plain simulator (median 1.000), and the two that are not are SYRK and CORR. With those two set to 1.00 the
+  headline moves in the third digit: 1.123x to 1.115x (exact), 1.121x to 1.113x (exact + DIV), 1.231x to 1.221x (relaxed).
+
+### sp59's records, read again (`data/sp60a/sp59-baseline.md`, from its `bench.json`)
+
+1. *Forms that sent nothing to the card.* If a switch tied to `VGPU_HOST_GPU` slowed the plain simulator, every such program would show it. They do not:
+   exact, 34 programs of 0.3 s or more, geometric mean 1.012, median 1.000, outside 5 %: CORR 1.234 and SYRK 1.248 only. SYR2K, the twin of SYRK (same
+   kernel shape, one launch, 9.8 s), is 1.000 in all three card forms; COVAR, the twin of CORR, is 1.000.
+2. *The plain simulator against itself on that rig.* The `START_COST=0` pass timed the plain simulator again, one run a program: SYRK took 5.19 s there,
+   the time of the card forms in the main pass. Of the 24 programs of 0.3 s or more in both passes, 6 moved by more than 5 %: LU 30.7 s and 46.5 s, SYRK
+   6.48 and 5.19, particlefilter 2.97 and 2.56, GEMVER 0.65 and 0.76, MVT 1.21 and 1.36, 3MM 2.42 and 2.30. The plain simulator on that rig does not
+   repeat its own time to better than a factor of 1.25 on some programs, in both directions.
+3. *Corrected headline.* A form that used no card cannot have gained from it; where such a form read above 1.05 it is set to 1.00 (CORR and SYRK in each
+   form). Geometric means over the 59 programs: exact 1.123x to **1.115x**, exact + DIV 1.121x to **1.113x**, relaxed 1.231x to **1.221x**; summed wall time
+   1.199x to 1.183x, 1.207x to 1.192x, 1.753x to 1.728x. No factor measured on server3 is applied to sp59's numbers: the measured factor is 1.00, and a
+   ratio of another CPU would not be valid for a rig whose own baseline moves by more than the effect. The rows that are not affected at all are the ones
+   that carry sp59's claims (gaussian, FDTD-2D, LU, sc_gpu, lud and the others with launches on the card): their gains are several times the 1.25 at issue,
+   and the `START_COST=0` figures for SYRK and SYR2K (4.04x, 4.2x) were taken against a 5.19 s and a 9.78 s baseline, the fast one.
+
+What made SYRK's median of three slow in the plain form alone was **not found**. It is not reproduced on server3: on four logical CPUs of two cores
+(`taskset -c 0-3`, the rig's shape) SYRK takes 3.10 s in both forms over 7 runs each, spread 2 to 3 %, and SYR2K, LU, GEMVER and MVT are within 1 %
+(`4cpu.md`). One property of sp59's harness fits the pattern and is offered as a guess, not a finding: with three runs and the order of the forms reversed
+on every other run, the second and third runs of the first form (the plain simulator) are consecutive, so one disturbance of 10 to 15 s on the rig moves
+that form's median and no other's. The per-run times were not kept, so this cannot be checked. A harness that rotates the forms instead of reversing them,
+or keeps every run's time, would have settled it; CORR is a single run and needs no mechanism.
+
+### The cache when it is asked for (`VGPU_MEMO=1`)
+
+Not the question of the round, measured in passing so that a later change knows what there is to keep:
+
+* *In one run, entries in memory* (`memo-stats-default.md`, default threads): **0 hits in 32,572 launches of 56 programs.** No program of these three
+  suites repeats a launch on unchanged memory. Recording and the hashing of host writes took 424 ms against 84.7 s of kernel time (0.50 %); default over
+  cache-on is 0.997 over the 27 programs of 0.3 s or more, the worst radixsort2 0.956 and pathfinder 0.970. This is the cost round sp38 reported.
+* *A second run with `VGPU_MEMO_DIR`* (`warm-t1.md`, one thread, one cold run and two warm ones): 28 of 50 programs hit when warm; the gains are where
+  round sp35 found them, in programs whose launches are replayed whole (atomicAggregate 3.7 s to 0.004 s, atomicPerf 111x, atomicIntrinsics 24x, bilateral
+  7.1x, bh 2.0x, hotspot 1.60x, 3MM 1.58x, radixsort2 1.35x); summed over the 34 programs of 0.3 s or more, 60.0 s off, 53.3 s warm.
+* *A lead, not followed:* the cold run with a directory reads below 0.97 against off in 12 of those 34 (aobench 0.75, aop 0.81, particlefilter 0.87,
+  JACOBI2D 0.89, gaussian 0.93), geometric mean 0.962. These are single runs (sortKV's cold run read 3.2 s against 0.22 s, plainly a disturbed run), and the
+  budget of `VGPU_MEMO_BUDGET` covers hashing, not the writing of entries to disk; the mode is opt-in and the round's question was the default, so it was
+  not measured further.
+
+### Same results
+
+`identity-t1.md`, `VGPU_THREADS=1`, one run of default, default again, `VGPU_MEMO=0`, `VGPU_HOST_GPU=exact` and `VGPU_MEMO=1`: normalised output, exit
+status, `VGPU_MEMO_FINAL_HASH`, `VGPU_COUNTERS_FILE` without the pid, `VGPU_KERNEL_DIGEST`. 49 programs compared: 44 the same in every form; 4 do not
+repeat themselves between two default runs (`backprop` of Rodinia and of HeCBench and `sc_gpu` in the digest only, `particlefilter_float` in output,
+counters and digest, as sp59 found); 1 differs in a form only: `pathfinder` under `VGPU_HOST_GPU`, whose output differs by the mode's own message
+(`VGPU_COUNTERS_FILE is set ...; mode off`) printed onto an unterminated line of the program, with the three files equal. Two cautions: the final memory
+hash is the same value in every program of this corpus (they free their memory before they exit), so the digest after every launch is the check that
+bites; and with `VGPU_COUNTERS_FILE` set the host-GPU mode is off, so for form `c` the files were compared with the variable set and the mode not armed.
+With the mode armed (the timing passes) the normalised output of form `c` is the default's in every program but `particlefilter_float`.
+
+### Not done, and deviations
+
+* No profile (nothing to attribute), no source change, so no test and no mutants. The off state is already held by `test_memo` and `e2e_memo_api_matrix`
+  (round sp35).
+* Not run: the nine programs of 100 s or more and `fpdc-cuda`; `atomicCost` at one thread (130 s a run; one of its three runs was killed in the first
+  pass); 3DCONV in the identity pass (the digest of 254 launches passed the 40 s limit); CORR, COVAR, LU, atomicCost, black-scholes and zerocopy in the
+  identity pass (their outputs are compared in the timing passes only). Programs over 30 s have one run a form, not three.
+* The first one-thread pass ran three programs side by side on three cores, against the rule of one timed run at a time. It was a mistake: runs were killed
+  or failed in all three forms at once (most likely memory: three device images of an A10G), and single runs came out 15 % apart. The 11 programs it
+  disturbed were run again one at a time and those rows replace the first ones; the other 44 rows are of the side-by-side pass and their spreads are in
+  the table. The ratios are between forms of one program on one core, which the neighbours disturb equally, but the absolute one-thread times of those
+  44 rows are about 25 % above what the box gives alone and should not be quoted.
+* No card: everything about the A10G is read from sp59's records, not measured. Whether a card form that sends nothing differs from the plain simulator
+  on a machine with a driver (the driver's library loaded, its threads) was not measured anywhere; sp59's 32 of 34 say it does not.
+* The round's text is appended to this file on a branch cut from `origin/main`, which does not have *Round sp59* (that section is on `hostgpu-relaxed`):
+  the two appends will meet when both are merged, and sp59's paragraph "One more thing that is not the mode" should then point here.
+* Cleanup: the scratch tree on server3 (`~/.cache/sp60a`) was removed by exact path.
