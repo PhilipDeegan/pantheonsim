@@ -1,5 +1,7 @@
 # PantheonSim
 
+[![CI](https://github.com/pantheongpu/pantheonsim/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/pantheongpu/pantheonsim/actions/workflows/ci.yml?query=branch%3Amain)
+
 PantheonSim runs CUDA and HIP programs on a CPU, with no GPU. It supplies fake driver, runtime and library files and a profile for each GPU model (T4, H100, MI300X and 45 more), so a program built with the real `nvcc` or `hipcc` runs against it. It checks what a program computes. It does not model how fast a GPU would run it.
 
 ## Limits
