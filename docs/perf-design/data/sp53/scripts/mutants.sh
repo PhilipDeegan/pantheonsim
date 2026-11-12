@@ -1,4 +1,5 @@
 #!/bin/bash
+# NOTE: VGPU_JIT_LINK_BSYNC (BSYNC as a region's op) was removed from the code after round sp53; this script is kept as the record of that round and no longer runs as written.
 # mutants.sh <build with -DVGPU_JIT_MUTANTS=ON> [work dir]: round sp53's tests on the pristine build and under each of the round's mutants. Four tests:
 #   unit  test_jit_resid "linked" (the linked code, BSYNCs included, against the unlinked code and the run loop's rules between its calls);
 #   rows  test_jit_resid "rows"   (the object of a kernel of SYR2K's shape holds no string instruction and no out-of-line escape);
