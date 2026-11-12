@@ -127,6 +127,7 @@ jobs:
         env:
           CUDA: ${{ matrix.cuda }}
         run: |
+          [ ! -x scripts/apt-mirror-fallback.sh ] || scripts/apt-mirror-fallback.sh
           sudo apt-get update -qq
           if [[ "$CUDA" == 12.0 ]]; then
             # Ubuntu's own toolkit. Its nvcc rejects GCC 13's headers, so it
@@ -137,6 +138,7 @@ jobs:
             sudo apt-get install -y -qq --no-install-recommends build-essential cmake ninja-build wget ca-certificates
             wget -qO /tmp/keyring.deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
             sudo dpkg -i /tmp/keyring.deb
+            [ ! -x scripts/apt-mirror-fallback.sh ] || scripts/apt-mirror-fallback.sh
             sudo apt-get update -qq
             read -ra packages <<<"$CUDA13_PACKAGES"
             sudo apt-get install -y -qq --no-install-recommends "${packages[@]}"

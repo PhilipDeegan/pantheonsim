@@ -4250,6 +4250,11 @@ set_tests_properties(lint_ci_jobs PROPERTIES TIMEOUT 120)
 add_test(NAME lint_ci_reservation
          COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/lint/check_ci_reservation.py)
 
+# scripts/apt-mirror-fallback.sh points apt at archive.ubuntu.com when the runner image's mirror host does not resolve, and
+# every hosted-runner apt-get update runs it first.
+add_test(NAME lint_apt_mirror_fallback COMMAND ${CMAKE_SOURCE_DIR}/tests/lint/check_apt_mirror_fallback.sh)
+set_tests_properties(lint_apt_mirror_fallback PROPERTIES TIMEOUT 60)
+
 # The merge-conflict guards (ci/pr-guard.sh at the start of a heavy job,
 # ci/cancel-conflicting-prs.sh after main moves) against a fake gh and curl.
 add_test(NAME lint_pr_guard COMMAND ${CMAKE_SOURCE_DIR}/tests/lint/check_pr_guard.sh)
