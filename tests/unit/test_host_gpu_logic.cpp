@@ -1048,7 +1048,7 @@ VTEST(a_copy_is_given_longer_to_answer_with_more_live_memory) {
   VCHECK(sample_timeout_seconds(8ull << 20) > 0.0516 && sample_timeout_seconds(8ull << 20) < 0.0517);   // SYRK: 8 MiB
   VCHECK(sample_timeout_seconds(2000ull << 20) > 0.469 && sample_timeout_seconds(2000ull << 20) < 0.470);   // black-scholes: 1.9 GiB
   // never more than a ninth of the static estimate the floor asks for (the wait is lost when the copy does not answer)
-  for (uint64_t live : {uint64_t{0}, 8ull << 20, 80ull << 20, 1ull << 30, 16ull << 30})
+  for (uint64_t live : {uint64_t{0}, uint64_t{8} << 20, uint64_t{80} << 20, uint64_t{1} << 30, uint64_t{16} << 30})
     VCHECK(sample_timeout_seconds(live) - kSampleTimeoutSeconds <= sample_static_floor(live) / 9 + 1e-12);
 }
 

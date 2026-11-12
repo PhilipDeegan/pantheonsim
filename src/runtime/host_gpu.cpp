@@ -286,11 +286,6 @@ struct Runtime::Impl : CardGate {
   size_t copies_running_at_exit = 0;   // sampled copies that had answered and not yet ended when the process came to its end (they were waited for)
   double sample_spent_s = 0;      // what the samples of this process have cost
   double sample_dearest_s = 0;    // the dearest of them
-  // VGPU_HOST_GPU_EARLY_START (an experiment of Round sp60b, off by default): 1 starts the driver, on its thread, at the first launch of an admitted
-  // kernel with a loop on a grid that fills the card, whether or not that launch goes: later decisions then find the start paid. What it costs a
-  // program that never uses the driver is the wait for the start at exit; 2 does not wait at exit (to measure whether a process can end while the
-  // driver starts: nothing says it can).
-  int early_start = 0;
   struct Decision;
   bool launch(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, const std::vector<std::vector<uint8_t>>& args, MemoryManager& mem, const double* forced_sim_s);
   void consider_sample(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, const Decision& dec, uint64_t blocks, MemoryManager& mem);
@@ -470,7 +465,7 @@ struct Runtime::Impl : CardGate {
 
   // At exit: a driver start that is still running must not race the process's teardown (the real driver's own exit handlers). Bounded by the same deadline.
   void settle_start() {
-    if (!start_sh || early_start == 2) return;
+    if (!start_sh) return;
     std::unique_lock<std::mutex> lk(start_sh->mu);
     start_sh->cv.wait_until(lk, start_began + std::chrono::seconds(10), [&] { return start_sh->done; });
   }
@@ -836,7 +831,6 @@ Runtime* Runtime::for_device(const DeviceProfile& profile, int ordinal) {
     if (const char* v = std::getenv("VGPU_HOST_GPU_WRITE_THROUGH"); v && *v && *v != '0') r->impl_->resident = false;
     if (const char* v = std::getenv("VGPU_HOST_GPU_NO_FIRST_LAUNCH"); v && *v && *v != '0') r->impl_->first_launch_off = true;
     if (const char* v = std::getenv("VGPU_HOST_GPU_DIV"); v && *v && *v != '0') r->impl_->div_idiom = true;
-    if (const char* v = std::getenv("VGPU_HOST_GPU_EARLY_START"); v && *v && *v != '0') r->impl_->early_start = *v == '2' ? 2 : 1;
     if (const char* v = std::getenv("VGPU_HOST_GPU_SAMPLE"); v && *v)   // 0: no launch is sampled (the rule before sp60b); log: see SampleMode
       r->impl_->sample_mode = std::string(v) == "0" ? Impl::SampleMode::Off : std::string(v) == "log" ? Impl::SampleMode::Log :
                               std::string(v) == "always" ? Impl::SampleMode::Always : Impl::SampleMode::On;
@@ -1010,9 +1004,6 @@ bool Runtime::Impl::launch(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg
     if (logging()) std::fprintf(stderr, "host_gpu: %s stays in the simulator: %s\n", fn.name.c_str(), why);
     return false;
   }
-  if (im.early_start && !forced && !im.verify && !im.start_sh && !im.start_failed && back_edge && im.multiprocessors &&
-      blocks >= kFirstLaunchBlocksPerSm * im.multiprocessors)
-    im.begin_start();
   // What the simulator took before for this kernel, else a lower bound from the code and the grid.
   std::optional<double> sim_s = forced ? std::optional<double>(*forced_sim_s) : im.sim_times.predict(fn.name, blocks);
   if (!sim_s && im.static_estimate) sim_s = static_sim_seconds(blocks, cfg.block[0] * cfg.block[1] * cfg.block[2], static_instrs, im.costs);

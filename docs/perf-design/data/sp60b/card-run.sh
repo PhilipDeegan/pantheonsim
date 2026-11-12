@@ -49,7 +49,8 @@ ab|all)
   done > "$out/sample-log.txt" 2>&1
   ;;&
 early|all)
-  # the driver started early, on its thread (an experiment): the short and middling programs, where a start that is not used shows
+  # the driver started early, on its thread (an experiment; the switch was removed after this run, see the round's text): the short and middling
+  # programs, where a start that is not used shows
   $H --corpora polybench,rodinia --skip "$LONG" --runs 3 --forms sim,exact,turbo --env VGPU_HOST_GPU_EARLY_START=1 --timeout 300 \
      --json "$out/early.json" --md "$out/early.md" 2>&1 | tee "$out/early.txt" | tail -30
   ;;&

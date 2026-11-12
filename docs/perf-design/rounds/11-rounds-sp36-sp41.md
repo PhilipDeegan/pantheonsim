@@ -1606,3 +1606,169 @@ it passes, but it also passed on the library before the fix in 10 runs, so it do
   output in all 27 runs; the mode says `cannot load the real driver ...; mode off` where a launch was sent, the summary with 0 launches on the card
   where none was, and `not a mode` / `not a number` for the last two. The stderr of the `exact` runs equals, line for line, that of an earlier build of
   main (another round's baseline tree on the same machine), apart from the two lines for scripts that `VGPU_HOST_GPU_LOG` now adds.
+
+## Round sp60b (host-GPU mode: the first blocks of a launch, timed)
+
+Branch `sp60b-first-launch`, on `hostgpu-relaxed` (pantheonsim #587). Round sp59 found that what keeps time in the simulator in both modes of the
+host-GPU mode is the size rule, and in it the first launch of a kernel: it goes to the card only on a static estimate that is far too low for a
+kernel with a loop, and programs that launch each kernel once have no second launch. This round replaces the guess with a measurement: a launch
+with no estimate is **sampled** in a forked copy of the process, and goes to the card when the measured time repays the card path and the
+driver start. Design and soundness: [12, section 8](../12-host-gpu-turbo.md). Data, scripts and commands: [`data/sp60b/`](../data/sp60b/README.md).
+Before the card everything ran on server3 (no driver); the card part is one A10G (g5.xlarge, 4 vCPU, driver 595.112.07, nvcc 13.0), about 4 hours.
+
+### Headline (one A10G; `exact0` and `turbo0` are the same build with `VGPU_HOST_GPU_SAMPLE=0`, the rule of sp59; medians of 3 interleaved runs, 1 for a program over 30 s)
+
+| program | mode | before (`exact0` / `turbo0`) s | now s | | what happened |
+|---|---|---:|---:|---:|---|
+| PolyBench SYRK | exact | 5.16 | 1.30 | 3.98x | its one launch sampled (6 ms) and sent: 12.6 ms on the card path |
+| | turbo | 5.19 | 1.30 | 3.99x | |
+| PolyBench SYR2K | exact | 9.81 | 2.37 | 4.13x | sampled (11 ms), sent: 21.5 ms on the card path |
+| | turbo | 9.72 | 2.37 | 4.10x | |
+| PolyBench 2MM | exact | 171.8 | 122.2 | 1.41x | the first kernel sampled (14 ms) and sent; the second goes by the old rules, now with the driver up. One run of each; the 122 s left are the program's CPU reference |
+| | turbo | 154.4 | 122.0 | 1.26x | |
+| HeCBench black-scholes | turbo | @BS0@ | @BS1@ | @BSX@ | @BSNOTE@ |
+| HeCBench binomial | turbo | 7.45 | 1.36 | 5.5x | not one of the four: its 1,000 launches went from the third on before, now from the first (one run of each) |
+| HeCBench shmembench | turbo | 6.17 | 0.30 | 20.3x | not one of the four: one launch, sampled and sent |
+
+Geometric mean of the speed-up over the plain simulator, and of the sampled form over the unsampled one:
+
+| suite | programs | exact | exact0 | exact over exact0 | turbo | turbo0 | turbo over turbo0 | summed seconds: exact, exact0, turbo, turbo0 |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| Rodinia | 12 | 1.17x | 1.17x | 1.004x | 1.23x | 1.24x | 0.994x | 12.6, 12.9, 12.3, 12.2 |
+| PolyBench/GPU (without GRAMSCHM) | 19 | 1.51x | 1.29x | 1.174x | 1.51x | 1.29x | 1.176x | 281, 342, 281, 325 |
+| HeCBench (reduced; 25 programs have a simulator time within 120 s) | 30 | 0.99x | 0.99x | 1.001x (28) | 1.13x | 1.00x | 1.177x | 82, 82, 79, 92 |
+| all | 61 | 1.18x (56) | 1.12x | 1.054x (59) | 1.27x (56) | 1.14x | 1.138x | 376, 437, 372, 428 |
+
+* **Outputs.** The output is the simulator's in all four forms (`identical`) for 55 of the 61 programs. Five have no simulator output to
+  compare with (aligned-types, atomicReduction, babelstream, base64e, binomial: their simulator run was cut at 120 s; @BINOUT@), and Rodinia
+  `particlefilter_float` does not print the same output twice in the simulator (as in sp59). In exact mode a sampled launch that is sent is a launch the card
+  computes bit for bit, as any launch it takes.
+* **More than 3% slower than the unsampled form: three programs by the medians, none by the rule.** Rodinia `backprop` in turbo (+7.0%),
+  `sc_gpu` in exact (+6.6%) and PolyBench `JACOBI2D` in exact (+9.5%): in all three NO launch was sampled in either form (their summary lines say
+  `sampled=0`), so both forms ran the same code, and each form's three runs fall in two groups 50 ms apart (`sc_gpu` exact0: 0.778, 0.727,
+  0.728 s). Ten more runs of each
+  form of the three (`card-run.sh repeat`): `backprop` turbo 0.708 s against 0.710 s, `JACOBI2D` exact 0.556 against 0.555, `sc_gpu` exact 0.732
+  against 0.778 (medians; every form of every one has runs at both levels). A median of three cannot tell these apart.
+* **Not reached: PolyBench COVAR and CORR** (64.5 s and 63.2 s, unchanged). Their long kernel is launched on 8 blocks of 256 threads, each thread
+  looping over the whole matrix (COVAR's `covar_kernel`: 819 M warp instructions in 64 warps): no block ends for seconds, so there is nothing
+  to time, and grids under 256 blocks are not sampled. In exact mode CORR's kernels are not admitted at all. The next step is progress inside a
+  block (a loop's trip count read from the code or from the first iterations); not built here.
+
+### A. Why the static estimate is low
+
+`static_sim_seconds` is blocks x warps per block x the instructions of the code / 100 M a second: every instruction once a warp. PolyBench SYR2K's
+kernel is `for (k = 0; k < NJ; k++) c[i][j] += ...` in every thread, with `NJ` a constant of the program: the count sees the loop's body once.
+Measured in the plain simulator (server3, 4 host threads), launch time over static estimate: SYR2K 76, the first kernel of 2MM 31, HeCBench binomial
+29, SYRK 22; kernels whose threads leave early or run straight through, 0.3 to 0.6 (2DCONV, GEMVER, JACOBI2D, Rodinia backprop, gaussian, lud). So the
+count is no bound in either direction, and no constant factor repairs it.
+
+A second finding on the way: the first-launch rule's "the kernel has a loop" (`has_back_edge`: a branch to its own or a lower address) is true of
+every kernel of the corpus. nvcc ends each kernel with a branch to itself after its `EXIT`. The rule of sp15 therefore never used that condition;
+it is left as it is (changing it changes which first launches go today), and the sampling rule has its own test, a cycle in the control flow
+that the entry reaches (`code_has_loop`), which says no for 2DCONV, 3DCONV, GEMVER, JACOBI2D, backprop's `bpnn_adjust_weights_cuda`, gaussian's
+`Fan2` and lud's `lud_internal`, and yes for SYRK, SYR2K, GEMM, black-scholes, binomial.
+
+### B. What was built, in order, and what went
+
+| variant | what it did | result (server3, 4 threads, no card; a stand-in driver where one was needed) | kept |
+|---|---|---|---|
+| move a running launch (idea 1) | the whole live memory is copied, the simulator runs the launch, a watcher thread reads the blocks done; when what is left repays the card path the driver is started beside the simulator, and when it is up the simulator stops between two blocks and the card runs the whole launch from the copy (or the simulator goes on from the first block not taken) | worked: PolyBench ATAX's second kernel was stopped at block 12 of 128 and resumed, output unchanged. The copy is paid by every watched launch: 128 MiB cost 66 ms the first time and 16 ms after; 3DCONV went from 0.33 s to 0.43 s, ATAX +6% | no |
+| sample in the process, undo through the card gate (idea 2) | the first blocks run in the process with every allocation's slot raised, so that each access asks the gate, which saves every 4 KiB page before its first access; the pages are put back if the card takes the launch, else the simulator runs the blocks that are left | the undo is exact (every byte of live memory compared before and after: GEMM, SYR2K). A block that runs through the gate is 14 times (SYR2K) to 26 times (GEMM) slower than a block of the launch: 2 blocks of GEMM cost 29 ms in a program of 0.47 s, and GEMM's 0.13 s launch was estimated at 0.88 s | no |
+| sample in a forked copy, first blocks, one run each | the copy runs blocks 0 to 31, the blocks after the first are the measure | Rodinia gaussian's first blocks do 9 times the work of its average block (estimate 9.3 times the launch) | no |
+| ... blocks spread over the grid | every (blocks / 32)-th block | gaussian 1.5; but each sampled block of PolyBench GEMVER now wrote a fresh 64 KiB chunk and looked 7 times as long as it is: 0.82 s estimated, 0.11 s taken, it would have been sent | no |
+| ... each block run twice, the second run timed | the first run pays what a launch pays once | 68 sampled launches: the 8 the rule would send took 0.9 to 1.6 times the estimate; the highest estimate was 6 times the launch, on a launch of 40 ms | yes |
+| the process's age as the only guard | a sample only when the samples' cost is within 2% of the time the process has run | programs launch 2 to 20 ms after they start (SYRK 13 ms): nothing that matters would be sampled | as the second condition |
+| a static floor of 30 ms as the guard | | the 13 ms and 22 ms HeCBench programs are no longer sampled (they paid 22% and 24%); but see C: Rodinia backprop | with the loop test |
+
+Idea 3 (a better static estimate) was not built: A says why a factor cannot do it, and a trip count read from the code would be a second analysis
+beside a measurement that already answers. Idea 5 (batching) was not touched.
+
+### C. The rule as kept, and what the card changed in it
+
+A launch is sampled when the rules of sp15 and sp43 leave it to the simulator for want of an estimate, its kernel is admitted and has a loop, its
+grid has 256 blocks or more, the driver's start has not begun, and either its static estimate is at least 30 ms (and three times 0.6 ms per MiB
+of live memory) or the process can afford the sample (2% of its age). The copy runs up to 32 blocks spread over the grid, each twice, for 2 ms
+of timed runs; the estimate is per-block time x blocks / host threads; the launch goes when that is over twice the card path with the driver
+start, the copies each way and a card kernel time of 1/8 of the estimate. `VGPU_HOST_GPU_SAMPLE=0|log|always`.
+
+Three things came from the card:
+
+* **A fork costs more than the wait.** The first A/B on the rig (the floor alone, no loop test) had Rodinia `backprop` in exact mode at 0.640 s
+  against 0.615 s (+4.1%, three runs each within 1%) with one launch sampled for 6 ms: the other 19 ms are the page faults of a process whose
+  pages the fork write-protected (36 MiB live). On server3, 12 interleaved runs: 274 ms without the sample, 290 ms with it, and the same when the
+  process waits for the copy to end. The static estimate cannot tell this launch (105 ms estimated, 67 ms taken) from SYR2K's (45 ms estimated,
+  3.4 s taken). What can is whether the code has a loop: `bpnn_adjust_weights_cuda` has none. With the loop test `backprop` is not sampled
+  (0.997x), nor are 2DCONV, GEMVER, JACOBI2D, gaussian and lud; the floor also rises with the live memory.
+* **A copy of a large process answers late.** @BSTEXT@
+* **The estimate errs low on the rig as on server3**: SYRK 2.58 s estimated against 4.17 s in the simulator (sp59), SYR2K 4.74 against 7.7,
+  2MM's first kernel 19.9 against 29.1: the launch took 1.5 to 1.6 times the estimate (host threads do not scale perfectly). The card's kernel
+  time, assumed to be 1/8 of the estimate, was 1/290 (SYRK, 9.0 ms), 1/270 (SYR2K, 17.5 ms) and 1/770 (2MM, 26 ms).
+
+What a sample cost on the rig: 6 to 14 ms waited for the launches that were sent (the fork 0.6 to 3.4 ms), 1 to 2 ms each for the kept ones
+of `atomicPerf` (8 in turbo, 9 ms in all, of 1.36 s).
+
+### D. The fork: what was checked
+
+* *Never after the driver's start.* The decision to sample is refused once the start has begun, and asked again at the fork under the lock that
+  guards the start. Every run prints `after_driver=`: 0 in all 170 runs of the A/B whose summary line the harness kept (22 launches sampled, 7
+  sent, 2 copies that did not answer: black-scholes, above, and Rodinia `srad_v2`, whose kernel faults in the copy as it does in the simulator).
+* *No child left.* A copy that has answered is reaped at once if it has ended, else at the next sample or by the mode's exit handler, which
+  waits. `copies_running_at_exit=0` and `copies_left=0` in all 170 runs; after the whole A/B the rig had no zombie and no process of the corpus.
+* *The caches on disk.* Read: the code cache writes a temporary file named by pid and renames it, and the cache of modules appends one 16-byte
+  key in one `write`, so a copy could not have left a broken file. It now writes nothing at all: it queues no compile and remembers no module
+  (`exec::g_sample_copy`), so not even a temporary file is left when it is ended.
+* *A program that reaps children it did not make* can see the copy: `VGPU_HOST_GPU_SAMPLE=0` is for it. Not tested.
+
+### E. Tests and mutants
+
+* `test_host_gpu_logic` (every CI job): 75 cases, 13 of them new: the constants the texts quote; how many blocks and which; what a process
+  can afford; the estimate; what repays the card (the bar found by bisection against the formula); that the account of time spent is not used;
+  the memory and the unknown card time; when not to sample (a small grid, a short whole launch, no loop, the floor and how live memory raises
+  it, the process's age); `SimTimeTable`'s peek and extrapolated history; `code_has_loop` on twelve shapes of flow.
+* Mutants (`data/sp60b/mutants.py`: a copy of `include/vgpu/host_gpu.hpp` with one change, outside the tree, the test compiled against it):
+  66 of 66 killed. One more was equivalent (a guard that a sample with no estimate does not go, which the floor of any offload already
+  refuses) and the guard was removed instead.
+* `e2e_host_gpu_stub` (CI jobs with nvcc; passed on the rig, its first run): steps 17 to 20. A launch its sample says is long is sent, the
+  stand-in driver refuses it, the simulator runs it and the output is the mode-off output; against a stand-in that keeps memory and computes
+  nothing (`STUB_KEEP_MEMORY=1`, new) the program prints what a program that launches nothing prints; a short launch stays and the driver is never
+  touched; a process a few milliseconds old is not sampled by default, and `VGPU_HOST_GPU_SAMPLE=log` sends nothing. Steps 1 to 16 run with
+  `VGPU_HOST_GPU_SAMPLE=0` and pin what they pinned.
+* `hostgpu_bench_selftest`: the harness's new forms `exact0` and `turbo0` and its reading of the `host_gpu_sampled:` line.
+* Not covered by a test: the fork itself against a real driver (it is never made once the driver's start has begun; the A/B's summary lines
+  count 0 such samples), a copy that hangs on a lock (the 50 ms limit), a program that reaps children it did not make.
+
+### F. Starting the driver early (idea 4): measured, not kept, removed
+
+An experiment switch (`VGPU_HOST_GPU_EARLY_START=1`) started the driver, on its thread, at the first launch of an admitted kernel with a back
+edge on a grid of 8 blocks or more per multiprocessor, whether or not that launch went; every later decision then found the start paid. On the
+26 PolyBench and Rodinia programs under 30 s, 3 runs, against the default of the same build:
+
+| | faster by more than 3% | slower by more than 3% | geometric mean, default over early |
+|---|---|---|---:|
+| exact | JACOBI2D 0.60 to 0.36 s, GEMM 0.86 to 0.68, 3MM 1.85 to 1.48, gaussian 0.95 to 0.75, 2DCONV 0.96 to 0.89, lud | backprop 0.61 to 0.71 s (+16%), GEMVER 0.66 to 0.72 (+10%), particlefilter_float | 1.038x |
+| turbo | backprop 0.76 to 0.45 s, GEMM 0.89 to 0.63, JACOBI2D, 3MM, gaussian, lud | srad_v2 0.06 to 0.49 s, sc_gpu (+6%, within its run-to-run spread) | 0.984x |
+
+It gains where the start cost holds back launches of 0.1 to 0.5 s (what `VGPU_HOST_GPU_START_COST=0` showed in sp59) and loses where the
+launches it then sends do not repay their copies (`backprop` and GEMVER in exact mode push 36 and 64 MiB for a launch the card saves little
+on). It does not clear the bar of no program more than 3% slower, so the switch is removed. `srad_v2` in turbo is another matter: its kernel is
+sent, fails on the card with error 700 (it reads outside its buffers, which the simulator tolerates) and the mode goes off, after the 0.4 s of a
+driver start; by default it is not sent only because it is short.
+
+Whether a process can end while the driver is still starting was not answered: the probe (`card-run.sh exit`: the switch with no wait at exit,
+10 runs each of BICG, GESUMMV and `srad_v2`) never had a start under way at exit (BICG's and GESUMMV's grids are too small to trigger it, and
+`srad_v2` waits for the start it uses). All 90 runs ended with status 0.
+
+### G. Caveats and what was not run
+
+* One rig, one card, one toolkit. 3 runs a form (1 for the programs over 30 s: 2MM, CORR, COVAR, FDTD-2D, LU, and binomial's and
+  atomicReduction's card forms); programs that start the driver vary by 50 ms from run to run, which is 5 to 10% of the short ones.
+* Cut for the rig's hours: PolyBench GRAMSCHM was not run (25 minutes); HeCBench runs were limited to 120 s, so aligned-types, atomicReduction,
+  babelstream, base64e and binomial have no simulator time and atomicReduction and binomial no exact time; no verify pass was made (verify does
+  not sample; the kernels that were sent are the ones sp59 verified, sent earlier).
+* The static floor and the 0.6 ms per MiB are fitted to this corpus. A kernel with a loop, a static estimate over the floor and a launch of
+  tens of milliseconds pays its sample and the faults after it: `atomicPerf` (8 samples in turbo, 1.363 s against 1.350 s), `atomicAggregate` and
+  CORR's `reduce_kernel` are the corpus's cases (1% or less).
+* The estimate was up to 6 times too high on launches of a few tens of milliseconds (server3); none of those came near the bar, but a launch of
+  0.2 s estimated at 0.7 s would be sent and lose the driver start.
+* `has_back_edge` in the first-launch rule of sp15 is always true (A); not changed.
+* Not compiled with g++-12 or the sanitizers, nor against the CUDA 12 headers: the hosted CI jobs are their first run.
