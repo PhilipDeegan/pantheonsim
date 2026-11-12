@@ -2,7 +2,7 @@ name: Release binaries
 
 # The simulator prebuilt for linux-x86_64, one tarball (and its .sha256) per runner and toolkit the
 # action sets up, so a job on a release of the action unpacks it in seconds instead of building it
-# (8 to 20 minutes). action.yml fetches the asset scripts/action-build-id.sh names, checks its sha256,
+# (8 to 24 minutes). action.yml fetches the asset scripts/action-build-id.sh names, checks its sha256,
 # and builds from source when there is none.
 #
 # A pushed tag v<version> builds them and attaches them to the GitHub release of that tag, which must

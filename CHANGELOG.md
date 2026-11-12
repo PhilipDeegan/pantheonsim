@@ -10,7 +10,7 @@ release says what runs and what it produces, never how fast a real GPU would run
 - Setup action: a release carries the simulator prebuilt for linux-x86_64, one tarball and `.sha256` per runner and toolkit the
   action sets up (ubuntu-24.04 with CUDA 12.0, 12.6, 13.0 or none, ubuntu-22.04 with CUDA 12.6 or none), built and attached by
   `.github/workflows/release-binaries.yml` when a `v*` tag is pushed. The action, pinned at that release, downloads the tarball,
-  checks its sha256 and unpacks it instead of building the simulator (8 to 23 minutes on a cold cache), and falls back to the cache
+  checks its sha256 and unpacks it instead of building the simulator (8 to 24 minutes on a cold cache), and falls back to the cache
   and the source build when there is no tarball for it or the download or checksum fails. New input `prebuilt` (`false` always
   builds), outputs `prebuilt` and `prebuilt-asset`; `docs/github-action.md` gives the measured setup times (pantheonsim #599).
 - CI and setup action: when the apt mirror host of a GitHub-hosted runner image (azure.archive.ubuntu.com) does not resolve, the

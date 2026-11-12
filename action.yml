@@ -219,9 +219,9 @@ runs:
         } >> "$GITHUB_OUTPUT"
 
     # A release carries the simulator prebuilt for the runners and toolkits the action sets up
-    # (.github/workflows/release-binaries.yml), which saves the 8 to 20 minute build. Any miss -- no
-    # such asset, a failed download, a wrong checksum, a build that does not run here -- falls back to
-    # the cache and the source build below.
+    # (.github/workflows/release-binaries.yml), which saves the build (8 to 24 minutes of setup on a
+    # cold cache). Any miss -- no such asset, a failed download, a wrong checksum, another build
+    # directory, a build that does not run here -- falls back to the cache and the source build below.
     - name: Fetch the prebuilt simulator
       id: prebuilt
       if: inputs.prebuilt != 'false'
@@ -289,7 +289,7 @@ runs:
 
     # Saved here, right after the build, and not by actions/cache's post step: that one runs only when the
     # whole job succeeds, so a caller's failing test threw the build away and the next run built it again
-    # (8 to 20 minutes). The key is the source itself, so a save on a miss is always the right content.
+    # (8 to 24 minutes). The key is the source itself, so a save on a miss is always the right content.
     - name: Save the build
       if: steps.prebuilt.outputs.used != 'true' && steps.cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
