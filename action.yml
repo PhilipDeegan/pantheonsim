@@ -108,6 +108,7 @@ runs:
         # The simulator is C++20 and needs gcc 12 or newer; 22.04's default is 11.
         . /etc/os-release
         [[ "$ID" == ubuntu && "${VERSION_ID%%.*}" -lt 24 ]] && pkgs="$pkgs g++-12"
+        [ ! -x "${GITHUB_ACTION_PATH}/scripts/apt-mirror-fallback.sh" ] || "${GITHUB_ACTION_PATH}/scripts/apt-mirror-fallback.sh"
         $SUDO apt-get update -qq
         # Unpacking the NVIDIA runtime libraries that nvidia-cuda-toolkit pulls in has hung a hosted
         # runner for the whole 45 minutes, twice running. Bound each attempt, and finish whatever dpkg
@@ -146,6 +147,7 @@ runs:
         retry timeout 120 wget -qO "$RUNNER_TEMP/cuda-keyring.deb" "$repo/cuda-keyring_1.1-1_all.deb" \
           || { echo "::error::could not download the CUDA keyring from $repo"; exit 1; }
         $SUDO dpkg -i "$RUNNER_TEMP/cuda-keyring.deb"
+        [ ! -x "${GITHUB_ACTION_PATH}/scripts/apt-mirror-fallback.sh" ] || "${GITHUB_ACTION_PATH}/scripts/apt-mirror-fallback.sh"
         retry $SUDO timeout 300 apt-get update -qq \
           || { echo "::error::apt-get update with NVIDIA's repository did not finish in three attempts"; exit 1; }
         v="${TOOLKIT//./-}"
@@ -184,6 +186,7 @@ runs:
           | $SUDO tee /etc/apt/sources.list.d/rocm.list > /dev/null
         # AMD's packages, not Ubuntu's hipcc of the same name.
         printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 1001\n' | $SUDO tee /etc/apt/preferences.d/rocm > /dev/null
+        [ ! -x "${GITHUB_ACTION_PATH}/scripts/apt-mirror-fallback.sh" ] || "${GITHUB_ACTION_PATH}/scripts/apt-mirror-fallback.sh"
         $SUDO apt-get update -qq
         dir="$RUNNER_TEMP/rocm-debs"; mkdir -p "$dir"
         (cd "$dir" && apt-get download hipcc hip-dev rocm-llvm rocm-device-libs rocm-core hsa-rocr-dev) \
@@ -222,7 +225,7 @@ runs:
 
     - name: Restore a previous build
       id: cache
-      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ steps.paths.outputs.build }}
         key: ${{ steps.paths.outputs.key }}
@@ -247,7 +250,7 @@ runs:
     # (about 15 minutes). The key is the source itself, so a save on a miss is always the right content.
     - name: Save the build
       if: steps.cache.outputs.cache-hit != 'true'
-      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ steps.paths.outputs.build }}
         key: ${{ steps.paths.outputs.key }}
