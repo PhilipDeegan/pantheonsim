@@ -69,8 +69,8 @@ measures which kinds a card repeats.
 
 Everything except the class scan: the launch-shape checks (cooperative and cluster launches, texture objects, graph conditionals, warp
 size), arguments that point into mapped host memory, device memory outside the allocation table, modules with variables, external calls or
-device-side launches, the size rule and its start cost, the first-launch rule, the bans, the 64 KiB residency protocol, the list of
-diagnostics that switch the mode off, and `VGPU_HOST_GPU_MAX_MIB`.
+device-side launches, the size rule and its start cost, the first-launch rule, the sample of a launch's first blocks (section 8), the bans, the
+64 KiB residency protocol, the list of diagnostics that switch the mode off, and `VGPU_HOST_GPU_MAX_MIB`.
 
 Three places were checked for an assumption that silently depended on the exact set:
 
@@ -213,15 +213,66 @@ python3 tools/bench/hostgpu/run.py --build build --corp /path/to/corp --gpu nvid
 
 | test | where it runs | what it pins |
 |---|---|---|
-| `test_host_gpu_logic` | every CI job | the mode names; exact's set against a frozen copy and every decoder mnemonic; each class; joined modifiers; calls; the switches and the off list |
+| `test_host_gpu_logic` | every CI job | the mode names; exact's set against a frozen copy and every decoder mnemonic; each class; joined modifiers; calls; the switches and the off list; the sampling rule (how many blocks, what a process can afford, the estimate, what repays the card, when not to sample) |
 | `test_host_gpu_tol` | every CI job | the rule, the three readings, NaN, infinity, denormals, signed zero, range ends, the float-array hole, parsing of the tolerances |
 | `e2e_host_gpu_stub` | CI jobs with nvcc (a stand-in driver, no card) | relaxed reaches the card path for expf, rcp and division beside expf; exact does not; the lines for scripts; the atomics opt-in and the off list; unreadable values; verify against a card that computes nothing; the timeout; a contended reduction under verify |
 | `hostgpu_bench_selftest` | every CI job | the harness: parsing, output classes, the table, a hang that is killed |
 | `e2e_host_gpu`, `tools/card-ci/run-card-ci.sh` | a machine with a card only (passed on an A10G, Round sp59) | section 5, item 1 |
 
-## 8. What is next
+## 8. The first blocks of a launch, timed (Round sp60b; both modes)
 
-From Round sp59, in order of what it would buy: a first-launch rule whose estimate sees the kernel's loop (2MM, COVAR, CORR, SYR2K, SYRK and
-black-scholes keep their one long launch in the simulator, in both modes); a start-cost account that weighs the gain (short programs lose 0.1 to 0.2 s);
-the card's fixed-point `MUFU.SIN` / `MUFU.COS` in the simulator; `BMMA` in the tensor class and a tensor probe whose sums round; other cards and toolkits.
+Round sp59 found that the size rule, not the instruction set, is what keeps time in the simulator: a kernel's first launch went to the card only
+when a static estimate said so, and that estimate counts every instruction of the code once a warp. It is low by the trip count of the kernel's
+loops, and programs that launch each kernel once never get a second chance. Nothing static says how long a thread runs; the launch does.
 
+**The rule.** A launch that the history rule and the static first-launch rule leave to the simulator for want of an estimate, of an admitted kernel
+on a grid of at least @MINBLOCKS@ blocks with at most 256 MiB live, in a process whose driver has not been started, is *sampled* before the simulator
+runs it:
+
+1. The process is forked. The copy runs the launch's first blocks on its one thread (up to 32, and no more once the blocks after the first have
+   taken 2 ms), writes the times to a pipe and ends with `_exit`. The process waits for the answer, 50 ms at most; a copy that has not answered
+   is ended and the launch is the simulator's.
+2. The time of the blocks after the first (the first pays decode and set-up) gives a per-block time, and the launch is extrapolated from it:
+   per-block time x blocks / host threads@SLOWDOWN@.
+3. If that estimate is more than twice the card path (the driver start, the live memory each way, the launch, and a card kernel time assumed to
+   be 1/8 of the estimate, the least that [07](07-host-gpu.md) measured), the card runs the launch. Otherwise the simulator does, all of it.
+
+The driver start is charged in full against this one launch. The account of simulator time already spent (the ski-rental rule of sp43) is not
+consulted here: it is what let short programs pay for a start they could not use.
+
+**Why it is sound.** The sample changes nothing in the process that goes on. A forked copy has its own memory (copy-on-write): the device
+memory the sampled blocks wrote, the simulator's caches and counters, everything, ends with the copy. So there is nothing to undo and nothing
+that can be undone wrongly: after the sample the process decides between two things it could already do, run the launch in the simulator or run
+it on the card from the memory as it is, and each is what it was before this round. In exact mode the card computes the simulator's bits for the
+launch, as for any launch it takes; in relaxed mode the card's own, as section 5 found.
+
+What the copy can do outside its memory, and why it does not:
+
+* *Output.* The process's buffered output is flushed before the fork, and the copy ends with `_exit`: no buffer is written twice, no exit handler
+  or destructor of the program runs. A kernel that prints is not admitted to the card in either mode (its module has an external call), so it is
+  never sampled.
+* *The real driver.* A process whose driver start has begun is not sampled: the copy never holds a driver context. (After the start, the rules of
+  sp43 and the static first-launch rule find the start paid and decide as before.)
+* *Files and shared memory.* Device memory shared with another process, or mapped by `cuMemMap`, keeps the launch off the card and so is not sampled;
+  pinned and managed host memory is the process's own (copy-on-write in the copy) unless the program mapped it shared itself. The diagnostics that
+  write files per launch (counters, traces, digests) switch the mode off.
+* *Other threads.* The copy has the calling thread only. The sampled blocks run on that thread (the engine's one-thread loop; a cooperative,
+  clustered or lockstep launch runs no block in a part and so gives no estimate). If another thread held a lock the copy needs when the process
+  was forked, the copy waits for ever, the process stops waiting after 50 ms and ends it: a lost sample, not a wrong one.
+* *The program's own handling of children.* The copy is reaped by the process (`waitpid` on its pid). A program that waits for any child
+  (`wait`, a `SIGCHLD` handler that reaps) can see a child it did not make: `VGPU_HOST_GPU_SAMPLE=0` is for such a program.
+
+**What a sample costs** is the fork, the copy's decode and set-up and the sampled blocks: a few milliseconds whatever the launch turns out to be.
+@COST@
+
+**What was tried first and removed** (Round sp60b has the numbers): moving a launch while the simulator runs it (a watcher thread, a copy of the
+whole live memory before the launch, the simulator stopped between two blocks) worked against the stand-in driver, and the copy cost too much
+for launches that turn out short; sampling the first blocks in the process itself, with every page they touch saved through the card gate and
+put back, was exact (every byte compared) and made a sampled block 14 to 26 times slower than a block of the launch, which is both the cost and
+the error of the estimate.
+
+## 9. What is next
+
+From Round sp59, less what section 8 does: a start-cost account that weighs the gain for programs of many short launches (they lose 0.1 to 0.2 s
+or gain nothing); the card's fixed-point `MUFU.SIN` / `MUFU.COS` in the simulator; `BMMA` in the tensor class and a tensor probe whose sums round;
+other cards and toolkits.

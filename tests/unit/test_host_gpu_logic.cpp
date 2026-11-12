@@ -1024,4 +1024,229 @@ VTEST(relaxed_takes_the_kernels_exact_refused_for_numerics) {
   VCHECK(relaxed_refusal(classes({{"TEX", {"SCR", "LL"}}, {"FMUL", {}}}), at) == RelaxedRefusal::Never);
 }
 
+// ---- the first blocks of a launch, timed (Round sp60b) ----
+
+VTEST(sample_constants_are_the_ones_the_round_measured) {
+  // (the text of Round sp60b and docs/perf-design/12-host-gpu-relaxed.md quote these: a change here is a change there)
+  VCHECK(kSampleMinBlocks == 256 && kSampleMaxBlocks == 32);
+  VCHECK(kSampleBudgetSeconds == 0.002 && kSampleTimeoutSeconds == 0.050 && kSampleShareOfAge == 0.02 && kSampleCostGuessSeconds == 0.003);
+  VCHECK(kSampleStaticFloorSeconds == 0.030 && kSampleForkSecondsPerByte == 1.2e-11 && kSampleCardSpeedup == 8.0);
+}
+
+VTEST(sample_runs_a_few_blocks_and_none_of_a_small_grid) {
+  VCHECK(sample_blocks(0) == 0 && sample_blocks(1) == 0 && sample_blocks(kSampleMinBlocks - 1) == 0);
+  VCHECK(sample_blocks(kSampleMinBlocks) == kSampleMaxBlocks);
+  VCHECK(sample_blocks(4096) == kSampleMaxBlocks);                    // PolyBench SYRK's grid
+  VCHECK(sample_blocks(uint64_t{1} << 40) == kSampleMaxBlocks);       // never more
+  for (uint64_t b : {kSampleMinBlocks, uint64_t{300}, uint64_t{4096}, uint64_t{1} << 30})
+    VCHECK(sample_blocks(b) >= 2 && sample_blocks(b) * 2 <= b);       // two at least (the first is not part of the measure), half the grid at most
+}
+
+VTEST(sampled_blocks_are_spread_over_the_grid) {
+  VCHECK(sample_stride(0) == 1 && sample_stride(kSampleMinBlocks - 1) == 1);   // nothing sampled: any stride
+  VCHECK(sample_stride(kSampleMinBlocks) == kSampleMinBlocks / kSampleMaxBlocks);
+  VCHECK(sample_stride(4096) == 128 && sample_stride(16384) == 512);
+  for (uint64_t b : {kSampleMinBlocks, uint64_t{300}, uint64_t{463}, uint64_t{4096}, uint64_t{16384}, uint64_t{65536}, (uint64_t{1} << 30) + 7}) {
+    const uint64_t n = sample_blocks(b), st = sample_stride(b);
+    VCHECK(st >= 2);                                   // never the first blocks alone
+    VCHECK((n - 1) * st < b);                          // the last sampled block is a block of the grid
+    VCHECK(n * st + st > b - b / n);                   // ... and in its last part: the samples reach across the grid
+  }
+}
+
+VTEST(samples_may_cost_a_share_of_the_time_the_process_has_run) {
+  // a young process is not delayed by a sample: 3 ms is 2% of 150 ms
+  VCHECK(!sample_affordable(0.060, 0.0, kSampleCostGuessSeconds));    // Rodinia srad_v2 is over in 60 ms
+  VCHECK(!sample_affordable(0.149, 0.0, 0.003));
+  VCHECK(sample_affordable(0.151, 0.0, 0.003));
+  // what was spent counts: 2 s old, 38 ms spent, 3 ms more would pass 40 ms
+  VCHECK(sample_affordable(2.0, 0.036, 0.003));
+  VCHECK(!sample_affordable(2.0, 0.038, 0.003));
+  // a dearer expected sample needs an older process
+  VCHECK(!sample_affordable(1.0, 0.0, 0.050));
+  VCHECK(sample_affordable(2.6, 0.0, 0.050));
+  // a negative expectation is none, not a credit
+  VCHECK(!sample_affordable(1.0, 0.021, -1.0));
+  VCHECK(sample_affordable(1.0, 0.019, -1.0));
+}
+
+// `timed` blocks after the first, in `seconds`.
+static Sample sample_of(double seconds, uint64_t timed, uint64_t total, unsigned threads = 4) {
+  Sample s;
+  s.seconds = seconds;
+  s.timed = timed;
+  s.total = total;
+  s.threads = threads;
+  return s;
+}
+
+VTEST(sample_extrapolates_the_launch_from_the_blocks_after_the_first) {
+  // 15 blocks after the first of 4096 in 15 ms, for what would be 4 threads: 1 ms a block, 4096 blocks, shared among the threads
+  const auto whole = sampled_launch_seconds(sample_of(0.015, 15, 4096, 4));
+  VCHECK(whole.has_value());
+  const double want = 0.001 * 4096 / 4;
+  VCHECK(*whole > want * 0.999 && *whole < want * 1.001);
+  // linear in the time and the grid, inverse in the threads; a thread count of 0 is read as 1
+  VCHECK(*sampled_launch_seconds(sample_of(0.030, 15, 4096, 4)) > 1.999 * *whole && *sampled_launch_seconds(sample_of(0.030, 15, 4096, 4)) < 2.001 * *whole);
+  VCHECK(*sampled_launch_seconds(sample_of(0.015, 15, 8192, 4)) > 1.999 * *whole && *sampled_launch_seconds(sample_of(0.015, 15, 8192, 4)) < 2.001 * *whole);
+  VCHECK(*sampled_launch_seconds(sample_of(0.015, 15, 4096, 8)) > 0.499 * *whole && *sampled_launch_seconds(sample_of(0.015, 15, 4096, 8)) < 0.501 * *whole);
+  VCHECK(*sampled_launch_seconds(sample_of(0.015, 15, 4096, 0)) == *sampled_launch_seconds(sample_of(0.015, 15, 4096, 1)));
+  // per timed block: the same time over fewer blocks is more per block
+  VCHECK(*sampled_launch_seconds(sample_of(0.015, 5, 4096, 4)) > 2.99 * *whole && *sampled_launch_seconds(sample_of(0.015, 5, 4096, 4)) < 3.01 * *whole);
+  // nothing to say when no block after the first was timed (the copy did not answer, or the launch's blocks take turns), or there is no time or grid
+  VCHECK(!sampled_launch_seconds(sample_of(0.015, 0, 4096)));
+  VCHECK(!sampled_launch_seconds(sample_of(0.0, 15, 4096)));
+  VCHECK(!sampled_launch_seconds(sample_of(-1.0, 15, 4096)));
+  VCHECK(!sampled_launch_seconds(sample_of(0.015, 15, 0)));
+}
+
+// A sample whose low estimate of the launch is `launch_s` (4 threads, 15 blocks after the first of 4096).
+static Sample sample_saying(double launch_s) { return sample_of(launch_s * 15 * 4 / 4096, 15, 4096, 4); }
+
+VTEST(sample_sends_only_what_repays_the_driver_start_and_the_card_path) {
+  const Costs c;
+  const uint64_t live = 8ull << 20;   // SYRK's 8 MiB
+  VCHECK(sample_offload(sample_saying(4.0), live, live, c, false));      // PolyBench SYRK on the A10G rig: 4.2 s in the simulator
+  VCHECK(sample_offload(sample_saying(7.0), live, live, c, false));      // SYR2K
+  VCHECK(!sample_offload(sample_saying(0.3), live, live, c, false));     // 0.3 s: the start alone (0.25 s, margin 2) is more
+  VCHECK(sample_offload(sample_saying(0.3), live, live, c, true));       // ... worth it once the driver is up
+  VCHECK(!sample_offload(sample_saying(0.0001), live, live, c, true));   // under the floor of any offload
+  // the bar, by bisection: the launch must take more than margin x (start + copies each way + launch + the card's assumed kernel time)
+  double lo = 0.3, hi = 4.0;
+  for (int i = 0; i < 60; ++i) {
+    const double mid = (lo + hi) / 2;
+    (sample_offload(sample_saying(mid), live, live, c, false) ? hi : lo) = mid;
+  }
+  const double path = c.start_cost_s + c.launch_s + hi / kSampleCardSpeedup + double(live) / c.push_bytes_per_s + double(live) / c.pull_bytes_per_s;
+  VCHECK(hi > c.margin * path * 0.999 && hi < c.margin * path * 1.001);
+  VCHECK(hi > 2 * c.start_cost_s);                                       // never under twice the start
+}
+
+VTEST(sample_does_not_use_the_account_of_time_already_spent) {
+  // should_offload_with_start buys the start once the program has spent as much in the simulator: that is how a short program paid for a start it
+  // could not use. The sampled decision has no such argument: the same sample gives the same answer whatever was spent before.
+  const Costs c;
+  const Estimate e = sample_estimate(sample_saying(0.3), 8ull << 20, 8ull << 20, c, true);
+  VCHECK(should_offload_with_start(e, c, false, 10.0));                  // the account would send it ...
+  VCHECK(!sample_offload(sample_saying(0.3), 8ull << 20, 8ull << 20, c, false));   // ... the sample does not
+}
+
+VTEST(sample_charges_the_memory_and_an_unknown_card_time) {
+  const Costs c;
+  // 1 s with the driver up: goes with 8 MiB live, not with 5 GiB to push (0.45 s) nor with 4 GiB charged for coming back (0.43 s) and 2 GiB to push
+  VCHECK(sample_offload(sample_saying(1.0), 8ull << 20, 8ull << 20, c, true));
+  VCHECK(!sample_offload(sample_saying(1.0), 5ull << 30, 8ull << 20, c, true));
+  VCHECK(sample_offload(sample_saying(1.0), 8ull << 20, 2ull << 30, c, true));
+  VCHECK(!sample_offload(sample_saying(1.0), 2ull << 30, 4ull << 30, c, true));
+  const Estimate e = sample_estimate(sample_saying(1.0), 3ull << 20, 8ull << 20, c, true);
+  VCHECK(e.push_bytes == (3ull << 20) && e.pull_bytes == (8ull << 20) && e.start_s == 0);
+  VCHECK(e.sim_s > 0.999 && e.sim_s < 1.001);
+  VCHECK(e.card_kernel_s.has_value() && *e.card_kernel_s > 1.0 / kSampleCardSpeedup * 0.999 && *e.card_kernel_s < 1.0 / kSampleCardSpeedup * 1.001);
+  VCHECK(sample_estimate(sample_saying(1.0), 0, 0, c, false).start_s == c.start_cost_s);
+  // never under the default kernel time for a short launch
+  VCHECK(*sample_estimate(sample_saying(0.0001), 0, 0, c, true).card_kernel_s == c.kernel_s_default);
+  // a kernel the card has run before: its measured time is used
+  VCHECK(*sample_estimate(sample_saying(1.0), 0, 0, c, true, 0.4).card_kernel_s == 0.4);
+  VCHECK(sample_offload(sample_saying(1.0), 0, 0, c, true, 0.4));        // 1 s against 2 x 0.4 s
+  VCHECK(!sample_offload(sample_saying(1.0), 0, 0, c, true, 0.6));       // not against 2 x 0.6 s
+  // a start cost of 0 (VGPU_HOST_GPU_START_COST=0) charges nothing; a negative one is no credit
+  Costs free_start;
+  free_start.start_cost_s = 0;
+  VCHECK(sample_offload(sample_saying(0.3), 8ull << 20, 8ull << 20, free_start, false));
+  free_start.start_cost_s = -5;
+  VCHECK(sample_estimate(sample_saying(0.3), 0, 0, free_start, false).start_s == 0);
+}
+
+static SampleCandidate old_enough(uint64_t blocks) {
+  SampleCandidate w;
+  w.blocks = blocks;
+  w.age_s = 10.0;
+  return w;
+}
+
+VTEST(sampling_is_for_grids_with_blocks_to_sample) {
+  const Costs c;
+  VCHECK(worth_sampling(old_enough(4096), c, 0.26));
+  VCHECK(!worth_sampling(old_enough(kSampleMinBlocks - 1), c, 0.26));
+  VCHECK(worth_sampling(old_enough(kSampleMinBlocks), c, 0.26));
+  VCHECK(!worth_sampling(old_enough(8), c, 0.26));   // PolyBench COVAR's long kernel runs on 8 blocks: nothing to sample
+  SampleCandidate big = old_enough(8);
+  big.static_s = 100.0;                              // ... whatever its static estimate
+  VCHECK(!worth_sampling(big, c, 0.26));
+}
+
+VTEST(sampling_is_not_repeated_for_a_kernel_whose_whole_launch_was_short) {
+  const Costs c;
+  SampleCandidate w = old_enough(4096);
+  w.whole_s = 0.003;                               // PolyBench 3DCONV: 254 launches of 3 ms
+  VCHECK(!worth_sampling(w, c, 0.26));
+  w.whole_s = c.margin * 0.26;                     // at the bar: not above it
+  VCHECK(!worth_sampling(w, c, 0.26));
+  w.whole_s = c.margin * 0.26 * 1.01;
+  VCHECK(worth_sampling(w, c, 0.26));
+}
+
+VTEST(sampling_needs_a_long_static_estimate_or_a_process_that_can_afford_it) {
+  const Costs c;
+  SampleCandidate w = old_enough(4096);
+  w.age_s = 0.015;                                 // PolyBench SYR2K launches 15 ms into the process ...
+  w.static_s = 0.0446;                             // ... with a static estimate of 45 ms: sampled
+  VCHECK(worth_sampling(w, c, 0.26));
+  w.static_s = 0.0016;                             // HeCBench backprop, a program of 14 ms: 1.6 ms, not sampled
+  VCHECK(!worth_sampling(w, c, 0.26));
+  w.static_s = kSampleStaticFloorSeconds;          // the floor itself is enough
+  VCHECK(worth_sampling(w, c, 0.26));
+  w.static_s = kSampleStaticFloorSeconds * 0.999;
+  VCHECK(!worth_sampling(w, c, 0.26));
+  // the floor rises with the live memory (the fork costs more): 1 GiB adds 0.129 s
+  VCHECK(sample_static_floor(0) == kSampleStaticFloorSeconds);
+  VCHECK(sample_static_floor(1ull << 30) > 0.158 && sample_static_floor(1ull << 30) < 0.160);
+  w.live_bytes = 1ull << 30;
+  w.static_s = 0.150;
+  VCHECK(!worth_sampling(w, c, 0.26));
+  w.static_s = 0.160;
+  VCHECK(worth_sampling(w, c, 0.26));
+  w.live_bytes = 0;
+  w.static_s = 1.0;                                // the floor does not lift the other conditions
+  w.whole_s = 0.003;
+  VCHECK(!worth_sampling(w, c, 0.26));
+  w.whole_s.reset();
+  w.static_s = 0;
+  w.age_s = 0.060;                                 // under the floor: by the process's age. Too young for the first sample's guess
+  VCHECK(!worth_sampling(w, c, 0.26));
+  w.age_s = 0.2;
+  VCHECK(worth_sampling(w, c, 0.26));
+  w.spent_s = 0.002;                               // 2 ms spent and 3 ms expected are more than 2% of 0.2 s
+  VCHECK(!worth_sampling(w, c, 0.26));
+  w.age_s = 1.0;
+  VCHECK(worth_sampling(w, c, 0.26));
+  w.expected_s = 0.050;                            // the process's dearest sample so far was a copy that never answered
+  VCHECK(!worth_sampling(w, c, 0.26));
+}
+
+VTEST(sim_time_table_peeks_at_one_sample_and_takes_an_extrapolation_as_history) {
+  SimTimeTable t;
+  VCHECK(!t.peek("k", 100).has_value());
+  t.record("k", 100, 0.01);                        // one short sample: no prediction, but a peek
+  VCHECK(!t.predict("k", 100).has_value());
+  VCHECK(t.peek("k", 100).has_value() && *t.peek("k", 100) > 0.0099 && *t.peek("k", 100) < 0.0101);
+  VCHECK(*t.peek("k", 1000) > 0.099 && *t.peek("k", 1000) < 0.101);
+  VCHECK(!t.peek("other", 100).has_value());
+  // a launch sent on its sample: what the simulator was on course for is a full history at once
+  SimTimeTable m;
+  m.record_extrapolated("long", 65536, 7.7);
+  VCHECK(m.samples("long") >= SimTimeTable::kSamplesNeeded);
+  VCHECK(m.predict("long", 65536).has_value() && *m.predict("long", 65536) > 7.69 && *m.predict("long", 65536) < 7.71);
+  // ... and not limited to the two offloaded launches of the one-sample allowance
+  for (int i = 0; i < 5; ++i) m.note_offload("long");
+  VCHECK(m.predict("long", 65536).has_value());
+  // a later whole launch in the simulator still lowers it (the estimate is the smallest per-block time seen)
+  m.record("long", 65536, 3.0);
+  VCHECK(*m.predict("long", 65536) < 3.01);
+  // an extrapolation under kOneSampleMinSeconds is a history too (record() alone would not be)
+  SimTimeTable q;
+  q.record_extrapolated("quick", 100, 0.1);
+  VCHECK(q.predict("quick", 100).has_value());
+}
+
 VTEST_MAIN

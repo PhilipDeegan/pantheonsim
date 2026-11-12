@@ -35,6 +35,7 @@ asm(".pushsection .text,\"ax\",@progbits\n.p2align 12\n.popsection");
 #include <cerrno>
 #include <cfenv>
 #include <cmath>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -1513,6 +1514,17 @@ exec::LaunchStats Runner::run() {
   const uint64_t units = clustered_ ? blocks / csize_ : blocks;
   units_ = cfg_.cooperative ? 0 : units;   // a cooperative launch has every block running already
   std::atomic<uint64_t>& next = next_unit_;
+  // The first blocks only (exec::LaunchPart, host-GPU mode's sample): the one-thread loop below stops at the part's limit or budget.
+  exec::LaunchPart* const part = cfg_.part;
+  const auto part_t0 = std::chrono::steady_clock::now();
+  if (part) {
+    part->total = units;
+    part->next = 0;
+    if (cfg_.cooperative || clustered_) {   // not run in parts: no block is run
+      stats_.blocks = blocks;
+      return stats_;
+    }
+  }
   std::exception_ptr failure;
   std::mutex fail_mu;
   // A launch on one host thread has no one to wait for: nothing else sets `failure`, adds to the launch's counts or takes
@@ -1522,7 +1534,15 @@ exec::LaunchStats Runner::run() {
     PooledBlock held;
     Block& blk = *held.block;
     for (;;) {
-      const uint64_t i = next.fetch_add(1);
+      if (part) {
+        const uint64_t taken = next.load(std::memory_order_relaxed);
+        if (taken >= part->limit) return;
+        if (part->budget_s > 0 && taken >= 2 &&
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - part_t0).count() - part->first_block_s >= part->budget_s)
+          return;
+      }
+      uint64_t i = next.fetch_add(1);
+      if (part) i *= std::max<uint64_t>(part->stride, 1);
       if (i >= units) return;
       if (!solo) {
         std::lock_guard<std::mutex> g(fail_mu);
@@ -1538,6 +1558,11 @@ exec::LaunchStats Runner::run() {
         run_block(blk);
         if (solo) {
           stats_.add(blk.st);
+          if (part) {
+            part->run_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - part_t0).count();
+            if (part->first_block_s < 0) part->first_block_s = part->run_s;
+            ++part->next;
+          }
         } else {
           std::lock_guard<std::mutex> g(stats_mu_);
           stats_.add(blk.st);
@@ -1573,6 +1598,10 @@ exec::LaunchStats Runner::run() {
     // as the PTX engine caps its own.
     if (const uint32_t sms = profile_.limits.multiprocessors)
       threads = std::min<unsigned>(threads, std::max<unsigned>(1, sms / static_cast<unsigned>(clustered_ ? csize_ : 1)));
+  }
+  if (part) {   // a part runs on the calling thread alone
+    part->threads = threads;
+    threads = 1;
   }
   // Blocks that may wait on one another (vgpu/exec/lockstep.hpp): a kernel with a loop that polls
   // global memory runs the blocks the device holds at once together, taking turns.
@@ -1620,6 +1649,8 @@ exec::LaunchStats Runner::run() {
       }
     }
     for (Block& blk : all) stats_.add(blk.st);
+  } else if (lockstep && part) {
+    // Blocks that take turns are not run in parts: no block is run.
   } else if (lockstep) {
     const exec::LockstepShape shape = exec::lockstep_shape(units, capacity, threads, /*ranges=*/false, /*small_grid_spreads=*/loads_only);
     exec::lockstep_note(k_.name.c_str(), units, shape);

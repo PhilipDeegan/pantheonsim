@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Round sp60b, the card part: run on the rig (one A10G), from the root of the source tree, after the corpora are in ~/corp
+# (tools/bench/real/pack_corpora.sh's layout, the sm_86 binaries built with nvcc 13.0 and -cudart shared).
+#   docs/perf-design/data/sp60b/card-run.sh <stage> [out dir]        stages: build ci ab early exit all
+# Forms of the A/B (tools/bench/hostgpu/run.py): exact and relaxed sample launches (the default); exact0 and relaxed0 do not
+# (VGPU_HOST_GPU_SAMPLE=0: the rule of Round sp59). All four are interleaved, run by run, with the plain simulator.
+set -u
+stage=${1:?stage}
+out=${2:-$HOME/sp60b-out}
+root=$(pwd)
+build=$HOME/sp60b-build
+corp=$HOME/corp
+mkdir -p "$out"
+export PATH=/usr/local/cuda-13.0/bin:$PATH NVCC=/usr/local/cuda-13.0/bin/nvcc
+H="python3 tools/bench/hostgpu/run.py --build $build --corp $corp --gpu nvidia/a10g"
+LONG="2MM,CORR,COVAR,FDTD-2D,GRAMSCHM,LU"
+HEC_SKIP="aidw-cuda,atomicCost-cuda,fpdc-cuda,zerocopy-cuda"
+
+case $stage in
+build|all)
+  # (what tools/card-ci/run-card-ci.sh configures; it builds the targets the card CI needs, which are the ones the harness needs)
+  CARD_CI_JOBS=4 tools/card-ci/run-card-ci.sh "$build" 2>&1 | tee "$out/card-ci.txt"
+  ;;&
+ci|all)
+  # the stand-in-driver test alone, with its output kept: steps 17 to 20 are new and have run nowhere before
+  (cd "$build" && ctest -R 'e2e_host_gpu_stub|test_host_gpu_logic|hostgpu_bench_selftest' --output-on-failure) 2>&1 | tee "$out/stub.txt"
+  # the proof of the undo over the corpus, on the rig's own build (no card used): every sample undone and compared
+  for f in exact relaxed; do
+    $H --corpora polybench,rodinia,hecbench --skip "$LONG,$HEC_SKIP" --runs 1 --forms sim,$f --env VGPU_HOST_GPU_SAMPLE=check --timeout 300 \
+       --json "$out/check-$f.json" --md "$out/check-$f.md" 2>&1 | tail -3
+    # (a failed check ends the program with status 86: its row is then not "identical", and the JSON has the status)
+  done
+  ;;&
+ab|all)
+  # the A/B: 3 runs a form (1 for a program over 30 s in the simulator), medians
+  for suite in rodinia polybench hecbench; do
+    $H --corpora $suite --skip "$HEC_SKIP" --runs 3 --long-secs 30 --long-runs 1 --forms sim,exact,exact0,relaxed,relaxed0 --timeout 600 \
+       --json "$out/ab-$suite.json" --md "$out/ab-$suite.md" 2>&1 | tee "$out/ab-$suite.txt" | tail -40
+  done
+  # the launches each sample sent, and what it measured: one run with the log of the programs that have a sampled launch
+  $H --corpora polybench,rodinia,hecbench --skip "$LONG,$HEC_SKIP" --runs 1 --forms sim,exact,relaxed --env VGPU_HOST_GPU_LOG=1 --timeout 300 \
+     --json "$out/log.json" --md "$out/log.md" 2>&1 | tail -3
+  ;;&
+early|all)
+  # the driver started early, on its thread (an experiment): the short and middling programs, where a start that is not used shows
+  $H --corpora polybench,rodinia --skip "$LONG" --runs 3 --forms sim,exact,relaxed --env VGPU_HOST_GPU_EARLY_START=1 --timeout 300 \
+     --json "$out/early.json" --md "$out/early.md" 2>&1 | tee "$out/early.txt" | tail -30
+  ;;&
+exit|all)
+  # whether a process can end while the driver starts (VGPU_HOST_GPU_EARLY_START=2 does not wait at exit; 1 waits): 10 runs each of three short
+  # programs, wall seconds and exit status; 0 is the default (the driver is not started early)
+  pb=$corp/polybench/bin
+  rb=$corp/rodinia/bin
+  one() {   # <label> <mode> <early> <cwd> <program and arguments...>
+    local label=$1 mode=$2 early=$3 cwd=$4
+    shift 4
+    for i in $(seq 1 10); do
+      ( cd "$cwd" && /usr/bin/time -f "$label $mode early=$early %e s rc=%x" env VGPU_QUIET=1 VGPU_GPU=nvidia/a10g LD_LIBRARY_PATH=$build/shim VGPU_HOST_GPU=$mode \
+          VGPU_HOST_GPU_EARLY_START=$early "$@" > /dev/null ) 2>&1 | tail -1
+    done
+  }
+  for early in 0 1 2; do
+    one BICG exact $early "$pb" "$pb/BICG"
+    one GESUMMV exact $early "$pb" "$pb/GESUMMV"
+    one srad_v2 relaxed $early "$(mktemp -d)" "$rb/srad_v2" 512 512 0 127 0 127 0.5 2
+  done | tee "$out/exit.txt"
+  ;;
+esac

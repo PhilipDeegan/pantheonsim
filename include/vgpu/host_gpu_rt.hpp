@@ -28,6 +28,10 @@ struct Stats {
   // launches whose kernel relaxed mode would admit with its default switches.
   uint64_t refused_never = 0, refused_atomics = 0, refused_off = 0, refused_exact = 0;
   TolReport tol;   // relaxed mode's verify: every compared launch
+  // Sampled launches (vgpu/host_gpu.hpp "The first blocks of a launch, timed"): how many, how many of them the card then ran (`sample_sent`, also
+  // in `offloaded`), how many copies did not answer in time, and what the samples cost the process in wall seconds (the fork and the wait).
+  uint64_t sampled = 0, sample_sent = 0, sample_timeouts = 0;
+  double sample_seconds = 0;
 };
 
 class Runtime {
@@ -45,6 +49,24 @@ class Runtime {
   void before_simulated(MemoryManager& mem);
   void note_simulated(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, double sim_seconds, const MemoryManager* mem = nullptr,
                       const std::vector<std::vector<uint8_t>>* args = nullptr);
+
+  // The first blocks of a launch, timed (vgpu/host_gpu.hpp). After try_launch left a launch to the simulator: whether the caller should sample it
+  // first, and how (the blocks a forked copy of the process runs, its budget, how long to wait for it).
+  struct SamplePlan {
+    uint64_t limit = 0, stride = 1;
+    double budget_s = 0, timeout_s = 0;
+  };
+  bool sample_plan(const ptx::EntryFn& fn, SamplePlan* plan);
+  // What the copy reported (`answered` false: it did not, in time, and was ended), and what the sample cost the process in wall seconds.
+  struct SampleRun {
+    bool answered = false;
+    exec::LaunchPart part;
+    double wall_s = 0, fork_s = 0;
+  };
+  // Decides on the sample. True: the card ran the whole launch (nothing of the sample exists in this process); the launch is done. False: the
+  // simulator runs the launch, as if it had not been sampled.
+  bool sample_decide(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, const std::vector<std::vector<uint8_t>>& args, MemoryManager& mem,
+                     const SampleRun& run);
 
   struct Impl;
   ~Runtime();

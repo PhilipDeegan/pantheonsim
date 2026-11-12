@@ -32,6 +32,12 @@
 #  16. the simulator's launch of a verify run is not disturbed by the card copy of the launch before it: an integer reduction onto 64 contended words gives
 #      the mode-off sums under VGPU_HOST_GPU_VERIFY=1 with 4 host threads, in both modes, five times over (the card copy used to stay valid through the
 #      simulator's launch, whose atomics then went through the gate and lost updates).
+#  17. the first blocks of a launch, timed in a forked copy of the process (Round sp60b): a launch they say is long is sent to the card; when the card
+#      refuses it the simulator runs it and the output is the mode-off output (nothing the copy did is in the program's memory);
+#  18. ... and when the card takes it, the card is sent the memory as it was before the launch: against a stand-in that keeps memory and computes nothing
+#      (STUB_CARD_OK=1 STUB_KEEP_MEMORY=1) the program prints what the program that launches nothing prints;
+#  19. a launch its first blocks say is short stays in the simulator and the driver is never touched;
+#  20. a process too young to afford a sample is not sampled (the default), and VGPU_HOST_GPU_SAMPLE=log sends nothing.
 set -uo pipefail
 root="$(cd "$(dirname "$0")/../../.." && pwd)"
 . "$root/tests/shim_guard.sh"
@@ -64,8 +70,10 @@ run() {   # <tag> <program argument> [env...]: stdout in $work/<tag>.out, stderr
   local tag=$1 arg=$2
   shift 2
   : > "$work/$tag.log"
+  # (VGPU_HOST_GPU_SAMPLE=0: steps 1 to 16 pin the rules that decide BEFORE a launch runs, as they were before launches were sampled; steps 17 to 20
+  # switch the sampling back on, their own assignment coming later on the command line.)
   env VGPU_GPU="$profile" VGPU_THREADS=4 LD_LIBRARY_PATH="$shim" STUB_LOG="$work/$tag.log" STUB_SM="$cc" STUB_MP="$mp" STUB_INIT_MS=$init_ms \
-      VGPU_HOST_GPU_LIBCUDA="$work/libstubcuda.so" "$@" "$work/prog" "$arg" > "$work/$tag.out" 2> "$work/$tag.err"
+      VGPU_HOST_GPU_LIBCUDA="$work/libstubcuda.so" VGPU_HOST_GPU_SAMPLE=0 "$@" "$work/prog" "$arg" > "$work/$tag.out" 2> "$work/$tag.err"
 }
 calls() { sort "$work/$1.log" | uniq -c | tr -s ' ' | tr '\n' ';'; }
 for arg in big small mufu; do
@@ -247,5 +255,38 @@ for m in exact relaxed; do
   done
   grep -q '^cuLaunchKernel$' "$work/hist_$m.log" || { echo "FAIL: the $m verify run of hist launched nothing on the stand-in card"; fails=1; }
 done
+# 17 to 20. the first blocks of a launch, timed (include/vgpu/host_gpu.hpp "The first blocks of a launch, timed"). VGPU_HOST_GPU_SAMPLE=always: this
+# program launches within milliseconds of its start, and by default a process that young is not delayed by a sample (step 20).
+sampled_of() { sed -n 's/^host_gpu_sampled: sampled=\([0-9]*\) sent=\([0-9]*\) .*/\1 \2/p' "$work/$1.err" | head -1; }
+smp=(VGPU_HOST_GPU=exact VGPU_HOST_GPU_SAMPLE=always VGPU_HOST_GPU_LOG=1 VGPU_HOST_GPU_NO_FIRST_LAUNCH=1 STUB_INIT_MS=50)
+# 17. a launch that its first blocks say is long is sent; the stand-in refuses the module, the simulator runs the launch, and the output is the mode-off
+# output (the kernel reads what it writes: a block the copy ran that showed in the program's memory would change the hashes).
+run smp_acct acct "${smp[@]}" VGPU_HOST_GPU_START_COST=0 || { echo "FAIL: the sampled run of acct failed"; tail -5 "$work/smp_acct.err"; fails=1; }
+read -r smp_n smp_sent <<< "$(sampled_of smp_acct)"
+(( ${smp_n:-0} >= 1 )) || { echo "FAIL: no launch of acct was sampled: $(grep host_gpu_sampled "$work/smp_acct.err")"; fails=1; }
+grep -q '^cuModuleLoadData$' "$work/smp_acct.log" || { echo "FAIL: the sampled launch of acct did not reach the card path: $(calls smp_acct)"; fails=1; }
+diff -q "$work/off_acct.out" "$work/smp_acct.out" > /dev/null || { echo "FAIL: a sampled launch that the card refused changes the output of acct"; fails=1; }
+# 18. the same against a card that keeps memory and computes nothing: the launch is sent, and the program reads the memory as it was before the launch:
+# the output of the program that launches nothing.
+env VGPU_GPU="$profile" VGPU_THREADS=4 LD_LIBRARY_PATH="$shim" "$work/prog" none > "$work/off_none.out" 2> "$work/off_none.err" || { echo "FAIL: the none run with the mode off failed"; exit 1; }
+run smp_nop acct "${smp[@]}" VGPU_HOST_GPU_START_COST=0 STUB_CARD_OK=1 STUB_KEEP_MEMORY=1 || { echo "FAIL: the sampled run of acct on a card that computes nothing failed"; tail -5 "$work/smp_nop.err"; fails=1; }
+read -r smp_n smp_sent <<< "$(sampled_of smp_nop)"
+(( ${smp_sent:-0} >= 1 )) || { echo "FAIL: the sampled launch of acct was not sent: $(grep host_gpu_sampled "$work/smp_nop.err")"; fails=1; }
+diff -q "$work/off_none.out" "$work/smp_nop.out" > /dev/null || { echo "FAIL: a sampled launch sent to a card that computes nothing does not leave the memory as it was before the launch"; fails=1; }
+diff -q "$work/off_acct.out" "$work/smp_nop.out" > /dev/null && { echo "FAIL: the run on a card that computes nothing printed the simulator's results: nothing was sent"; fails=1; }
+# 19. a launch that its first blocks say is short stays, and the driver is never touched (the default start cost: nothing here repays 0.25 s).
+run smp_big big "${smp[@]}" || { echo "FAIL: the sampled run of big failed"; tail -5 "$work/smp_big.err"; fails=1; }
+read -r smp_n smp_sent <<< "$(sampled_of smp_big)"
+(( ${smp_n:-0} >= 1 && ${smp_sent:-1} == 0 )) || { echo "FAIL: big: expected a sampled launch and none sent: $(grep host_gpu_sampled "$work/smp_big.err")"; fails=1; }
+[[ ! -s "$work/smp_big.log" ]] || { echo "FAIL: a short launch reached the driver after its sample: $(calls smp_big)"; fails=1; }
+diff -q "$work/off_big.out" "$work/smp_big.out" > /dev/null || { echo "FAIL: sampling changes the output of big"; fails=1; }
+# 20. by default a process this young is not sampled at all; and `log` samples but sends nothing, even a launch worth sending.
+run smp_young acct VGPU_HOST_GPU=exact VGPU_HOST_GPU_SAMPLE=1 VGPU_HOST_GPU_LOG=1 VGPU_HOST_GPU_NO_FIRST_LAUNCH=1 VGPU_HOST_GPU_START_COST=1000 || { echo "FAIL: the default run of acct failed"; fails=1; }
+read -r smp_n smp_sent <<< "$(sampled_of smp_young)"
+[[ "${smp_n:-x}" == 0 ]] || { echo "FAIL: a process a few milliseconds old was sampled: $(grep host_gpu_sampled "$work/smp_young.err")"; fails=1; }
+run smp_log acct VGPU_HOST_GPU=exact VGPU_HOST_GPU_SAMPLE=log VGPU_HOST_GPU_NO_FIRST_LAUNCH=1 VGPU_HOST_GPU_START_COST=1000 || { echo "FAIL: the log run of acct failed"; fails=1; }
+grep -q '^host_gpu_sample: ' "$work/smp_log.err" || { echo "FAIL: VGPU_HOST_GPU_SAMPLE=log printed no host_gpu_sample line"; fails=1; }
+[[ ! -s "$work/smp_log.log" ]] || { echo "FAIL: a log run reached the driver: $(calls smp_log)"; fails=1; }
+diff -q "$work/off_acct.out" "$work/smp_log.out" > /dev/null || { echo "FAIL: the log run changes the output of acct"; fails=1; }
 (( fails == 0 )) && { echo "PASS: first launch $first ms against a driver start of $init_ms ms; driver calls in the big run: $(calls on_big)"; exit 0; }
 exit 1

@@ -16,7 +16,8 @@ and timeouts' meaning).  See docs/perf-design/12-host-gpu-relaxed.md.
          --json out.json --md out.md
   run.py --dry-run          # self-test, no card, no simulator (wired into ctest)
 
-Forms.  sim, exact, exactdiv (exact with VGPU_HOST_GPU_DIV=1) and relaxed are timed
+Forms.  sim, exact, exactdiv (exact with VGPU_HOST_GPU_DIV=1), relaxed, and exact0 and relaxed0
+(exact and relaxed with VGPU_HOST_GPU_SAMPLE=0: no launch is sampled) are timed
 --runs times each, interleaved; a program whose first sim run takes longer
 than --long-secs gets --long-runs runs of each.
 exact prints its machine-readable lines only with VGPU_HOST_GPU_LOG, which
@@ -52,8 +53,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "real"))
 import real  # noqa: E402  (tools/bench/real/real.py: the corpus manifest and the timing-line filter)
 
-FORMS = ("sim", "exact", "exactdiv", "relaxed", "verify")
-CARD_FORMS = ("exact", "exactdiv", "relaxed")   # the timed forms that use the card, in the table's order
+FORMS = ("sim", "exact", "exact0", "exactdiv", "relaxed", "relaxed0", "verify")
+CARD_FORMS = ("exact", "exact0", "exactdiv", "relaxed", "relaxed0")   # the timed forms that use the card, in the table's order
 # lines the simulator or the mode prints: never part of the program's output
 OURS = re.compile(r"^(host_gpu[a-z_]*:|\[vgpu\]|vgpu:)")
 # A word of the output is a number when all of it is one and it has a fraction or an exponent: an integer (a count, an index, a checksum printed in
@@ -208,16 +209,18 @@ def compare_outputs(sim, other, atol, rtol):
 
 def form_env(form, a):
     env = {}
-    if form in ("exact", "exactdiv"):
+    if form in ("exact", "exact0", "exactdiv"):
         env["VGPU_HOST_GPU"] = "exact"
         if form == "exactdiv":
             env["VGPU_HOST_GPU_DIV"] = "1"   # the IEEE division sequence joins the exact set (docs/cli.md)
-    elif form in ("relaxed", "verify"):
+    elif form in ("relaxed", "relaxed0", "verify"):
         env["VGPU_HOST_GPU"] = "relaxed"
         env["VGPU_HOST_GPU_ATOL"] = repr(a.atol)
         env["VGPU_HOST_GPU_RTOL"] = repr(a.rtol)
     if form == "verify":
         env["VGPU_HOST_GPU_VERIFY"] = "all"
+    if form in ("exact0", "relaxed0"):
+        env["VGPU_HOST_GPU_SAMPLE"] = "0"   # no launch is sampled: the size rule as it was before Round sp60b, for A/B runs
     if form != "sim":
         for kv in a.env:
             k, v = kv.split("=", 1)
@@ -665,6 +668,9 @@ def selftest():
     v = form_env("verify", B)
     check(v["VGPU_HOST_GPU"] == "relaxed" and v["VGPU_HOST_GPU_VERIFY"] == "all" and float(v["VGPU_HOST_GPU_RTOL"]) == 1e-5 and v["VGPU_HOST_GPU_ATOMICS"] == "1", "verify env")
     check("VGPU_HOST_GPU_VERIFY" not in form_env("relaxed", B), "relaxed env")
+    check(form_env("exact0", B) == {"VGPU_HOST_GPU": "exact", "VGPU_HOST_GPU_SAMPLE": "0", "VGPU_HOST_GPU_ATOMICS": "1"}, "exact0 env")
+    check(form_env("relaxed0", B)["VGPU_HOST_GPU"] == "relaxed" and form_env("relaxed0", B)["VGPU_HOST_GPU_SAMPLE"] == "0" and
+          "VGPU_HOST_GPU_SAMPLE" not in form_env("relaxed", B) and "VGPU_HOST_GPU_SAMPLE" not in form_env("exact", B), "relaxed0 env")
 
     for f in fails:
         print("FAIL: " + f)
@@ -681,7 +687,7 @@ def main():
     ap.add_argument("--corpora", default="polybench,rodinia,hecbench")
     ap.add_argument("--programs", default="", help="comma list of corpus/name or name; default all")
     ap.add_argument("--skip", default="", help="comma list of corpus/name or name to leave out")
-    ap.add_argument("--forms", default="sim,exact,relaxed", help="of sim,exact,exactdiv,relaxed,verify (exactdiv: exact with VGPU_HOST_GPU_DIV=1; verify: one untimed relaxed run with VGPU_HOST_GPU_VERIFY=all)")
+    ap.add_argument("--forms", default="sim,exact,relaxed", help="of sim,exact,exact0,exactdiv,relaxed,relaxed0,verify (exactdiv: exact with VGPU_HOST_GPU_DIV=1; exact0, relaxed0: with VGPU_HOST_GPU_SAMPLE=0; verify: one untimed relaxed run with VGPU_HOST_GPU_VERIFY=all)")
     ap.add_argument("--runs", type=int, default=3)
     ap.add_argument("--long-secs", type=float, default=120, help="a program whose first sim run takes longer gets --long-runs runs")
     ap.add_argument("--long-runs", type=int, default=1)

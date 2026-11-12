@@ -60,6 +60,22 @@ struct DeviceGraphLauncher {
 
 struct LaunchEnv;   // vgpu/exec/launch_env.hpp
 
+// A few blocks of a launch, run alone and timed (docs/perf-design/12-host-gpu-relaxed.md, "The first blocks of a launch, timed"). The run is not
+// a launch: the other blocks are never run. It is made in a copy of the process that is thrown away (the host-GPU mode's sample), and only
+// the SASS engine's plain block loop makes it: a cooperative or clustered launch, and one whose blocks take turns (lockstep), runs no block at all.
+struct LaunchPart {
+  // In:
+  uint64_t limit = 0;               // how many blocks are run at most
+  uint64_t stride = 1;              // the blocks run are 0, stride, 2 x stride, ...: spread over the grid, whose blocks need not be alike
+  double budget_s = 0;              // above 0: no further block is taken once the blocks after the first have lasted this long (two are taken at least)
+  // Out, written by the run before it returns:
+  uint64_t next = 0;                // how many blocks ran to their end, on the calling thread
+  uint64_t total = 0;               // the blocks of the grid
+  unsigned threads = 0;             // the host threads the whole launch would run on
+  double first_block_s = -1;        // when the first block ended, in seconds from the run's start (the first block pays decode and set-up)
+  double run_s = 0;                 // when the last block ended, on the same clock
+};
+
 struct LaunchConfig {
   std::array<uint32_t, 3> grid{1, 1, 1};
   std::array<uint32_t, 3> block{1, 1, 1};
@@ -148,6 +164,9 @@ struct LaunchConfig {
   // The environment variables a launch reads, found in one pass by the caller (vgpu/exec/launch_env.hpp) and good for this launch
   // alone; null: the launch reads them itself.
   const LaunchEnv* env = nullptr;
+  // The first blocks of the grid only (host-GPU mode's sample of a launch, vgpu/host_gpu.hpp "The first blocks of a launch, timed"); null for every
+  // other launch. The SASS engine's plain block loop is the only one that honours it.
+  LaunchPart* part = nullptr;
 };
 
 // Invoked periodically during a launch so long-running kernels can still

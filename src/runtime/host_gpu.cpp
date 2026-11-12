@@ -125,6 +125,30 @@ struct InternalScope {
   ~InternalScope() { t_internal = prev; }
 };
 
+// What launch() learned of the launch this thread is about to hand to the simulator, for sample_plan and sample_decide (which the same thread calls next).
+struct SampleHint {
+  bool set = false;
+  uint64_t blocks = 0, live = 0, instrs = 0;
+  uint32_t threads_per_block = 0;
+  bool back_edge = false;
+  double static_s = 0;       // the static estimate (static_sim_seconds)
+  unsigned samples = 0;
+  double age_s = 0;
+  bool affordable = true;    // whether the static floor or the process's age allows the sample (log and always sample without asking)
+};
+thread_local SampleHint t_sample_hint;
+// The sample of the launch this thread's simulator is about to run whole, for the log line note_simulated prints (what it said, what the launch took).
+struct LastSample {
+  bool set = false;
+  SampleHint hint;
+  Sample sample{};
+  uint64_t ran = 0;
+  double first_block_s = 0, wall_s = 0, fork_s = 0, estimate_s = 0;
+  bool answered = false, would_send = false;
+};
+thread_local LastSample t_last_sample;
+const std::chrono::steady_clock::time_point g_loaded = std::chrono::steady_clock::now();   // (the library's load: the process's age is counted from it)
+
 bool quiet() {
   const char* q = std::getenv("VGPU_QUIET");
   return q && *q && *q != '0';
@@ -251,6 +275,23 @@ struct Runtime::Impl : CardGate {
   bool static_estimate = false;
   // VGPU_HOST_GPU_NO_FIRST_LAUNCH=1: the first launch of a kernel is always the simulator's (the behaviour before the first-launch rule; for A/B runs).
   bool first_launch_off = false;
+  // ---- a sampled launch (vgpu/host_gpu.hpp "The first blocks of a launch, timed") ----
+  // VGPU_HOST_GPU_SAMPLE: 0 samples nothing (the rule before sp60b). `log` samples and decides but sends no launch for it, and prints one
+  // host_gpu_sample line a sampled launch (what was measured, what would have been done, what the launch then took): a model of the rule with no card.
+  // `always` samples whatever the process's age (sample_affordable is not asked), for tests and experiments; `log` does not ask it either and
+  // prints what it would have said.
+  enum class SampleMode : uint8_t { On, Off, Log, Always } sample_mode = SampleMode::On;
+  double sample_spent_s = 0;      // what the samples of this process have cost
+  double sample_dearest_s = 0;    // the dearest of them
+  // VGPU_HOST_GPU_EARLY_START (an experiment of Round sp60b, off by default): 1 starts the driver, on its thread, at the first launch of an admitted
+  // kernel with a loop on a grid that fills the card, whether or not that launch goes: later decisions then find the start paid. What it costs a
+  // program that never uses the driver is the wait for the start at exit; 2 does not wait at exit (to measure whether a process can end while the
+  // driver starts: nothing says it can).
+  int early_start = 0;
+  struct Decision;
+  bool launch(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, const std::vector<std::vector<uint8_t>>& args, MemoryManager& mem, const double* forced_sim_s);
+  void consider_sample(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, const Decision& dec, uint64_t blocks, MemoryManager& mem);
+
   struct Pending {
     bool active = false, in_exact_set = false;
     std::string kernel;
@@ -426,7 +467,7 @@ struct Runtime::Impl : CardGate {
 
   // At exit: a driver start that is still running must not race the process's teardown (the real driver's own exit handlers). Bounded by the same deadline.
   void settle_start() {
-    if (!start_sh) return;
+    if (!start_sh || early_start == 2) return;
     std::unique_lock<std::mutex> lk(start_sh->mu);
     start_sh->cv.wait_until(lk, start_began + std::chrono::seconds(10), [&] { return start_sh->done; });
   }
@@ -695,6 +736,7 @@ void print_summary(Runtime::Impl* im) {
                  ull(s.tol.subnormal), ull(kernels_outside), s.tol.max_abs, s.tol.max_rel);
     std::fprintf(stderr, "host_gpu_refusals: refused_never=%llu refused_atomics=%llu refused_off=%llu refused_exact=%llu refused_safety=%llu too_small=%llu failed=%llu\n",
                  ull(s.refused_never), ull(s.refused_atomics), ull(s.refused_off), ull(s.refused_exact), ull(s.refused_launch), ull(s.refused_size), ull(s.failed));
+    std::fprintf(stderr, "host_gpu_sampled: sampled=%llu sent=%llu timeouts=%llu cost_s=%.6f\n", ull(s.sampled), ull(s.sample_sent), ull(s.sample_timeouts), s.sample_seconds);
     if (relaxed && im->verify)
       for (const auto& [k, kt] : im->tol_by_kernel)
         if (kt.rep.outside)
@@ -762,6 +804,10 @@ Runtime* Runtime::for_device(const DeviceProfile& profile, int ordinal) {
     if (const char* v = std::getenv("VGPU_HOST_GPU_WRITE_THROUGH"); v && *v && *v != '0') r->impl_->resident = false;
     if (const char* v = std::getenv("VGPU_HOST_GPU_NO_FIRST_LAUNCH"); v && *v && *v != '0') r->impl_->first_launch_off = true;
     if (const char* v = std::getenv("VGPU_HOST_GPU_DIV"); v && *v && *v != '0') r->impl_->div_idiom = true;
+    if (const char* v = std::getenv("VGPU_HOST_GPU_EARLY_START"); v && *v && *v != '0') r->impl_->early_start = *v == '2' ? 2 : 1;
+    if (const char* v = std::getenv("VGPU_HOST_GPU_SAMPLE"); v && *v)   // 0: no launch is sampled (the rule before sp60b); log: see SampleMode
+      r->impl_->sample_mode = std::string(v) == "0" ? Impl::SampleMode::Off : std::string(v) == "log" ? Impl::SampleMode::Log :
+                              std::string(v) == "always" ? Impl::SampleMode::Always : Impl::SampleMode::On;
     if (const char* v = std::getenv("VGPU_HOST_GPU_STATIC"); v && *v && *v != '0') r->impl_->static_estimate = true;
     if (const char* v = std::getenv("VGPU_HOST_GPU_START_COST"); v && *v) {   // seconds; 0: do not charge the driver start (the rule before sp43)
       char* end = nullptr;
@@ -871,6 +917,17 @@ void Runtime::note_simulated(const ptx::EntryFn& fn, const exec::LaunchConfig& c
     }
     p = {};
   }
+  if (t_last_sample.set) {   // this launch was sampled and the simulator kept it: what the sample said against what the launch took
+    const LastSample& l = t_last_sample;
+    if (logging() || impl_->sample_mode == Impl::SampleMode::Log)
+      std::fprintf(stderr,
+                   "host_gpu_sample: kernel=%s blocks=%llu threads_per_block=%u instrs=%llu back_edge=%d whole_samples=%u live_bytes=%llu static_s=%.6f age_s=%.6f affordable=%d answered=%d ran=%llu first_block_s=%.6f timed_s=%.6f cost_s=%.6f fork_s=%.6f threads=%u estimate_s=%.6f would_send=%d launch_s=%.6f\n",
+                   fn.name.c_str(), static_cast<unsigned long long>(l.hint.blocks), l.hint.threads_per_block, static_cast<unsigned long long>(l.hint.instrs),
+                   l.hint.back_edge ? 1 : 0, l.hint.samples, static_cast<unsigned long long>(l.hint.live), l.hint.static_s, l.hint.age_s, l.hint.affordable ? 1 : 0, l.answered ? 1 : 0,
+                   static_cast<unsigned long long>(l.ran), l.first_block_s, l.sample.seconds, l.wall_s, l.fork_s, l.sample.threads, l.estimate_s, l.would_send ? 1 : 0,
+                   sim_seconds);
+    t_last_sample = {};
+  }
   impl_->sim_times.record(fn.name, uint64_t{cfg.grid[0]} * cfg.grid[1] * cfg.grid[2], sim_seconds);
   if (impl_->last.in_set) impl_->eligible_sim_spent_s += sim_seconds;   // an exact-set kernel that the card could have run
 }
@@ -879,7 +936,25 @@ bool Runtime::try_launch(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, 
                          MemoryManager& mem) {
   Impl& im = *impl_;
   std::lock_guard<GateLock> g(im.mu);   // one offloaded launch at a time: the card path shares the reserved window
+  t_sample_hint = {};
+  t_last_sample = {};
+  return im.launch(fn, cfg, args, mem, nullptr);
+}
+
+// The decision for a launch and, if it goes, the card path (mu held). `forced_sim_s`: a sampled launch that sample_decide sends to the card: nothing
+// is decided, and the value is the simulator's time its sample gave.
+bool Runtime::Impl::launch(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, const std::vector<std::vector<uint8_t>>& args, MemoryManager& mem,
+                           const double* forced_sim_s) {
+  Impl& im = *this;
+  const bool forced = forced_sim_s != nullptr;
   InternalScope internal;
+  // (a forced launch was counted as the simulator's when it was first decided; sample_decide takes that count back if the card runs it)
+  struct KeepCount {
+    uint64_t& v;
+    const uint64_t was;
+    const bool on;
+    ~KeepCount() { if (on) v = was; }
+  } keep_simulated{im.stats.simulated, im.stats.simulated, forced};
   im.last = {};
   if (im.dead) return false;
   im.pending = {};
@@ -902,8 +977,11 @@ bool Runtime::try_launch(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, 
     if (logging()) std::fprintf(stderr, "host_gpu: %s stays in the simulator: %s\n", fn.name.c_str(), why);
     return false;
   }
+  if (im.early_start && !forced && !im.verify && !im.start_sh && !im.start_failed && back_edge && im.multiprocessors &&
+      blocks >= kFirstLaunchBlocksPerSm * im.multiprocessors)
+    im.begin_start();
   // What the simulator took before for this kernel, else a lower bound from the code and the grid.
-  std::optional<double> sim_s = im.sim_times.predict(fn.name, blocks);
+  std::optional<double> sim_s = forced ? std::optional<double>(*forced_sim_s) : im.sim_times.predict(fn.name, blocks);
   if (!sim_s && im.static_estimate) sim_s = static_sim_seconds(blocks, cfg.block[0] * cfg.block[1] * cfg.block[2], static_instrs, im.costs);
   if (!sim_s && im.verify) sim_s = 0;   // verifying: every launch runs on both, whatever the rule would say
   bool first_launch_rule = false;
@@ -918,6 +996,7 @@ bool Runtime::try_launch(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, 
     }
   }
   if (!sim_s) {   // the first launches of a kernel are the simulator's: they teach the estimate (VGPU_HOST_GPU_STATIC=1 is the exception, and is not sound)
+    im.consider_sample(fn, cfg, dec, blocks, mem);   // ... unless the time of its first blocks sends this one to the card (sample_plan, sample_decide)
     ++im.stats.simulated;
     return false;
   }
@@ -939,12 +1018,12 @@ bool Runtime::try_launch(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, 
   e.push_bytes = push_bytes;
   e.pull_bytes = im.resident ? 0 : total;   // write-through: an upper bound, only what changed is written back, but the card's copy is read in full
   if (const auto it = im.card_kernel_s.find(fn.name); it != im.card_kernel_s.end()) e.card_kernel_s = it->second;
-  if (!im.verify && im.banned.count(fn.name)) {
+  if (!forced && !im.verify && im.banned.count(fn.name)) {
     ++im.stats.refused_size;
     ++im.stats.simulated;
     return false;
   }
-  if (total > im.max_bytes || (!im.verify && !should_offload_with_start(e, im.costs, im.start_sh != nullptr, im.eligible_sim_spent_s))) {
+  if (total > im.max_bytes || (!forced && !im.verify && !should_offload_with_start(e, im.costs, im.start_sh != nullptr, im.eligible_sim_spent_s))) {
     ++im.stats.refused_size;
     ++im.stats.simulated;
     if (logging()) std::fprintf(stderr, "host_gpu: %s stays in the simulator (sim %.3f ms, card path %.3f ms%s, %.1f MiB)\n", fn.name.c_str(), e.sim_s * 1e3, card_path_seconds(e, im.costs) * 1e3, im.start_sh ? "" : " without the driver start", total / 1048576.0);
@@ -1076,6 +1155,7 @@ bool Runtime::try_launch(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, 
     ++im.stats.offloaded;
     im.sim_times.note_offload(fn.name);
     if (first_launch_rule && logging()) std::fprintf(stderr, "host_gpu: %s: first launch decided by the static rule (loop, %llu blocks)\n", fn.name.c_str(), static_cast<unsigned long long>(blocks));
+    if (forced && logging()) std::fprintf(stderr, "host_gpu: %s: sent by the time of its first blocks (%.3f s in the simulator, at least)\n", fn.name.c_str(), *forced_sim_s);
     if (logging())
       std::fprintf(stderr, "host_gpu: %s on the card (resident): kernel %.3f ms, total %.3f ms (sim estimate %.3f ms), %.2f MiB pushed\n", fn.name.c_str(), kernel_s * 1e3,
                    total_s * 1e3, e.sim_s * 1e3, push_bytes / 1048576.0);
@@ -1113,6 +1193,115 @@ bool Runtime::try_launch(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, 
   if (logging())
     std::fprintf(stderr, "host_gpu: %s on the card: kernel %.3f ms, total %.3f ms (sim estimate %.3f ms), %.1f MiB each way\n", fn.name.c_str(), kernel_s * 1e3,
                  total_s * 1e3, e.sim_s * 1e3, total / 1048576.0);
+  return true;
+}
+
+
+// ---- a sampled launch (vgpu/host_gpu.hpp "The first blocks of a launch, timed") ---------------------------------------------------------
+
+// Called by launch() for a launch that goes to the simulator because nothing is known of its kernel (mu held): leaves a hint for sample_plan.
+// Not once the driver has been started: the process is forked for a sample, and a process that holds the real driver's context is not forked
+// (the first-launch and history rules, which then find the start paid, are what is left).
+void Runtime::Impl::consider_sample(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, const Decision& dec, uint64_t blocks, MemoryManager& mem) {
+  if (sample_mode == SampleMode::Off || verify || !dec.ok || start_sh || start_failed || banned.count(fn.name)) return;
+  uint64_t live = 0;
+  for (const auto& r : mem.live_ranges()) live += r.second;
+  if (live > max_bytes) return;
+  Estimate e;
+  e.push_bytes = e.pull_bytes = live;
+  e.start_s = std::max(costs.start_cost_s, 0.0);
+  SampleCandidate c;
+  c.blocks = blocks;
+  c.live_bytes = live;
+  c.whole_s = sim_times.peek(fn.name, blocks);
+  c.age_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_loaded).count();
+  c.spent_s = sample_spent_s;
+  c.expected_s = std::max(sample_dearest_s, kSampleCostGuessSeconds + kSampleForkSecondsPerByte * static_cast<double>(live));
+  c.static_s = static_sim_seconds(blocks, cfg.block[0] * cfg.block[1] * cfg.block[2], dec.instrs, costs);
+  const bool affordable = c.static_s >= sample_static_floor(live) || sample_affordable(c.age_s, c.spent_s, c.expected_s);
+  if (sample_mode != SampleMode::On) c.age_s = 1e18;   // (log, always: neither the floor nor the process's age is asked)
+  if (!worth_sampling(c, costs, card_path_seconds(e, costs))) return;
+  SampleHint h;
+  h.affordable = affordable;
+  h.set = true;
+  h.blocks = blocks;
+  h.live = live;
+  h.instrs = dec.instrs;
+  h.threads_per_block = cfg.block[0] * cfg.block[1] * cfg.block[2];
+  h.back_edge = dec.back_edge;
+  h.static_s = c.static_s;
+  h.samples = sim_times.samples(fn.name);
+  h.age_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_loaded).count();
+  t_sample_hint = h;
+}
+
+bool Runtime::sample_plan(const ptx::EntryFn&, SamplePlan* plan) {
+  if (!t_sample_hint.set) return false;
+  plan->limit = sample_blocks(t_sample_hint.blocks);
+  plan->stride = sample_stride(t_sample_hint.blocks);
+  plan->budget_s = kSampleBudgetSeconds;
+  plan->timeout_s = kSampleTimeoutSeconds;
+  return plan->limit != 0;
+}
+
+bool Runtime::sample_decide(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, const std::vector<std::vector<uint8_t>>& args, MemoryManager& mem,
+                            const SampleRun& run) {
+  Impl& im = *impl_;
+  const SampleHint hint = t_sample_hint;
+  t_sample_hint = {};
+  if (!hint.set) return false;
+  std::lock_guard<GateLock> g(im.mu);
+  ++im.stats.sampled;
+  im.stats.sample_seconds += run.wall_s;
+  im.sample_spent_s += run.wall_s;
+  im.sample_dearest_s = std::max(im.sample_dearest_s, run.wall_s);
+  if (!run.answered) ++im.stats.sample_timeouts;
+  // The measure is of the blocks after the first (which pays decode and set-up).
+  Sample smp;
+  smp.timed = run.answered && run.part.next > 1 && run.part.first_block_s >= 0 ? run.part.next - 1 : 0;
+  smp.total = hint.blocks;
+  smp.threads = std::max(1u, run.part.threads);
+  smp.seconds = smp.timed ? std::max(run.part.run_s - run.part.first_block_s, 1e-9) : 0;
+  const auto whole = sampled_launch_seconds(smp);
+  // What the card would have to be sent: the chunks it does not hold (all of the live memory before its first launch).
+  uint64_t live = 0, push = 0;
+  const auto ranges = mem.live_ranges();
+  for (const auto& r : ranges) live += r.second;
+  push = live;
+  if (im.resident && im.start_ready) {
+    im.sync_tracking(mem, ranges);
+    push = 0;
+    for (const auto& [b, a] : im.res)
+      for (uint64_t c : a.r.host_chunks()) push += Impl::chunk_len(a, c);
+  }
+  std::optional<double> card_kernel;
+  if (const auto it = im.card_kernel_s.find(fn.name); it != im.card_kernel_s.end()) card_kernel = it->second;
+  const bool want = whole && sample_offload(smp, push, live, im.costs, im.start_sh != nullptr, card_kernel);
+  LastSample& l = t_last_sample;
+  l = {};
+  l.set = true;
+  l.hint = hint;
+  l.sample = smp;
+  l.ran = run.part.next;   // (a copy that did not answer: how it ended, see sample_in_copy)
+  l.first_block_s = run.part.first_block_s;
+  l.wall_s = run.wall_s;
+  l.fork_s = run.fork_s;
+  l.estimate_s = whole.value_or(0);
+  l.answered = run.answered;
+  l.would_send = want;
+  if (im.sample_mode == Impl::SampleMode::Log || !want || im.dead) return false;
+  const double sim_s = *whole;
+  if (!im.launch(fn, cfg, args, mem, &sim_s)) return false;   // the card could not (said by launch()): the simulator runs the launch
+  ++im.stats.sample_sent;
+  if (im.stats.simulated) --im.stats.simulated;   // (counted when the launch was first left to the simulator)
+  im.sim_times.record_extrapolated(fn.name, hint.blocks, sim_s);
+  if (logging())
+    std::fprintf(stderr,
+                 "host_gpu_sample: kernel=%s blocks=%llu threads_per_block=%u instrs=%llu back_edge=%d whole_samples=%u live_bytes=%llu static_s=%.6f age_s=%.6f affordable=%d answered=1 ran=%llu first_block_s=%.6f timed_s=%.6f cost_s=%.6f fork_s=%.6f threads=%u estimate_s=%.6f would_send=1 launch_s=-1\n",
+                 fn.name.c_str(), static_cast<unsigned long long>(hint.blocks), hint.threads_per_block, static_cast<unsigned long long>(hint.instrs), hint.back_edge ? 1 : 0,
+                 hint.samples, static_cast<unsigned long long>(hint.live), hint.static_s, hint.age_s, hint.affordable ? 1 : 0, static_cast<unsigned long long>(run.part.next),
+                 run.part.first_block_s, smp.seconds, run.wall_s, run.fork_s, smp.threads, sim_s);
+  t_last_sample = {};
   return true;
 }
 
