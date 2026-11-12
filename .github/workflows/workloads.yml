@@ -68,16 +68,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Every NVIDIA profile the simulator carries (the coverage job below
-        # fails when one is added without a row here). The Makefile builds for
-        # the architecture nvidia-smi reports, and profiles that share an
-        # architecture still differ in memory, device identity and what
-        # nvidia-smi and NVML report. CUDA 12.0 and 13.0 alternate across each
-        # architecture, and counts above one take all_reduce and p2p_thrasher
-        # down their real multi-GPU paths. A profile no toolchain here can build
-        # for is listed in a "# not-run nvidia/<name>: reason" line instead;
-        # the coverage job accepts exactly those and the summary expects one
-        # machine fewer for each.
+        # One machine per compute capability, on the CUDA versions and GPU counts that
+        # take different code paths, not one per profile. The Makefile builds for the
+        # architecture nvidia-smi reports, so cards that share one build and run the
+        # same code; what differs between them (memory, device identity, what
+        # nvidia-smi and NVML report) is data, which the unit and e2e tests check on
+        # EVERY profile (e2e_device_attributes, memory_totals) in minutes, not in
+        # a twenty-minute workload run each. CUDA 12.0 and 13.0 alternate across the
+        # architectures that both can build, and counts above one take all_reduce and
+        # p2p_thrasher down their real multi-GPU paths. The coverage job below fails
+        # when a compute capability has no row. A profile no toolchain here can build
+        # for is listed in a "# not-run nvidia/<name>: reason" line instead; the
+        # coverage job accepts exactly those, and the summary counts the rows.
         include:
           - { key: t4-x1-cuda12.0,    gpu: nvidia/t4,          count: 1, cuda: '12.0' }  # Turing 7.5
           - { key: a100-x1-cuda12.0,  gpu: nvidia/a100,        count: 1, cuda: '12.0' }  # Ampere 8.0
@@ -87,35 +89,15 @@ jobs:
           - { key: gh200-x1-cuda13.0, gpu: nvidia/gh200-480gb, count: 1, cuda: '13.0' }  # Grace Hopper
           - { key: b200-x2-cuda13.0,  gpu: nvidia/b200,        count: 2, cuda: '13.0' }  # Blackwell 10.0, CUDA 12.8+
           - { key: l40s-x1-cuda12.0,  gpu: nvidia/l40s,        count: 1, cuda: '12.0' }  # Ada 8.9
-          - { key: rtx3060-x1-cuda12.0, gpu: nvidia/rtx3060,   count: 1, cuda: '12.0' }  # Ampere 8.6, consumer
           - { key: rtx3080ti-x1-cuda13.0, gpu: nvidia/rtx3080ti, count: 1, cuda: '13.0' }  # Ampere 8.6, the measured card
-          - { key: a10g-x1-cuda13.0,  gpu: nvidia/a10g,        count: 1, cuda: '13.0' }  # Ampere 8.6
           - { key: a100-40gb-x2-cuda13.0, gpu: nvidia/a100-sxm4-40gb, count: 2, cuda: '13.0' }  # Ampere 8.0
-          - { key: h100-pcie-x1-cuda12.0, gpu: nvidia/h100-pcie, count: 1, cuda: '12.0' }  # Hopper 9.0 on CUDA 12
           - { key: h200-x4-cuda13.0,  gpu: nvidia/h200,        count: 4, cuda: '13.0' }  # Hopper 9.0
           - { key: rtx5090-x1-cuda13.0, gpu: nvidia/rtx5090,   count: 1, cuda: '13.0' }  # Blackwell 12.0, consumer; CUDA 12.8+
           - { key: b300-x1-cuda13.0,  gpu: nvidia/b300,        count: 1, cuda: '13.0' }  # Blackwell Ultra 10.3; CUDA 12.9+
-          - { key: a100-80gb-pcie-x1-cuda13.0, gpu: nvidia/a100-80gb-pcie, count: 1, cuda: '13.0' }  # Ampere 8.0, PCIe
-          - { key: a30-x1-cuda12.0, gpu: nvidia/a30, count: 1, cuda: '12.0' }  # Ampere 8.0
-          - { key: a40-x1-cuda13.0, gpu: nvidia/a40, count: 1, cuda: '13.0' }  # Ampere 8.6
-          - { key: rtx-a5000-x1-cuda12.0, gpu: nvidia/rtx-a5000, count: 1, cuda: '12.0' }  # Ampere 8.6, workstation
-          - { key: rtx-a6000-x1-cuda13.0, gpu: nvidia/rtx-a6000, count: 1, cuda: '13.0' }  # Ampere 8.6, workstation
-          - { key: rtx3070-x1-cuda12.0, gpu: nvidia/rtx3070, count: 1, cuda: '12.0' }  # Ampere 8.6, consumer
-          - { key: rtx3090-x1-cuda13.0, gpu: nvidia/rtx3090, count: 1, cuda: '13.0' }  # Ampere 8.6, consumer
           - { key: rtx2080ti-x1-cuda13.0, gpu: nvidia/rtx2080ti, count: 1, cuda: '13.0' }  # Turing 7.5, consumer
-          - { key: l40-x1-cuda13.0, gpu: nvidia/l40, count: 1, cuda: '13.0' }  # Ada 8.9
-          - { key: rtx4080-x1-cuda12.0, gpu: nvidia/rtx4080, count: 1, cuda: '12.0' }  # Ada 8.9, consumer
-          - { key: rtx4090-x1-cuda13.0, gpu: nvidia/rtx4090, count: 1, cuda: '13.0' }  # Ada 8.9, consumer
-          - { key: rtx6000-ada-x1-cuda12.0, gpu: nvidia/rtx6000-ada, count: 1, cuda: '12.0' }  # Ada 8.9, workstation
           - { key: h100-nvl-x2-cuda12.0, gpu: nvidia/h100-nvl, count: 2, cuda: '12.0' }  # Hopper 9.0, two NVLink-bridged cards
-          - { key: h200-nvl-x1-cuda13.0, gpu: nvidia/h200-nvl, count: 1, cuda: '13.0' }  # Hopper 9.0
           - { key: gb10-x1-cuda13.0, gpu: nvidia/gb10, count: 1, cuda: '13.0' }  # Blackwell 12.1, unified memory; CUDA 12.9+
-          - { key: gb200-x2-cuda13.0, gpu: nvidia/gb200, count: 2, cuda: '13.0' }  # Blackwell 10.0, Grace Blackwell
           - { key: thor-x1-cuda13.0, gpu: nvidia/thor, count: 1, cuda: '13.0' }  # Blackwell 11.0, Jetson Thor; CUDA 13.0+
-          - { key: rtx-pro-6000-x1-cuda13.0, gpu: nvidia/rtx-pro-6000, count: 1, cuda: '13.0' }  # Blackwell 12.0, workstation
-          - { key: rtx-pro-6000-max-q-x1-cuda13.0, gpu: nvidia/rtx-pro-6000-max-q, count: 1, cuda: '13.0' }  # Blackwell 12.0, Max-Q
-          - { key: rtx-pro-6000-server-x1-cuda13.0, gpu: nvidia/rtx-pro-6000-server, count: 1, cuda: '13.0' }  # Blackwell 12.0, server
-          - { key: rtx-pro-4500-x1-cuda13.0, gpu: nvidia/rtx-pro-4500, count: 1, cuda: '13.0' }  # Blackwell 12.0, server, read from a card
           # not-run nvidia/vr200: Rubin is compute capability 10.7, which needs CUDA 13.4 (the
           # profile cites its release notes); the CUDA 13.0 toolchain image cannot compile
           # for sm_107, so every workload fails to build. Give it a row, on a 13.4 image,
@@ -145,6 +127,7 @@ jobs:
         env:
           CUDA: ${{ matrix.cuda }}
         run: |
+          [ ! -x scripts/apt-mirror-fallback.sh ] || scripts/apt-mirror-fallback.sh
           sudo apt-get update -qq
           if [[ "$CUDA" == 12.0 ]]; then
             # Ubuntu's own toolkit. Its nvcc rejects GCC 13's headers, so it
@@ -155,6 +138,7 @@ jobs:
             sudo apt-get install -y -qq --no-install-recommends build-essential cmake ninja-build wget ca-certificates
             wget -qO /tmp/keyring.deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
             sudo dpkg -i /tmp/keyring.deb
+            [ ! -x scripts/apt-mirror-fallback.sh ] || scripts/apt-mirror-fallback.sh
             sudo apt-get update -qq
             read -ra packages <<<"$CUDA13_PACKAGES"
             sudo apt-get install -y -qq --no-install-recommends "${packages[@]}"
@@ -205,10 +189,12 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
-  # A profile added to the simulator without a row in the matrix would go
-  # untested without anyone noticing; this says so on the pull request.
+  # A compute capability added to the simulator without a row in the matrix would
+  # go untested without anyone noticing; this says so on the pull request. Cards
+  # that share a capability are covered by the row for it, and each profile's own
+  # data (memory, identity, NVML) by the tests that run on every profile.
   coverage:
-    name: every profile is in the matrix
+    name: every architecture is in the matrix
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -218,16 +204,23 @@ jobs:
             nvidia/profiles
       - name: Compare the matrix with nvidia/profiles
         run: |
+          cc() { sed -nE 's/^compute_capability: *"?([0-9.]+)"?.*/\1/p' "nvidia/profiles/$1.yaml" | head -1; }
           have=$(grep -oE 'gpu: nvidia/[a-z0-9-]+' .github/workflows/workloads.yml | sed 's#gpu: nvidia/##' | sort -u)
           skip=$(grep -oE '^ *# not-run nvidia/[a-z0-9-]+:' .github/workflows/workloads.yml | sed -E 's#^ *\# not-run nvidia/##; s#:$##' | sort -u)
           want=$(find nvidia/profiles -name '*.yaml' -printf '%f\n' | sed 's/[.]yaml$//' | sort -u)
-          # A profile is either in the matrix or explicitly not run, never both,
-          # and a not-run line must name a real profile.
-          both=$(comm -12 <(printf '%s\n' "$have") <(printf '%s\n' "$skip") | tr '\n' ' ')
-          missing=$(comm -13 <(printf '%s\n' "$have" "$skip" | sort -u) <(printf '%s\n' "$want") | tr '\n' ' ')
+          # A matrix row or a not-run line must name a real profile, and no profile is both.
           stale=$(comm -23 <(printf '%s\n' "$have" "$skip" | sort -u) <(printf '%s\n' "$want") | tr '\n' ' ')
-          echo "matrix: $(printf '%s\n' "$have" | wc -l) profiles; not run: $(printf '%s\n' "$skip" | grep -c .); nvidia/profiles: $(printf '%s\n' "$want" | wc -l)"
-          [ -z "${missing// }" ] || { echo "::error::nvidia/profiles has a profile with no row in .github/workflows/workloads.yml: $missing. Add a matrix row ({ key: <name>-x1-cuda13.0, gpu: nvidia/<name>, count: 1, cuda: '13.0' }) or a line '# not-run nvidia/<name>: <reason>'."; exit 1; }
+          both=$(comm -12 <(printf '%s\n' "$have") <(printf '%s\n' "$skip") | tr '\n' ' ')
+          # Every compute capability the profiles carry has a row, or all of its profiles are not-run.
+          covered=$(for g in $have; do cc "$g"; done | sort -u)
+          missing=""
+          for p in $want; do
+            c=$(cc "$p")
+            [ -n "$c" ] || { echo "::error::nvidia/profiles/$p.yaml has no compute_capability"; exit 1; }
+            printf '%s\n' "$covered" | grep -qx "$c" || printf '%s\n' "$skip" | grep -qx "$p" || missing="$missing $p(sm_${c/./})"
+          done
+          echo "matrix: $(printf '%s\n' "$have" | wc -l) machines covering $(printf '%s\n' "$covered" | wc -l) compute capabilities; not run: $(printf '%s\n' "$skip" | grep -c .); nvidia/profiles: $(printf '%s\n' "$want" | wc -l)"
+          [ -z "${missing// }" ] || { echo "::error::no matrix row for the compute capability of:$missing. Add a row ({ key: <name>-x1-cuda13.0, gpu: nvidia/<name>, count: 1, cuda: '13.0' }) or a line '# not-run nvidia/<name>: <reason>'."; exit 1; }
           [ -z "${stale// }" ] || { echo "::error::in the matrix but not a profile: $stale"; exit 1; }
           [ -z "${both// }" ] || { echo "::error::both in the matrix and marked not-run: $both"; exit 1; }
 
@@ -255,11 +248,10 @@ jobs:
 
       - name: One table
         run: |
-          # One machine per NVIDIA profile (the coverage job holds the matrix to
-          # that), so a machine that wrote nothing is reported as missing.
-          profiles=$(find nvidia/profiles -name '*.yaml' | wc -l)
-          notrun=$(grep -cE '^ *# not-run nvidia/[a-z0-9-]+:' .github/workflows/workloads.yml || true)
-          python3 tests/workloads/workload_matrix.py results "$((profiles - notrun))" .github/workflows/workloads.yml > matrix.md
+          # One result directory per matrix row, so a machine that wrote nothing is
+          # reported as missing.
+          rows=$(grep -cE '^ +- \{ key: ' .github/workflows/workloads.yml)
+          python3 tests/workloads/workload_matrix.py results "$rows" .github/workflows/workloads.yml > matrix.md
           cat matrix.md >> "$GITHUB_STEP_SUMMARY"
 
       # While main is broken there is one open issue saying where, updated by

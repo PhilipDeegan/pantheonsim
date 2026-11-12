@@ -1,4 +1,5 @@
 #!/bin/bash
+# NOTE: VGPU_JIT_LINK_BSYNC (BSYNC as a region's op) was removed from the code after round sp53; this script is kept as the record of that round and no longer runs as written.
 # compile_cost.sh <build> <corp> <work dir> prog...: round sp53, what the compile of the linked object costs and where. For each program and each variant
 # (unlinked; linked; linked without merging the regions into one function; linked without the split blocks: the mutant link_nosplit; linked without BSYNC
 # as a region's op) one run on an empty cache with the generated source kept; then every kept source is compiled again with the engine's own command line

@@ -7,6 +7,22 @@ release says what runs and what it produces, never how fast a real GPU would run
 
 ## Unreleased
 
+- CI and setup action: when the apt mirror host of a GitHub-hosted runner image (azure.archive.ubuntu.com) does not resolve, the
+  toolchain install points apt at the first of archive.ubuntu.com and four mirrors outside ubuntu.com whose name does resolve,
+  instead of failing three times with exit 100 (`scripts/apt-mirror-fallback.sh`, run before every hosted-runner `apt-get update`;
+  it changes nothing when the mirror resolves, and says so when no fallback resolves either).
+- AMD: a scalar load whose destination is VCC (`s_load_dwordx2 vcc, s[94:95], 0x0`, which LLVM writes when it runs short of scalar
+  registers) fills VCC. It wrote the loaded pair to s0 and s1, which on gfx90a hold the private segment buffer, so the kernel's next
+  stack access stopped with "buffer_load_dword through a buffer that adds the lane's id" (Kokkos kernels such as OPALX's
+  MultipoleT on the simulated MI250X, pantheonsim #579). Every SMEM destination that is not an SGPR (vcc_lo, vcc_hi, the pair,
+  the trap temporaries) is written where it lives.
+- AMD: a scratch access sums its scalar offset and its instruction offset in 32 bits, as the ISA gives the address
+  (`flat_scratch + swizzle(sgpr_offset + inst.offset, threadID)`): `scratch_store_dwordx4 off, v[0:3], s0 offset:32` with s0 = -32
+  is the work-item's byte 0, where it reached for 2^32 and stopped with "past the 1136 bytes a work-item reserved" (pantheonsim #578).
+- AMD: a packed float instruction (`v_pk_add_f32`, `v_pk_mul_f32`, `v_pk_fma_f32`) that reads the constant 0 reads zero in both halves;
+  `v_pk_add_f32 v[2:3], v[2:3], 0 neg_lo:[1,1] neg_hi:[1,1]`, a float negate, stopped with "takes the second part of a constant" and left
+  mwa_hyperbeam's single-precision `fee_kernel` output at zero (pantheonsim #580). A nonzero constant's second half stays refused.
+
 - CI: a heavy job (SASS, ollama, ollama-amd, ASan, TSan) takes a reservation before it samples the memory, not after. `ci/jobs.sh --check`
   now takes a share (the profile's minimum) in a ledger under `/tmp/pantheonsim-ci-reserve`, which the pool's containers bind-mount, waits
   while the shares leave no room (capacity 5 GiB: one heavy job per host, `CI_RESERVE_CAPACITY_GIB` raises it), lets the machine settle

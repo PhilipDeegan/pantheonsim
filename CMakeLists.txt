@@ -1555,19 +1555,14 @@ endforeach()
 # test_sass_chain_cont's kernels diverge, loop apart and meet; the same words, counters and clocks as the interpreter, and the linking must have happened.
 # (VGPU_JIT_LINK_RULE=0: every section linked. The loop rule of round sp53 leaves a section with a loop and no BSSY, BSYNC, CALL or RET unlinked, and several of
 # these hand-written kernels are such sections; test_sass_chain_cont_jit_link_rule below runs with the rule and checks what it declines and what it leaves linked.)
-# (VGPU_JIT_LINK_BSYNC=1: BSYNC as a region's op, an opt-in of its own; test_sass_chain_cont checks that the generated code ran its kernels' BSYNCs.)
 foreach(_t test_sass_chain_cont test_sass_store_gate test_sass_alu_runs test_sass_dispatch_counts)
   add_test(NAME ${_t}_jit_link COMMAND ${_t})
   set_tests_properties(${_t}_jit_link PROPERTIES ENVIRONMENT
-    "VGPU_JIT=1;VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_LINK_RULE=0;VGPU_JIT_STATS=1;VGPU_JIT_STATS_FILE=/dev/null;VGPU_JIT_THRESHOLD=1;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-link-${_t}")
+    "VGPU_JIT=1;VGPU_JIT_LINK=1;VGPU_JIT_LINK_RULE=0;VGPU_JIT_STATS=1;VGPU_JIT_STATS_FILE=/dev/null;VGPU_JIT_THRESHOLD=1;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-link-${_t}")
 endforeach()
-# ... and linking as it is by default (BSYNC the run loop's), on the kernels that diverge:
-add_test(NAME test_sass_chain_cont_jit_link_nobsync COMMAND test_sass_chain_cont)
-set_tests_properties(test_sass_chain_cont_jit_link_nobsync PROPERTIES ENVIRONMENT
-  "VGPU_JIT=1;VGPU_JIT_LINK=1;VGPU_JIT_LINK_RULE=0;VGPU_JIT_STATS=1;VGPU_JIT_STATS_FILE=/dev/null;VGPU_JIT_THRESHOLD=1;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-link-nobsync-test_sass_chain_cont")
 add_test(NAME test_sass_chain_cont_jit_link_rule COMMAND test_sass_chain_cont)
 set_tests_properties(test_sass_chain_cont_jit_link_rule PROPERTIES ENVIRONMENT
-  "VGPU_JIT=1;VGPU_JIT_LINK=1;VGPU_JIT_LINK_BSYNC=1;VGPU_JIT_STATS=1;VGPU_JIT_STATS_FILE=/dev/null;VGPU_JIT_THRESHOLD=1;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-link-rule-test_sass_chain_cont")
+  "VGPU_JIT=1;VGPU_JIT_LINK=1;VGPU_JIT_STATS=1;VGPU_JIT_STATS_FILE=/dev/null;VGPU_JIT_THRESHOLD=1;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-link-rule-test_sass_chain_cont")
 vgpu_unit_test(test_sass_s2r_fill)
 # LDGSTS (cp.async): the tier's own handler against the rule and the interpreter, registers, shared memory and counters.
 vgpu_unit_test(test_sass_ldgsts)
@@ -2015,6 +2010,9 @@ vgpu_unit_test(test_amd_gcn_asm amd/tests/unit/test_gcn_asm.cpp)
 target_compile_definitions(test_amd_gcn_asm PRIVATE VGPU_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 vgpu_unit_test(test_amd_gcn_cdna_gaps amd/tests/unit/test_gcn_cdna_gaps.cpp)
 target_compile_definitions(test_amd_gcn_cdna_gaps PRIVATE VGPU_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+# Three bugs other programs ran into (issues #578, #579, #580): a negative scratch offset, a scalar load into VCC, a packed constant zero.
+vgpu_unit_test(test_amd_gcn_issues_nov11 amd/tests/unit/test_gcn_issues_nov11.cpp)
+target_compile_definitions(test_amd_gcn_issues_nov11 PRIVATE VGPU_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 vgpu_unit_test(test_amd_gcn_abandon amd/tests/unit/test_gcn_abandon.cpp)
 target_compile_definitions(test_amd_gcn_abandon PRIVATE VGPU_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 vgpu_unit_test(test_amd_hostcall amd/tests/unit/test_hostcall.cpp)
@@ -4243,6 +4241,11 @@ set_tests_properties(lint_ci_jobs PROPERTIES TIMEOUT 120)
 # pool's containers), and the setup action saves its build cache right after the build.
 add_test(NAME lint_ci_reservation
          COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/lint/check_ci_reservation.py)
+
+# scripts/apt-mirror-fallback.sh points apt at archive.ubuntu.com when the runner image's mirror host does not resolve, and
+# every hosted-runner apt-get update runs it first.
+add_test(NAME lint_apt_mirror_fallback COMMAND ${CMAKE_SOURCE_DIR}/tests/lint/check_apt_mirror_fallback.sh)
+set_tests_properties(lint_apt_mirror_fallback PROPERTIES TIMEOUT 60)
 
 # The merge-conflict guards (ci/pr-guard.sh at the start of a heavy job,
 # ci/cancel-conflicting-prs.sh after main moves) against a fake gh and curl.
