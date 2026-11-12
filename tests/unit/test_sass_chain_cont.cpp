@@ -310,7 +310,7 @@ std::vector<Insn> joined_loops_kernel(unsigned iters_a, unsigned iters_b, unsign
   return c;
 }
 
-// An if and its else inside a loop (round sp53: BSYNC, which tier 2 with linking runs inside generated code). Every iteration the warp joins barrier B0, the
+// An if and its else inside a loop (round sp53; the BSYNC is the run loop's op, where generated code stops, with linking too). Every iteration the warp joins barrier B0, the
 // lanes of lane id >= `ge` branch to the else part (above the tail), the others fall through the then part into the join, a BSYNC B0, and wait there; the
 // chain then runs the else group, which branches back to the join, completes the barrier and releases everyone: the joined warp counts the iteration and
 // branches back. So a diverged warp runs the BSYNC twice an iteration: once to wait (the next group is another one, standing elsewhere) and once to release
@@ -619,12 +619,6 @@ VTEST(the_groups_of_a_diverged_warp_loop_apart_and_meet_where_the_chain_picks_th
       std::printf("  sections left unlinked by the loop rule: %llu\n", declined);
       if (rule && rule[0] == '0') VCHECK_EQ(declined, 0ull);
       else VCHECK(declined >= 10);
-    }
-    if (const char* bs = std::getenv("VGPU_JIT_LINK_BSYNC"); bs && bs[0] == '1') {   // (BSYNC as a region's op is an opt-in of its own: the legs of ctest ask for it)
-      std::printf("  BSYNCs run inside generated code: %llu (%llu went on with another group, %llu ended the pass)\n", static_cast<unsigned long long>(sass::jit::stats().bsyncs.load()),
-                  static_cast<unsigned long long>(sass::jit::stats().bsync_groups.load()), static_cast<unsigned long long>(sass::jit::stats().bsync_over.load()));
-      VCHECK(sass::jit::stats().bsyncs.load() > 1000);
-      VCHECK(sass::jit::stats().bsync_groups.load() > 500);
     }
   }
 }
