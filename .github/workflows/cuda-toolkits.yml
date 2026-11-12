@@ -71,6 +71,7 @@ jobs:
           REPO: ${{ matrix.repo }}
         run: |
           v=${CUDA/./-}
+          [ ! -x scripts/apt-mirror-fallback.sh ] || scripts/apt-mirror-fallback.sh
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends build-essential cmake ninja-build wget ca-certificates
           # The simulator is C++20: 22.04's GCC 11 is too old, so GCC 12 builds it.
@@ -80,6 +81,7 @@ jobs:
           fi
           wget -qO /tmp/keyring.deb "https://developer.download.nvidia.com/compute/cuda/repos/$REPO/x86_64/cuda-keyring_1.1-1_all.deb"
           sudo dpkg -i /tmp/keyring.deb
+          [ ! -x scripts/apt-mirror-fallback.sh ] || scripts/apt-mirror-fallback.sh
           sudo apt-get update -qq
           pkgs="cuda-nvcc-$v cuda-cudart-dev-$v cuda-nvml-dev-$v cuda-cupti-dev-$v cuda-nvrtc-dev-$v
                 libcublas-dev-$v libcufft-dev-$v libcurand-dev-$v libcusparse-dev-$v libnvjpeg-dev-$v
