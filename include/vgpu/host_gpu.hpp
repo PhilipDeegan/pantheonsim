@@ -586,6 +586,21 @@ class SimTimeTable {
     const auto it = table_.find(kernel);
     return it == table_.end() ? 0 : it->second.samples;
   }
+  // What the samples so far say for a launch of `blocks`, however few they are (predict() answers only with enough of them). For the decision to
+  // time the first blocks of a launch (worth_sampling below), which is not made again for a kernel whose one whole launch was short.
+  std::optional<double> peek(const std::string& kernel, uint64_t blocks) const {
+    const auto it = table_.find(kernel);
+    if (it == table_.end() || !it->second.samples) return std::nullopt;
+    return it->second.per_block_s * static_cast<double>(std::max<uint64_t>(blocks, 1));
+  }
+  // A launch that went to the card on the time of its first blocks (sample_offload below): `seconds` is what the simulator would have taken for
+  // the whole grid. It is an estimate made to err low (sampled_launch_seconds) and without the first block's decode and set-up (the reason a
+  // first whole sample is otherwise not trusted alone), so it counts as a full history; a later launch the simulator runs whole can only lower it.
+  void record_extrapolated(const std::string& kernel, uint64_t blocks, double seconds) {
+    record(kernel, blocks, seconds);
+    Entry& e = table_[kernel];
+    e.samples = std::max(e.samples, kSamplesNeeded);
+  }
   static constexpr unsigned kSamplesNeeded = 2;
 
  private:
@@ -617,6 +632,47 @@ inline bool has_back_edge(const std::vector<std::pair<uint64_t, uint64_t>>& bran
   return false;
 }
 
+// Whether the code can run an instruction twice: a cycle in its flow that the entry reaches. has_back_edge says yes for any branch to itself or a
+// lower address, and compilers end every kernel with a branch to itself after its EXIT (PolyBench 2DCONV, 3DCONV and GEMVER have a back edge and no loop). Each
+// instruction is given by where it may go next: the one after it (`falls_through`), a known `target` (an index, or -1), or anywhere (`indirect`:
+// a jump through a register, or a call, is taken to close a loop).
+struct FlowInsn {
+  int64_t target = -1;
+  bool falls_through = true;
+  bool indirect = false;
+};
+inline bool code_has_loop(const std::vector<FlowInsn>& code) {
+  const size_t n = code.size();
+  std::vector<uint8_t> state(n, 0);   // 0 not seen, 1 on the path being walked, 2 done
+  std::vector<std::pair<size_t, int>> stack;   // (instruction, which of its edges comes next)
+  for (const FlowInsn& f : code)
+    if (f.indirect) return true;
+  // From the entry only: what cannot be reached is not run (compilers end a kernel with a branch to itself, after its EXIT).
+  for (size_t root = 0; root < std::min<size_t>(n, 1); ++root) {
+    stack.emplace_back(root, 0);
+    state[root] = 1;
+    while (!stack.empty()) {
+      auto& [i, edge] = stack.back();
+      size_t next = n;
+      for (; edge < 2 && next == n; ++edge) {
+        if (edge == 0 && code[i].falls_through && i + 1 < n) next = i + 1;
+        if (edge == 1 && code[i].target >= 0 && static_cast<size_t>(code[i].target) < n) next = static_cast<size_t>(code[i].target);
+      }
+      if (next == n) {
+        state[i] = 2;
+        stack.pop_back();
+        continue;
+      }
+      if (state[next] == 1) return true;
+      if (state[next] == 0) {
+        state[next] = 1;
+        stack.emplace_back(next, 0);
+      }
+    }
+  }
+  return false;
+}
+
 struct FirstLaunch {
   uint64_t blocks = 0;
   uint32_t threads_per_block = 0;
@@ -633,6 +689,128 @@ inline bool first_launch_offload(const FirstLaunch& f, const Costs& c, bool driv
   e.push_bytes = f.live_bytes;
   e.pull_bytes = f.live_bytes;
   return should_offload_with_start(e, c, driver_started, eligible_sim_spent_s);
+}
+
+// ---- the first blocks of a launch, timed (docs/perf-design/12-host-gpu-turbo.md "The first blocks of a launch, timed"; Round sp60b) ----------
+// The static estimate of first_launch_offload counts every instruction of the code once a warp, so it is low by the trip count of the kernel's loops,
+// and the history rule needs launches that some programs never make again (one launch a kernel). Nothing static says how long a thread runs; the
+// launch itself does. So a launch the rules above leave to the simulator for want of an estimate is SAMPLED before the simulator runs it: the process
+// is forked, the copy runs a few of the launch's blocks on one thread, each twice with the second run timed, reports the times and ends. Nothing the copy did exists in the process
+// that goes on (its memory is its own, copy-on-write), so there is nothing to undo: if the times say that the launch repays the card path, the
+// driver start included, the card runs the launch; if not the simulator does, all of it, as it would have.
+// The decision is from measured time, so it cannot be low by a loop's trip count, and it charges the driver start in full against this one launch:
+// the account of should_offload_with_start (simulator time already spent) is not consulted, which is what let short programs pay for a start they
+// could not use (sp59: backprop, bitonic-sort, atomicPerf).
+
+// How many blocks the copy runs: none for a grid of fewer than kSampleMinBlocks; else up to kSampleMaxBlocks, spread evenly over the grid (block 0,
+// then every sample_stride-th: the blocks of a grid need not be alike, Rodinia gaussian's first blocks do nine times the work of its average one),
+// and no further block once the timed runs have taken kSampleBudgetSeconds. Each block is run twice and the second run is the timed one: the
+// first pays what a launch pays once (decode, set-up, the chunks of memory the launch is the first to write), which made PolyBench GEMVER's
+// blocks look seven times as long as they are.
+inline constexpr uint64_t kSampleMinBlocks = 256;
+inline constexpr uint64_t kSampleMaxBlocks = 32;
+inline constexpr double kSampleBudgetSeconds = 0.002;
+inline uint64_t sample_blocks(uint64_t blocks) {
+  if (blocks < kSampleMinBlocks) return 0;
+  return std::min<uint64_t>(blocks / 2, kSampleMaxBlocks);
+}
+inline uint64_t sample_stride(uint64_t blocks) {
+  const uint64_t n = sample_blocks(blocks);
+  return n ? blocks / n : 1;
+}
+// A sample costs the fork, the copy's decode and set-up and the sampled blocks, whatever the launch turns out to be, and the process waits for it:
+// 1 to 12 ms in Round sp60b's corpus. It also costs afterwards: the fork write-protects the process's pages, and each page the process writes later
+// takes a fault (Rodinia backprop, 36 MiB live: 6 ms waited and 19 ms more over the run, on the A10G rig). The copy is given kSampleTimeoutSeconds
+// at most (sample_timeout_seconds: more with much live memory); one that has not answered by then is ended and the launch is the simulator's. What keeps a short program from paying for samples it
+// cannot use:
+//  * only a kernel with a loop is sampled (code_has_loop). Without one a warp runs each instruction once at most, the static count bounds its work,
+//    and the launches of such kernels took 0.4 to 1.2 times their static estimate: none is long without a long estimate, which the rules above see;
+//  * and EITHER its static estimate (static_sim_seconds) is at least sample_static_floor: 30 ms, ten times the cost of a small sample, and at
+//    least three times what the faults afterwards are expected to cost (kSampleSecondsPerLiveByte);
+//  * OR the process can afford it: what its samples cost so far, plus what this one is expected to cost, is within kSampleShareOfAge of the time
+//    the process has run (`expected_s`: the dearest sample of the process so far, or kSampleCostGuessSeconds and the faults before the first).
+// The floor is a rule of thumb fitted to this corpus, not a bound: the static estimate of a kernel with a loop says little (0.2 to 80 times off).
+inline constexpr double kSampleTimeoutSeconds = 0.050;
+// ... and longer with much live memory, whose page tables the fork copies: HeCBench black-scholes (1.9 GiB live) had not answered after 50 ms on
+// the A10G rig and was not sent. 0.2 ms more per MiB: 0.43 s for it, a ninth of the static estimate the floor asks of such a launch.
+inline constexpr double kSampleTimeoutSecondsPerLiveByte = 2e-10;
+inline double sample_timeout_seconds(uint64_t live_bytes) {
+  return kSampleTimeoutSeconds + kSampleTimeoutSecondsPerLiveByte * static_cast<double>(live_bytes);
+}
+inline constexpr double kSampleStaticFloorSeconds = 0.030;
+inline constexpr double kSampleShareOfAge = 0.02;
+inline constexpr double kSampleCostGuessSeconds = 0.003;
+inline constexpr double kSampleSecondsPerLiveByte = 6e-10;
+inline double sample_static_floor(uint64_t live_bytes) {
+  return std::max(kSampleStaticFloorSeconds, 3.0 * kSampleSecondsPerLiveByte * static_cast<double>(live_bytes));
+}
+inline bool sample_affordable(double age_s, double spent_s, double expected_s) {
+  return spent_s + std::max(expected_s, 0.0) <= kSampleShareOfAge * age_s;
+}
+// The card's kernel time is not known before its first launch there: assumed to be 1/kSampleCardSpeedup of what the simulator would take. 8 is the
+// least the card was faster than the simulator on the device phase of any workload of docs/perf-design/07-host-gpu.md (8x to 105x), so the
+// unknown counts against the card.
+inline constexpr double kSampleCardSpeedup = 8.0;
+// The first-launch rule's cap on the live memory (kFirstLaunchMaxBytes) is not applied: that rule cannot know what a mistaken move costs, and
+// this one charges the copies each way against a measured time (HeCBench black-scholes has 1 GiB live and 6 s in one launch).
+
+struct Sample {
+  double seconds = 0;       // the timed (second) runs of the sampled blocks: their sum
+  uint64_t timed = 0;       // how many blocks were sampled
+  uint64_t total = 0;       // blocks of the grid
+  unsigned threads = 1;     // host threads the whole launch would run on
+};
+
+// The seconds the simulator needs for the launch, from the sample: the per-block time over the whole grid, shared among the host threads as if
+// they scaled perfectly. They do not, so the estimate mostly errs low, towards the simulator: the eight launches of Round sp60b's corpus that it
+// would send took 0.9 to 1.6 times it; over all 68 sampled launches the estimate was between 0.1 and 6 times the launch, the high end on launches
+// of a few milliseconds (docs/perf-design/data/sp60b/). None when no block was timed.
+inline std::optional<double> sampled_launch_seconds(const Sample& s) {
+  if (s.timed == 0 || s.total == 0 || !(s.seconds > 0)) return std::nullopt;
+  const double per_block = s.seconds / static_cast<double>(s.timed);
+  return per_block * static_cast<double>(s.total) / static_cast<double>(std::max<unsigned>(s.threads, 1));
+}
+
+// The card path of a sampled launch: the live memory the card does not hold goes, and all of it is charged for coming back, as the first-launch
+// rule charges it.
+inline Estimate sample_estimate(const Sample& s, uint64_t push_bytes, uint64_t live_bytes, const Costs& c, bool driver_started,
+                                std::optional<double> card_kernel_s = std::nullopt) {
+  Estimate e;
+  e.sim_s = sampled_launch_seconds(s).value_or(0);
+  e.push_bytes = push_bytes;
+  e.pull_bytes = live_bytes;
+  e.card_kernel_s = card_kernel_s ? *card_kernel_s : std::max(c.kernel_s_default, e.sim_s / kSampleCardSpeedup);
+  e.start_s = driver_started ? 0 : std::max(c.start_cost_s, 0.0);
+  return e;
+}
+
+// Whether a sampled launch goes to the card: the simulator's time must repay the card path, with the driver start if it is not up, by the usual margin.
+inline bool sample_offload(const Sample& s, uint64_t push_bytes, uint64_t live_bytes, const Costs& c, bool driver_started,
+                           std::optional<double> card_kernel_s = std::nullopt) {
+  // (a sample with no estimate has a simulator time of 0, which no card path is under)
+  return should_offload(sample_estimate(s, push_bytes, live_bytes, c, driver_started, card_kernel_s), c);
+}
+
+// Whether a launch with no estimate is sampled at all:
+//  * the kernel has a loop and the grid has blocks to sample;
+//  * what is known of the kernel does not already say it is short: `whole_s` is what its whole launches so far give for this grid (SimTimeTable::peek);
+//    a kernel whose earlier launch was short is not sampled again (PolyBench 3DCONV: 254 launches of 3 ms);
+//  * its static estimate reaches the floor, or the process can afford it (sample_affordable).
+// `card_path_s` is the card path of this launch with the whole live memory moved each way and the driver start if it is not up.
+struct SampleCandidate {
+  uint64_t blocks = 0;
+  bool loop = false;        // code_has_loop
+  uint64_t live_bytes = 0;
+  std::optional<double> whole_s;
+  double static_s = 0;      // the launch's static estimate (static_sim_seconds)
+  double age_s = 0;         // how long the process has run
+  double spent_s = 0;       // what its samples have cost so far
+  double expected_s = kSampleCostGuessSeconds;
+};
+inline bool worth_sampling(const SampleCandidate& w, const Costs& c, double card_path_s) {
+  if (!w.loop || sample_blocks(w.blocks) == 0) return false;
+  if (w.whole_s && *w.whole_s <= c.margin * card_path_s) return false;
+  return w.static_s >= sample_static_floor(w.live_bytes) || sample_affordable(w.age_s, w.spent_s, w.expected_s);
 }
 
 // A safety net for any estimate that turns out wrong: an offloaded launch that took longer on the card path (copies, launch, copy back)

@@ -5,7 +5,8 @@
 // For turbo mode (VGPU_HOST_GPU=turbo, docs/perf-design/12-host-gpu-turbo.md): `iatom` an integer atomicAdd whose old value is used (admitted),
 // `fatom` a float atomicAdd whose old value is used and `cas` a compare-and-swap (both only with VGPU_HOST_GPU_ATOMICS=1). Each thread's result
 // does not depend on the order the threads run in, so these print the same lines wherever they run. `hist` is an integer reduction onto 64 words (the
-// exact set), for the verify run of step 16: its sums are the same in any order, unless an update is lost.
+// exact set), for the verify run of step 16: its sums are the same in any order, unless an update is lost. `none` is `acct` with no launch at all: what a
+// card that computes nothing leaves (step 18: a sampled launch sent to such a card must print exactly this).
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -82,6 +83,7 @@ int main(int argc, char** argv) {
   const bool div = !std::strcmp(mode, "div"), rcp = !std::strcmp(mode, "rcp"), divexp_mode = !std::strcmp(mode, "divexp");
   const bool hist = !std::strcmp(mode, "hist");
   const bool iatom = !std::strcmp(mode, "iatom"), fatom = !std::strcmp(mode, "fatom"), cas = !std::strcmp(mode, "cas");
+  const bool none = !std::strcmp(mode, "none");
   const int rounds = !std::strcmp(mode, "acct") ? 2048 : 64;   // `acct`: `big` with 32 times the work per thread, a launch of a fraction of a second (run_host_gpu_stub.sh step 8)
   const bool heap = !std::strcmp(mode, "heap");   // `big`, after a kernel left a block of the device heap in use: no launch may go to the card
   const int n = small ? 64 : 1 << 18;
@@ -92,7 +94,8 @@ int main(int argc, char** argv) {
   uint64_t h = 0xcbf29ce484222325ull;
   for (int launch = 0; launch < 4; ++launch) {
     const auto t0 = std::chrono::steady_clock::now();
-    if (mufu) use_expf<<<(n + 255) / 256, 256>>>(static_cast<float*>(d), n);
+    if (none) {}
+    else if (mufu) use_expf<<<(n + 255) / 256, 256>>>(static_cast<float*>(d), n);
     else if (div) divk<<<(n + 255) / 256, 256>>>(static_cast<float*>(d), n);
     else if (rcp) rcpk<<<(n + 255) / 256, 256>>>(static_cast<float*>(d), n);
     else if (divexp_mode) divexp<<<(n + 255) / 256, 256>>>(static_cast<float*>(d), n);
