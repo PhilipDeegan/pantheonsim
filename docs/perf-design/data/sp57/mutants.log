@@ -1,0 +1,5 @@
+mutant=none unit rc=0 sass rc=0 |  |   sections that waited on the plain loop: 3, came back to count: 3, compiled after it: 3 
+mutant=wait_never unit rc=1 sass rc=1 | tests/unit/test_jit_wait.cpp:99: VCHECK_EQ(state_of(*u), kWaiting) failed |   sections that waited on the plain loop: 0, came back to count: 0, compiled after it: 3 tests/unit/test_sass_chain_cont.cpp:650: VCHECK(s.waits.load() >= w0 + 3) failed 
+mutant=wait_stuck unit rc=1 sass rc=1 | tests/unit/test_jit_wait.cpp:113: VCHECK_EQ(state_of(*u), kCounting) failed |   sections that waited on the plain loop: 3, came back to count: 0, compiled after it: 0 tests/unit/test_sass_chain_cont.cpp:651: VCHECK(s.wait_ends.load() >= e0 + 3) faile
+mutant=wait_no_credit unit rc=1 sass rc=0 | tests/unit/test_jit_wait.cpp:126: VCHECK(u->ready()) failed |   sections that waited on the plain loop: 3, came back to count: 3, compiled after it: 3 
+mutant=wait_no_profile unit rc=1 sass rc=0 | tests/unit/test_jit_wait.cpp:104: VCHECK_EQ(u->wait_for.load(), kThreshold - kLook |   sections that waited on the plain loop: 3, came back to count: 3, compiled after it: 3 
