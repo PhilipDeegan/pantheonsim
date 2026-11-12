@@ -712,8 +712,9 @@ struct Sample {
 };
 
 // The seconds the simulator needs for the launch, from the sample: the per-block time over the whole grid, shared among the host threads as if
-// they scaled perfectly. They do not, so the estimate errs low, towards the simulator: over the kernels with a loop that Round sp60b sampled, the
-// launch took 1.0 to 1.5 times it (docs/perf-design/data/sp60b/). None when no block was timed.
+// they scaled perfectly. They do not, so the estimate mostly errs low, towards the simulator: the eight launches of Round sp60b's corpus that it
+// would send took 0.9 to 1.6 times it; over all 68 sampled launches the estimate was between 0.1 and 6 times the launch, the high end on launches
+// of a few milliseconds (docs/perf-design/data/sp60b/). None when no block was timed.
 inline std::optional<double> sampled_launch_seconds(const Sample& s) {
   if (s.timed == 0 || s.total == 0 || !(s.seconds > 0)) return std::nullopt;
   const double per_block = s.seconds / static_cast<double>(s.timed);
