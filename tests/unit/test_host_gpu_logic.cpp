@@ -17,15 +17,15 @@
 
 using namespace vgpu::hostgpu;
 
-VTEST(mode_is_exact_relaxed_or_off) {
+VTEST(mode_is_exact_turbo_or_off) {
   VCHECK(mode_from_text("exact") == Mode::Exact);
-  VCHECK(mode_from_text("relaxed") == Mode::Relaxed);
+  VCHECK(mode_from_text("turbo") == Mode::Turbo);
   VCHECK(mode_from_text(nullptr) == Mode::Off);
   VCHECK(mode_from_text("") == Mode::Off);
   VCHECK(mode_from_text("approx") == Mode::Off);   // not a mode: a typo must not turn one on
   VCHECK(mode_from_text("EXACT") == Mode::Off);
-  VCHECK(mode_from_text("RELAXED") == Mode::Off);
-  VCHECK(mode_from_text("relaxed ") == Mode::Off);
+  VCHECK(mode_from_text("TURBO") == Mode::Off);
+  VCHECK(mode_from_text("turbo ") == Mode::Off);
   VCHECK(mode_from_text("1") == Mode::Off);
 }
 
@@ -785,8 +785,8 @@ VTEST(idiom_classification_by_mnemonic) {
 // The start-up refusals (08 section 3): a mode value that is not a mode is said, and every diagnostic that only the simulator gives switches the mode off.
 VTEST(mode_text_known_and_diagnostic_switches) {
   VCHECK(mode_text_is_known(nullptr) && mode_text_is_known("") && mode_text_is_known("off") && mode_text_is_known("exact") && mode_text_is_known("0"));
-  VCHECK(mode_text_is_known("relaxed"));
-  VCHECK(!mode_text_is_known("approx") && !mode_text_is_known("EXACT") && !mode_text_is_known("on") && !mode_text_is_known("1") && !mode_text_is_known("Relaxed"));
+  VCHECK(mode_text_is_known("turbo"));
+  VCHECK(!mode_text_is_known("approx") && !mode_text_is_known("EXACT") && !mode_text_is_known("on") && !mode_text_is_known("1") && !mode_text_is_known("Turbo"));
   for (const char* v : kIncompatibleVars) {
     const std::string name(v);
     VCHECK(!diagnostic_switched_on(name, nullptr));
@@ -808,11 +808,11 @@ VTEST(mode_text_known_and_diagnostic_switches) {
   }
 }
 
-// ---- relaxed mode (docs/perf-design/12-host-gpu-relaxed.md) -------------------------------------------------------------------------------------
+// ---- turbo mode (docs/perf-design/12-host-gpu-turbo.md) -------------------------------------------------------------------------------------
 
-// Exact mode is what it was: the mnemonics it takes are this list and no other name the decoder can print. The list is a copy made when relaxed mode
+// Exact mode is what it was: the mnemonics it takes are this list and no other name the decoder can print. The list is a copy made when turbo mode
 // was added; a change to exact_mnemonic_allowed has to change it here too, on purpose.
-VTEST(exact_set_is_the_list_it_was_before_relaxed_mode) {
+VTEST(exact_set_is_the_list_it_was_before_turbo_mode) {
   const std::set<std::string> frozen = {
       "IMAD", "IADD3", "IADD", "LOP3", "LOP", "LEA", "SHF", "SHL", "SHR", "ISETP", "IMNMX", "IABS", "POPC", "FLO", "BREV", "PRMT", "SEL", "MOV", "R2P", "P2R",
       "PLOP3", "UPLOP3", "PSETP", "ISET", "FSET", "DSET", "I2I", "I2IP", "SGXT", "BMSK", "VIADD", "VIMNMX", "FADD", "FMUL", "FFMA", "FSETP", "FSEL", "FMNMX",
@@ -841,71 +841,71 @@ VTEST(exact_set_is_the_list_it_was_before_relaxed_mode) {
   for (const char* good : {"E", "ADD", "MIN", "MAX", "AND", "OR", "XOR", "S32", "64", "S64", "STRONG", "GPU"}) VCHECK(exact_opcode_allowed("RED", {good}));
 }
 
-VTEST(relaxed_classes_every_kind_of_instruction) {
+VTEST(turbo_classes_every_kind_of_instruction) {
   using C = InsnClass;
   // exact: whatever the exact set takes
-  for (const char* m : {"IMAD", "FFMA", "DFMA", "LDG", "STG", "BAR", "BRA", "EXIT", "SHFL", "FCHK", "S2R"}) VCHECK(relaxed_class(m, {}) == C::Exact);
-  VCHECK(relaxed_class("RED", {"E", "ADD", "STRONG", "GPU"}) == C::Exact);
+  for (const char* m : {"IMAD", "FFMA", "DFMA", "LDG", "STG", "BAR", "BRA", "EXIT", "SHFL", "FCHK", "S2R"}) VCHECK(turbo_class(m, {}) == C::Exact);
+  VCHECK(turbo_class("RED", {"E", "ADD", "STRONG", "GPU"}) == C::Exact);
   // approximate
-  for (const char* f : {"COS", "SIN", "EX2", "LG2", "RCP", "RSQ", "RCP64H", "RSQ64H", "SQRT", "TANH"}) VCHECK(relaxed_class("MUFU", {f}) == C::Mufu);
-  VCHECK(relaxed_class("MUFU", {"(10)"}) == C::Never);   // a function the decoder cannot name
-  for (const char* m : {"HADD2", "HMUL2", "HFMA2", "HSETP2", "HSET2", "HMNMX2"}) VCHECK(relaxed_class(m, {}) == C::Half);
-  VCHECK(relaxed_class("HFMA2", {"MMA"}) == C::Half);
-  VCHECK(relaxed_class("CALL", {"REL", "NOINC"}) == C::Call);
-  VCHECK(relaxed_class("RET", {"REL", "NODEC"}) == C::Call);
+  for (const char* f : {"COS", "SIN", "EX2", "LG2", "RCP", "RSQ", "RCP64H", "RSQ64H", "SQRT", "TANH"}) VCHECK(turbo_class("MUFU", {f}) == C::Mufu);
+  VCHECK(turbo_class("MUFU", {"(10)"}) == C::Never);   // a function the decoder cannot name
+  for (const char* m : {"HADD2", "HMUL2", "HFMA2", "HSETP2", "HSET2", "HMNMX2"}) VCHECK(turbo_class(m, {}) == C::Half);
+  VCHECK(turbo_class("HFMA2", {"MMA"}) == C::Half);
+  VCHECK(turbo_class("CALL", {"REL", "NOINC"}) == C::Call);
+  VCHECK(turbo_class("RET", {"REL", "NODEC"}) == C::Call);
   // the decoder's own spellings of a float reduction: the type is ONE modifier, "F32.FTZ.RN"
-  VCHECK(relaxed_class("RED", {"E", "ADD", "F32.FTZ.RN", "STRONG", "GPU"}) == C::FloatRed);
-  VCHECK(relaxed_class("RED", {"E", "ADD", "F64.RN", "STRONG", "GPU"}) == C::FloatRed);
-  VCHECK(relaxed_class("RED", {"E", "ADD", "F16x2.RN"}) == C::FloatRed);
-  VCHECK(relaxed_class("REDG", {"E", "ADD", "F32x2.FTZ.RN"}) == C::FloatRed);
-  VCHECK(relaxed_class("REDG", {"E", "MAX", "BF16x4.RN"}) == C::FloatRed);
-  VCHECK(relaxed_class("RED", {"E", "ADD", "F32", "FTZ", "RN"}) == C::FloatRed);   // and split
-  // the two modes agree on what a float reduction is: exact refuses exactly the reductions relaxed does not class as exact
+  VCHECK(turbo_class("RED", {"E", "ADD", "F32.FTZ.RN", "STRONG", "GPU"}) == C::FloatRed);
+  VCHECK(turbo_class("RED", {"E", "ADD", "F64.RN", "STRONG", "GPU"}) == C::FloatRed);
+  VCHECK(turbo_class("RED", {"E", "ADD", "F16x2.RN"}) == C::FloatRed);
+  VCHECK(turbo_class("REDG", {"E", "ADD", "F32x2.FTZ.RN"}) == C::FloatRed);
+  VCHECK(turbo_class("REDG", {"E", "MAX", "BF16x4.RN"}) == C::FloatRed);
+  VCHECK(turbo_class("RED", {"E", "ADD", "F32", "FTZ", "RN"}) == C::FloatRed);   // and split
+  // the two modes agree on what a float reduction is: exact refuses exactly the reductions turbo does not class as exact
   for (const std::vector<std::string>& mods : std::vector<std::vector<std::string>>{{"E", "ADD", "F32.FTZ.RN"}, {"E", "ADD", "F64.RN"}, {"ADD", "F16x2.RN"}, {"E", "INC"}, {"E", "EXCH"},
                                                                                      {"E", "ADD"}, {"E", "MAX", "S32"}, {"E", "AND", "64"}})
-    VCHECK_EQ(exact_opcode_allowed("RED", mods), relaxed_class("RED", mods) == C::Exact);
-  VCHECK(relaxed_class("REDG", {"E", "ADD", "STRONG", "GPU"}) == C::Extra);
-  VCHECK(relaxed_class("RED", {"E", "INC"}) == C::AtomInt);
-  VCHECK(relaxed_class("RED", {"E", "EXCH"}) == C::AtomSwap);
+    VCHECK_EQ(exact_opcode_allowed("RED", mods), turbo_class("RED", mods) == C::Exact);
+  VCHECK(turbo_class("REDG", {"E", "ADD", "STRONG", "GPU"}) == C::Extra);
+  VCHECK(turbo_class("RED", {"E", "INC"}) == C::AtomInt);
+  VCHECK(turbo_class("RED", {"E", "EXCH"}) == C::AtomSwap);
   // tensor
-  for (const char* m : {"HMMA", "IMMA", "DMMA"}) VCHECK(relaxed_class(m, {"16816", "F32"}) == C::Tensor);
+  for (const char* m : {"HMMA", "IMMA", "DMMA"}) VCHECK(turbo_class(m, {"16816", "F32"}) == C::Tensor);
   // atomics
   for (const char* m : {"ATOM", "ATOMG", "ATOMS"}) {
     for (const char* op : {"ADD", "MIN", "MAX", "INC", "DEC", "AND", "OR", "XOR"}) {
-      VCHECK(relaxed_class(m, {"E", op}) == C::AtomInt);
-      VCHECK(relaxed_class(m, {"E", op, "S32"}) == C::AtomInt);
-      VCHECK(relaxed_class(m, {op, "64", "STRONG", "GPU"}) == C::AtomInt);
+      VCHECK(turbo_class(m, {"E", op}) == C::AtomInt);
+      VCHECK(turbo_class(m, {"E", op, "S32"}) == C::AtomInt);
+      VCHECK(turbo_class(m, {op, "64", "STRONG", "GPU"}) == C::AtomInt);
     }
-    VCHECK(relaxed_class(m, {"E", "ADD", "F32.FTZ.RN"}) == C::AtomFloat);
-    VCHECK(relaxed_class(m, {"E", "ADD", "F64.RN"}) == C::AtomFloat);
-    VCHECK(relaxed_class(m, {"E", "MIN", "F16x2.RN"}) == C::AtomFloat);
-    VCHECK(relaxed_class(m, {"E", "CAS", "STRONG", "GPU"}) == C::AtomSwap);
-    VCHECK(relaxed_class(m, {"CAST", "SPIN", "64"}) == C::AtomSwap);
-    VCHECK(relaxed_class(m, {"E", "EXCH"}) == C::AtomSwap);
-    VCHECK(relaxed_class(m, {"E", "EXCH", "F32.FTZ.RN"}) == C::AtomSwap);   // an exchange is an exchange whatever its type
-    VCHECK(relaxed_class(m, {"E", "(9)"}) == C::Never);
+    VCHECK(turbo_class(m, {"E", "ADD", "F32.FTZ.RN"}) == C::AtomFloat);
+    VCHECK(turbo_class(m, {"E", "ADD", "F64.RN"}) == C::AtomFloat);
+    VCHECK(turbo_class(m, {"E", "MIN", "F16x2.RN"}) == C::AtomFloat);
+    VCHECK(turbo_class(m, {"E", "CAS", "STRONG", "GPU"}) == C::AtomSwap);
+    VCHECK(turbo_class(m, {"CAST", "SPIN", "64"}) == C::AtomSwap);
+    VCHECK(turbo_class(m, {"E", "EXCH"}) == C::AtomSwap);
+    VCHECK(turbo_class(m, {"E", "EXCH", "F32.FTZ.RN"}) == C::AtomSwap);   // an exchange is an exchange whatever its type
+    VCHECK(turbo_class(m, {"E", "(9)"}) == C::Never);
   }
-  VCHECK(relaxed_class("ATOMS", {"POPC", "INC", "32"}) == C::AtomInt);
-  VCHECK(relaxed_class("ATOMS", {"ARRIVE", "64"}) == C::Never);
+  VCHECK(turbo_class("ATOMS", {"POPC", "INC", "32"}) == C::AtomInt);
+  VCHECK(turbo_class("ATOMS", {"ARRIVE", "64"}) == C::Never);
   // extra: named one by one
   for (const char* m : {"IDP", "VABSDIFF", "VABSDIFF4", "VIADDMNMX", "VIMNMX3", "FMNMX3", "F2IP", "FSWZADD", "REDUX", "LDGSTS", "LDGDEPBAR", "LDSM", "MOVM",
                         "FFMA2", "FMUL2", "FADD2"})
-    VCHECK(relaxed_class(m, {}) == C::Extra);
+    VCHECK(turbo_class(m, {}) == C::Extra);
   // never: textures, surfaces, what nobody named, what is not an instruction
   for (const char* m : {"TEX", "TLD", "TLD4", "TXD", "SULD", "SUST", "QMMA", "BMMA", "OMMA", "HGMMA", "JMP", "NANOSLEEP", "BPT", "SYNCS", "STSM", "UTCMMA",
                         "LDTM", "STTM", "UTMALDG", "VPRINTF", "", "mufu", "Unknown"})
-    VCHECK(relaxed_class(m, {}) == C::Never);
+    VCHECK(turbo_class(m, {}) == C::Never);
 }
 
-// Every instruction the decoder knows has a class, and the classes of the ones relaxed mode adds are the ones the doc lists: a new instruction in ops.inc is
+// Every instruction the decoder knows has a class, and the classes of the ones turbo mode adds are the ones the doc lists: a new instruction in ops.inc is
 // Never until someone names it here and there.
-VTEST(relaxed_whitelist_covers_the_decoder_and_nothing_unnamed) {
+VTEST(turbo_whitelist_covers_the_decoder_and_nothing_unnamed) {
   std::vector<std::string> names;
 #define VGPU_SASS_OP(name) names.push_back(#name);
 #include "vgpu/sass/ops.inc"
 #undef VGPU_SASS_OP
   std::map<InsnClass, unsigned> n;
-  for (const std::string& m : names) ++n[relaxed_class(m, {})];
+  for (const std::string& m : names) ++n[turbo_class(m, {})];
   VCHECK_EQ(n[InsnClass::Mufu], 1u);
   VCHECK_EQ(n[InsnClass::Half], 6u);
   VCHECK_EQ(n[InsnClass::Call], 2u);
@@ -939,89 +939,89 @@ VTEST(a_call_must_stay_inside_the_kernel) {
   VCHECK(!call_stays_inside(true, false, 0x100, 0x0, 0x400));   // through a register
 }
 
-VTEST(relaxed_admits_by_class_and_switch) {
+VTEST(turbo_admits_by_class_and_switch) {
   using C = InsnClass;
-  const RelaxedSwitches def;
+  const TurboSwitches def;
   const auto mask = [](std::initializer_list<C> cs) {
     ClassMask m = 0;
     for (C c : cs) m |= class_bit(c);
     return m;
   };
   // the defaults: everything but float atomics with a value, swaps and what has no class
-  VCHECK(relaxed_refusal(mask({C::Exact}), def) == RelaxedRefusal::None);
-  VCHECK(relaxed_refusal(0, def) == RelaxedRefusal::None);
-  for (C c : {C::Mufu, C::Half, C::FloatRed, C::Call, C::Extra, C::Tensor, C::AtomInt}) VCHECK(relaxed_refusal(mask({C::Exact, c}), def) == RelaxedRefusal::None);
-  VCHECK(relaxed_refusal(mask({C::Exact, C::Mufu, C::Half, C::FloatRed, C::Call, C::Extra, C::Tensor, C::AtomInt}), def) == RelaxedRefusal::None);
-  VCHECK(relaxed_refusal(mask({C::Exact, C::AtomFloat}), def) == RelaxedRefusal::Atomics);
-  VCHECK(relaxed_refusal(mask({C::Exact, C::AtomSwap}), def) == RelaxedRefusal::Atomics);
-  VCHECK(relaxed_refusal(mask({C::Never}), def) == RelaxedRefusal::Never);
+  VCHECK(turbo_refusal(mask({C::Exact}), def) == TurboRefusal::None);
+  VCHECK(turbo_refusal(0, def) == TurboRefusal::None);
+  for (C c : {C::Mufu, C::Half, C::FloatRed, C::Call, C::Extra, C::Tensor, C::AtomInt}) VCHECK(turbo_refusal(mask({C::Exact, c}), def) == TurboRefusal::None);
+  VCHECK(turbo_refusal(mask({C::Exact, C::Mufu, C::Half, C::FloatRed, C::Call, C::Extra, C::Tensor, C::AtomInt}), def) == TurboRefusal::None);
+  VCHECK(turbo_refusal(mask({C::Exact, C::AtomFloat}), def) == TurboRefusal::Atomics);
+  VCHECK(turbo_refusal(mask({C::Exact, C::AtomSwap}), def) == TurboRefusal::Atomics);
+  VCHECK(turbo_refusal(mask({C::Never}), def) == TurboRefusal::Never);
   // the opt-in
-  RelaxedSwitches at;
+  TurboSwitches at;
   at.atomics = true;
-  VCHECK(relaxed_refusal(mask({C::Exact, C::AtomFloat, C::AtomSwap, C::AtomInt}), at) == RelaxedRefusal::None);
-  VCHECK(relaxed_refusal(mask({C::AtomSwap, C::Never}), at) == RelaxedRefusal::Never);   // nothing opts into Never
+  VCHECK(turbo_refusal(mask({C::Exact, C::AtomFloat, C::AtomSwap, C::AtomInt}), at) == TurboRefusal::None);
+  VCHECK(turbo_refusal(mask({C::AtomSwap, C::Never}), at) == TurboRefusal::Never);   // nothing opts into Never
   // the off list: each name switches its class off, and only its class
   const struct { const char* name; std::vector<C> off; } rows[] = {
       {"mufu", {C::Mufu}}, {"tensor", {C::Tensor}}, {"half", {C::Half}}, {"call", {C::Call}}, {"red", {C::FloatRed}}, {"extra", {C::Extra}},
       {"atomics", {C::AtomInt, C::AtomFloat, C::AtomSwap}}};
   for (const auto& row : rows) {
-    RelaxedSwitches sw;
+    TurboSwitches sw;
     sw.atomics = true;
-    VCHECK(parse_relaxed_off(row.name, &sw.off));
+    VCHECK(parse_turbo_off(row.name, &sw.off));
     for (unsigned c = 0; c < kInsnClasses; ++c) {
       const C cls = static_cast<C>(c);
       const bool is_off = std::find(row.off.begin(), row.off.end(), cls) != row.off.end();
-      const RelaxedRefusal want = cls == C::Never ? RelaxedRefusal::Never : is_off ? RelaxedRefusal::Off : RelaxedRefusal::None;
-      VCHECK(relaxed_refusal(class_bit(cls), sw) == want);
+      const TurboRefusal want = cls == C::Never ? TurboRefusal::Never : is_off ? TurboRefusal::Off : TurboRefusal::None;
+      VCHECK(turbo_refusal(class_bit(cls), sw) == want);
     }
   }
   // the order: no class beats a switched-off class beats the opt-in
-  RelaxedSwitches sw;
-  VCHECK(parse_relaxed_off("mufu", &sw.off));
-  VCHECK(relaxed_refusal(mask({C::Mufu, C::AtomSwap}), sw) == RelaxedRefusal::Off);
-  VCHECK(relaxed_refusal(mask({C::Mufu, C::AtomSwap, C::Never}), sw) == RelaxedRefusal::Never);
+  TurboSwitches sw;
+  VCHECK(parse_turbo_off("mufu", &sw.off));
+  VCHECK(turbo_refusal(mask({C::Mufu, C::AtomSwap}), sw) == TurboRefusal::Off);
+  VCHECK(turbo_refusal(mask({C::Mufu, C::AtomSwap, C::Never}), sw) == TurboRefusal::Never);
   // the exact class cannot be switched off
-  VCHECK(parse_relaxed_off("mufu,tensor,half,call,atomics,red,extra", &sw.off));
-  VCHECK(relaxed_refusal(mask({C::Exact}), sw) == RelaxedRefusal::None);
+  VCHECK(parse_turbo_off("mufu,tensor,half,call,atomics,red,extra", &sw.off));
+  VCHECK(turbo_refusal(mask({C::Exact}), sw) == TurboRefusal::None);
   VCHECK((sw.off & (class_bit(C::Exact) | class_bit(C::Never))) == 0);
 }
 
-VTEST(relaxed_off_list_parses_names_and_refuses_the_rest) {
+VTEST(turbo_off_list_parses_names_and_refuses_the_rest) {
   ClassMask off = 99;
   std::string bad;
-  VCHECK(parse_relaxed_off(nullptr, &off) && off == 0);
-  VCHECK(parse_relaxed_off("", &off) && off == 0);
-  VCHECK(parse_relaxed_off("mufu,call", &off) && off == (class_bit(InsnClass::Mufu) | class_bit(InsnClass::Call)));
-  VCHECK(parse_relaxed_off(",mufu,,", &off) && off == class_bit(InsnClass::Mufu));
-  VCHECK(!parse_relaxed_off("mufu,sfu", &off, &bad) && bad == "sfu");
-  VCHECK(!parse_relaxed_off("MUFU", &off, &bad) && bad == "MUFU");
-  VCHECK(!parse_relaxed_off("mufu call", &off, &bad) && bad == "mufu call");
-  VCHECK(!parse_relaxed_off("exact", &off, &bad) && !parse_relaxed_off("never", &off) && !parse_relaxed_off("all", &off));
+  VCHECK(parse_turbo_off(nullptr, &off) && off == 0);
+  VCHECK(parse_turbo_off("", &off) && off == 0);
+  VCHECK(parse_turbo_off("mufu,call", &off) && off == (class_bit(InsnClass::Mufu) | class_bit(InsnClass::Call)));
+  VCHECK(parse_turbo_off(",mufu,,", &off) && off == class_bit(InsnClass::Mufu));
+  VCHECK(!parse_turbo_off("mufu,sfu", &off, &bad) && bad == "sfu");
+  VCHECK(!parse_turbo_off("MUFU", &off, &bad) && bad == "MUFU");
+  VCHECK(!parse_turbo_off("mufu call", &off, &bad) && bad == "mufu call");
+  VCHECK(!parse_turbo_off("exact", &off, &bad) && !parse_turbo_off("never", &off) && !parse_turbo_off("all", &off));
 }
 
-// The kernels of the spike again, as relaxed mode sees them (the classes of exact_set_matches_the_measured_kernels above).
-VTEST(relaxed_takes_the_kernels_exact_refused_for_numerics) {
+// The kernels of the spike again, as turbo mode sees them (the classes of exact_set_matches_the_measured_kernels above).
+VTEST(turbo_takes_the_kernels_exact_refused_for_numerics) {
   const auto classes = [](const std::vector<std::pair<std::string, std::vector<std::string>>>& code) {
     ClassMask m = 0;
-    for (const auto& [mn, mods] : code) m |= class_bit(relaxed_class(mn, mods));
+    for (const auto& [mn, mods] : code) m |= class_bit(turbo_class(mn, mods));
     return m;
   };
-  const RelaxedSwitches def;
-  RelaxedSwitches at;
+  const TurboSwitches def;
+  TurboSwitches at;
   at.atomics = true;
-  // HeCBench silu forward (expf): refused in exact, admitted in relaxed
+  // HeCBench silu forward (expf): refused in exact, admitted in turbo
   const ClassMask silu = classes({{"FFMA", {}}, {"MUFU", {"EX2"}}, {"MUFU", {"RCP"}}, {"FCHK", {}}, {"FADD", {"FTZ"}}});
-  VCHECK(relaxed_refusal(silu, def) == RelaxedRefusal::None);
+  VCHECK(turbo_refusal(silu, def) == TurboRefusal::None);
   // HeCBench aop compute_partial_beta (double atomicAdd as a compare-and-swap loop): only with the opt-in
   const ClassMask aop = classes({{"DADD", {}}, {"ATOMS", {"CAST", "SPIN", "64"}}, {"DFMA", {}}});
-  VCHECK(relaxed_refusal(aop, def) == RelaxedRefusal::Atomics && relaxed_refusal(aop, at) == RelaxedRefusal::None);
+  VCHECK(turbo_refusal(aop, def) == TurboRefusal::Atomics && turbo_refusal(aop, at) == TurboRefusal::None);
   // HeCBench bh TreeBuildingKernel (ATOMG.E.CAS)
   const ClassMask bh = classes({{"FSETP", {"GEU", "AND"}}, {"ATOMG", {"E", "CAS", "STRONG", "GPU"}}});
-  VCHECK(relaxed_refusal(bh, def) == RelaxedRefusal::Atomics && relaxed_refusal(bh, at) == RelaxedRefusal::None);
+  VCHECK(turbo_refusal(bh, def) == TurboRefusal::Atomics && turbo_refusal(bh, at) == TurboRefusal::None);
   // a histogram (integer atomicAdd whose old value is used) and a float reduction: admitted
-  VCHECK(relaxed_refusal(classes({{"LDG", {"E"}}, {"ATOMG", {"E", "ADD", "STRONG", "GPU"}}, {"RED", {"E", "ADD", "F32.FTZ.RN", "STRONG", "GPU"}}}), def) == RelaxedRefusal::None);
+  VCHECK(turbo_refusal(classes({{"LDG", {"E"}}, {"ATOMG", {"E", "ADD", "STRONG", "GPU"}}, {"RED", {"E", "ADD", "F32.FTZ.RN", "STRONG", "GPU"}}}), def) == TurboRefusal::None);
   // a texture fetch: never, whatever is switched on
-  VCHECK(relaxed_refusal(classes({{"TEX", {"SCR", "LL"}}, {"FMUL", {}}}), at) == RelaxedRefusal::Never);
+  VCHECK(turbo_refusal(classes({{"TEX", {"SCR", "LL"}}, {"FMUL", {}}}), at) == TurboRefusal::Never);
 }
 
 VTEST_MAIN

@@ -1411,7 +1411,7 @@ vgpu_unit_test(test_yamlish)
 vgpu_unit_test(test_check_compare)
 vgpu_unit_test(test_host_gpu_logic)
 vgpu_unit_test(test_host_gpu_ref)
-# Relaxed host-GPU mode's compare by tolerance (include/vgpu/host_gpu_tol.hpp): header-only, no card.
+# Turbo host-GPU mode's compare by tolerance (include/vgpu/host_gpu_tol.hpp): header-only, no card.
 vgpu_unit_test(test_host_gpu_tol)
 vgpu_unit_test(test_card_gate)
 vgpu_unit_test(test_host_gpu_track)
@@ -3985,7 +3985,7 @@ set_tests_properties(e2e_host_gpu_stub PROPERTIES
   SKIP_REGULAR_EXPRESSION "^SKIP:"
   TIMEOUT 600)
 
-# The host-GPU benchmark harness (tools/bench/hostgpu/run.py, docs/perf-design/12-host-gpu-relaxed.md): its self-test parses canned summary lines, classes
+# The host-GPU benchmark harness (tools/bench/hostgpu/run.py, docs/perf-design/12-host-gpu-turbo.md): its self-test parses canned summary lines, classes
 # canned outputs, builds the table and kills a child that hangs. No card, no simulator, no nvcc.
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)

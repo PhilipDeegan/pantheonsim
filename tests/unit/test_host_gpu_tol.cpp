@@ -1,4 +1,4 @@
-// Relaxed host-GPU mode's compare by tolerance (include/vgpu/host_gpu_tol.hpp, docs/perf-design/12-host-gpu-relaxed.md): the rule for two values, the three
+// Turbo host-GPU mode's compare by tolerance (include/vgpu/host_gpu_tol.hpp, docs/perf-design/12-host-gpu-turbo.md): the rule for two values, the three
 // readings of a differing word, what the report counts, the ends of a range, and the parsing of the two tolerances. No card and no simulator state.
 #include <cmath>
 #include <cstdint>
@@ -510,7 +510,7 @@ VTEST(looks_like_f32_tells_float_arrays_from_doubles_and_bits) {
   (void)bits_of(1.0);
 }
 
-// A model of what relaxed mode produces: a float array whose every element is the card's, one or two ulp from the simulator's. Nothing is outside at the
+// A model of what turbo mode produces: a float array whose every element is the card's, one or two ulp from the simulator's. Nothing is outside at the
 // defaults, the counts are exact, and the largest relative difference is two ulp.
 VTEST(a_whole_array_of_one_and_two_ulp_differences_is_inside) {
   std::mt19937 rng(11);

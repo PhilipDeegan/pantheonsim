@@ -1,6 +1,6 @@
 Host-GPU benchmark: nvidia/a10g, 1 runs (median wall seconds), timeout 600 s, atol 1e-08, rtol 1e-05, threads default, VGPU_HOST_GPU_START_COST=0.
 
-| program | sim s | exact s | x sim | exact card / all launches | exact card s / sim s | exact output | relaxed s | x sim | relaxed card / all launches | relaxed card s / sim s | relaxed output | relaxed kept in sim: never/atomics/off/exact/safety/small |
+| program | sim s | exact s | x sim | exact card / all launches | exact card s / sim s | exact output | turbo s | x sim | turbo card / all launches | turbo card s / sim s | turbo output | turbo kept in sim: never/atomics/off/exact/safety/small |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | polybench/2DCONV | 0.96 | 0.93 | 1.03x | 1 / 1 | 0.04 / 0.00 | identical | 0.88 | 1.09x | 1 / 1 | 0.04 / 0.00 | identical | 0/0/0/0/0/0 |
 | polybench/3DCONV | 0.76 | 0.76 | 1.00x | 0 / 254 | 0.00 / 0.51 | identical | 0.76 | 1.00x | 0 / 254 | 0.00 / 0.50 | identical | 0/0/0/0/0/252 |
@@ -32,8 +32,8 @@ Host-GPU benchmark: nvidia/a10g, 1 runs (median wall seconds), timeout 600 s, at
 | rodinia/lavaMD | 1.79 | 1.80 | 1.00x | 0 / 1 | 0.00 / 1.77 | identical | 1.80 | 1.00x | 0 / 1 | 0.00 / 1.77 | identical | 0/0/0/0/0/0 |
 
 exact: geometric mean speed-up over sim 1.47x (28 programs).
-relaxed: geometric mean speed-up over sim 1.47x (28 programs).
+turbo: geometric mean speed-up over sim 1.47x (28 programs).
 
 Notes:
 
-* rodinia/srad_v2 relaxed: _Z11srad_cuda_1PfS_S_S_S_S_iif failed on the card (error 700); mode off, the simulator runs it
+* rodinia/srad_v2 turbo: _Z11srad_cuda_1PfS_S_S_S_S_iif failed on the card (error 700); mode off, the simulator runs it

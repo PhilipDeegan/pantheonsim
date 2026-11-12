@@ -1,4 +1,4 @@
-// Card run for relaxed host-GPU mode (docs/perf-design/12-host-gpu-relaxed.md): does the card agree with ITSELF on kernels built on atomics? Each kernel
+// Card run for turbo host-GPU mode (docs/perf-design/12-host-gpu-turbo.md): does the card agree with ITSELF on kernels built on atomics? Each kernel
 // runs `runs` times from the same memory, natively (no simulator), and every run is compared with the first, bit for bit. A kind the card repeats is one
 // whose only difference from the simulator can be numeric; a kind it does not repeat has no single right answer, and a compare of the card with the
 // simulator says nothing about either (which is why float atomics with a returned value, compare-and-swap and exchange are behind VGPU_HOST_GPU_ATOMICS=1).
@@ -8,8 +8,8 @@
 //
 // Kinds (the SASS in brackets is what nvcc 12/13 emits for sm_86; check with VGPU_HOST_GPU_LOG=2 under the simulator if a card or toolkit differs):
 //   imax   atomicMax on ints, result unused                  [RED.MAX: the exact set]                     control: must repeat
-//   iadd   atomicAdd on ints, old value stored per thread    [ATOMG.ADD: relaxed class atomic-int]        the sums repeat, the old values need not
-//   fred   atomicAdd on floats, result unused                [RED.ADD.F32: relaxed class float-red]       sums in arrival order
+//   iadd   atomicAdd on ints, old value stored per thread    [ATOMG.ADD: turbo class atomic-int]        the sums repeat, the old values need not
+//   fred   atomicAdd on floats, result unused                [RED.ADD.F32: turbo class float-red]       sums in arrival order
 //   fatom  atomicAdd on floats, old value stored per thread  [ATOMG.ADD.F32: atomic-float, opt-in]
 //   dadd   atomicAdd on doubles, result unused               [RED.ADD.F64 or a compare-and-swap loop]
 //   cas    atomicCAS, first thread to arrive claims a slot   [ATOMG.CAS: atomic-swap, opt-in]

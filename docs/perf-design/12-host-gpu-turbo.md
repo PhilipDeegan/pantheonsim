@@ -1,7 +1,7 @@
-# Host-GPU mode, relaxed: kernels whose result is the card's own
+# Host-GPU mode, turbo: kernels whose result is the card's own
 
-Status: experimental, opt-in (`VGPU_HOST_GPU=relaxed`). Measured on one A10G in *Round sp59*
-([rounds/11-rounds-sp36-sp41.md](rounds/11-rounds-sp36-sp41.md#round-sp59-relaxed-host-gpu-mode-on-an-a10g)): over 59 programs of PolyBench/GPU, Rodinia
+Status: experimental, opt-in (`VGPU_HOST_GPU=turbo`). Measured on one A10G in *Round sp59*
+([rounds/11-rounds-sp36-sp41.md](rounds/11-rounds-sp36-sp41.md#round-sp59-turbo-host-gpu-mode-on-an-a10g)): over 59 programs of PolyBench/GPU, Rodinia
 and HeCBench the geometric mean speed-up is 1.23x against 1.12x for exact mode (summed wall time 1.75x against 1.20x), every program's output is the
 simulator's, and no kernel was refused for an instruction of no class. Sections 5 and 8 say what the card confirmed and what it changed.
 Tracking issue: pantheonsim #587. Read [09-host-gpu-spike.md](09-host-gpu-spike.md) first: this mode is the same machinery with a wider
@@ -14,19 +14,19 @@ that leaves behind: of the kernels the mode refused for their code, most held an
 instruction, packed half arithmetic or an atomic. Round sp44 measured how far the card is from the simulator on the approximate functions:
 4% to 25% of all float patterns differ, by one or two units in the last place.
 
-Relaxed mode sends those kernels to the card as well. What the program then gets is the card's value, which is what the program gets on
+Turbo mode sends those kernels to the card as well. What the program then gets is the card's value, which is what the program gets on
 real hardware, and which is close to the simulator's but not its bits. That is a different promise from exact mode's, so it is a different
 mode, and exact mode is byte for byte what it was: the same set, defaults, decisions and summary text (a unit test holds a copy of the set).
 
 ## 2. The classes
 
-Every instruction of a kernel is put in one class, once per kernel (`relaxed_class` in `include/vgpu/host_gpu.hpp`), and a kernel is
+Every instruction of a kernel is put in one class, once per kernel (`turbo_class` in `include/vgpu/host_gpu.hpp`), and a kernel is
 admitted by the classes it holds. It is still a whitelist: a mnemonic nobody named is `never`.
 
 | class | instructions | default | switch |
 |---|---|---|---|
 | exact | today's exact set | admitted | (cannot be switched off) |
-| mufu | every `MUFU` form, `RCP64H` and `RSQ64H` included | admitted | `VGPU_HOST_GPU_RELAXED_OFF=mufu` |
+| mufu | every `MUFU` form, `RCP64H` and `RSQ64H` included | admitted | `VGPU_HOST_GPU_TURBO_OFF=mufu` |
 | half | `HADD2`, `HMUL2`, `HFMA2`, `HSETP2`, `HSET2`, `HMNMX2` | admitted | `=half` |
 | float-red | `RED` / `REDG` on a float type (no value returned) | admitted | `=red` |
 | call | `CALL` and `RET`, when every call is relative, to a label inside the kernel's own code section | admitted | `=call` |
@@ -57,7 +57,7 @@ host_gpu_refused: kernel=<name> class=never|off|atomics insn=<the instruction as
 An integer atomic that returns the old value leaves the same memory whatever the order (the operations commute), but each thread's
 returned value depends on the order the threads arrived in. A program that uses the value as an index (stream compaction, a work
 queue) writes the same set of elements in another order on the card than in the simulator, and both are right. A float reduction adds in
-arrival order, so its sum differs in the last places from run to run. Relaxed mode admits both by default; `VGPU_HOST_GPU_RELAXED_OFF=atomics,red`
+arrival order, so its sum differs in the last places from run to run. Turbo mode admits both by default; `VGPU_HOST_GPU_TURBO_OFF=atomics,red`
 keeps them in the simulator when a reproducible result matters more than speed.
 
 A float atomic whose value is used, a compare-and-swap and an exchange are behind `VGPU_HOST_GPU_ATOMICS=1`. Section 2 of the spike found
@@ -75,18 +75,18 @@ diagnostics that switch the mode off, and `VGPU_HOST_GPU_MAX_MIB`.
 Three places were checked for an assumption that silently depended on the exact set:
 
 * **Calls.** The eligibility scan reads one code section. A kernel of the exact set could not call anything (the division idiom's slow
-  path is checked instruction by instruction). In relaxed mode a `CALL` is admitted only when it is relative and its label is an address
+  path is checked instruction by instruction). In turbo mode a `CALL` is admitted only when it is relative and its label is an address
   inside the section the scan read; a call through a register, to an absolute address, or into another section makes the kernel `never`,
   because it would run code nobody classed. Modules with external symbols were already refused. Recursion is the card's to run, on the
   card's own stack, as it is when the program runs natively.
 * **Kernels that do not return.** `cuCtxSynchronize` has no deadline, a running kernel cannot be cancelled, and while it runs the card's
   memory cannot be read back, so there is no fallback. In exact mode the card computes the simulator's bits, so a kernel loops on the card
-  exactly when it would loop in the simulator. In relaxed mode that argument is gone: a loop whose exit depends on a value the card
+  exactly when it would loop in the simulator. In turbo mode that argument is gone: a loop whose exit depends on a value the card
   computes differently, or a spin lock, is the card's to run. A correct program terminates on a real GPU, so the risk is the risk of running
   the program natively; what is new is that the simulator's own protection (`VGPU_MAX_STEPS`) is one of the diagnostics that switch the mode
-  off. The guard is `VGPU_HOST_GPU_TIMEOUT` (seconds, default 600 in relaxed mode, none in exact mode): a launch that has been on the card
+  off. The guard is `VGPU_HOST_GPU_TIMEOUT` (seconds, default 600 in turbo mode, none in exact mode): a launch that has been on the card
   longer makes the process say so and end with status 124. Spin locks and compare-and-swap loops are in the opt-in class as well.
-* **The ski-rental account and the bans** count time, not opcodes: nothing to change. The simulator's time for a kernel that relaxed
+* **The ski-rental account and the bans** count time, not opcodes: nothing to change. The simulator's time for a kernel that turbo
   mode admits is learnt the same way (two simulated launches, or one long one).
 
 Two bugs of exact mode's scan were found on the way:
@@ -96,8 +96,8 @@ Two bugs of exact mode's scan were found on the way:
   time. Fixed for both modes.
 * `exact_mods_allowed` looks for the modifiers `F32`, `F64`, `F16` on a `RED`, but the decoder prints a float reduction's type as one
   modifier, `F32.FTZ.RN`. So exact mode admits float reductions on sm_75 to sm_89 (on sm_90 and later the mnemonic is `REDG`, which exact
-  mode does not name). Fixed in a commit of its own, so that it can be judged apart from relaxed mode: exact mode now refuses them, which
-  is the one change to exact mode's set, and it is a change towards what the set was written to be. Relaxed mode admits them as its
+  mode does not name). Fixed in a commit of its own, so that it can be judged apart from turbo mode: exact mode now refuses them, which
+  is the one change to exact mode's set, and it is a change towards what the set was written to be. Turbo mode admits them as its
   `float-red` class. Whether a card run had ever offloaded such a kernel in exact mode was not checked; sp42's verify runs found no
   exact-set kernel that differed, which says the programs sampled there hold none, or that their sums happened to agree.
 
@@ -111,7 +111,7 @@ in the gate. The price of the fix is that a verify run pushes all live memory be
 gets the card's values and differences can compound over launches; that is the mode, and only an end-to-end comparison of the program's
 output (the benchmark harness, section 6) says what it amounts to.
 
-Exact mode compares bytes. Relaxed mode compares the same live ranges word by word (`include/vgpu/host_gpu_tol.hpp`), after skipping
+Exact mode compares bytes. Turbo mode compares the same live ranges word by word (`include/vgpu/host_gpu_tol.hpp`), after skipping
 64 KiB chunks that are equal. For each 4-byte word, aligned by address, whose bits differ:
 
 1. as binary32: pass when `|card - sim| <= atol + rtol * |sim|`;
@@ -130,14 +130,14 @@ different, outside, the largest absolute and relative difference, and the first 
 
 ```
 host_gpu_verify: in_set_identical=.. in_set_different=.. other_identical=.. other_different=..     (bytes, as in exact mode; "in set" = admitted)
-host_gpu_relaxed: mode=relaxed launches_card=.. launches_sim=.. card_s=.. sim_s=.. words_compared=.. words_different=.. words_outside=.. words_subnormal=.. kernels_outside=.. max_abs=.. max_rel=..
+host_gpu_turbo: mode=turbo launches_card=.. launches_sim=.. card_s=.. sim_s=.. words_compared=.. words_different=.. words_outside=.. words_subnormal=.. kernels_outside=.. max_abs=.. max_rel=..
 host_gpu_refusals: refused_never=.. refused_atomics=.. refused_off=.. refused_exact=.. refused_safety=.. too_small=.. failed=..
 host_gpu_outside: kernel=.. words_compared=.. words_different=.. words_outside=.. max_abs=.. max_rel=.. first=0x<address>:card=0x<word>:sim=0x<word>     (one per kernel with a word outside)
 ```
 
-`host_gpu_relaxed:` and `host_gpu_refusals:` are printed by relaxed mode whenever the summary is (not under `VGPU_QUIET` alone), verify or
+`host_gpu_turbo:` and `host_gpu_refusals:` are printed by turbo mode whenever the summary is (not under `VGPU_QUIET` alone), verify or
 not: `launches_card`, `launches_sim`, `card_s` and `sim_s` are the coverage numbers of a plain run. Exact mode prints the two lines only
-with `VGPU_HOST_GPU_LOG`, so that its summary is unchanged; there `refused_exact` counts the launches whose kernel relaxed mode would take.
+with `VGPU_HOST_GPU_LOG`, so that its summary is unchanged; there `refused_exact` counts the launches whose kernel turbo mode would take.
 `max_abs` and `max_rel` are taken under the reading that passed (binary32 for a word outside tolerance, when both sides are finite), and
 `max_rel` only over differences above `atol`: below it the absolute term alone passes the word, and the ratio of two near-zero readings
 (the low bits of a double, two small integers) says nothing.
@@ -179,9 +179,9 @@ Memory has no types, so the compare guesses, and these are the guesses that can 
 
 ## 5. What the card said (Round sp59, one A10G, nvcc 13.0)
 
-1. `nvidia/tests/e2e/run_host_gpu.sh`, `run_host_gpu_stub.sh` and `tools/card-ci/run-card-ci.sh` pass: the expf kernel runs on the card in relaxed mode,
+1. `nvidia/tests/e2e/run_host_gpu.sh`, `run_host_gpu_stub.sh` and `tools/card-ci/run-card-ci.sh` pass: the expf kernel runs on the card in turbo mode,
    verify finds no word outside the default tolerance (2.1 M of 132 M words differ, by at most 1.2e-7 relative), exact is unchanged.
-2. `tools/probes/hostgpu_relaxed_card_probes.sh sfu <out>`: `tanh` differs on 5.6% of all float patterns and is outside the default tolerance on 86,770 of
+2. `tools/probes/hostgpu_turbo_card_probes.sh sfu <out>`: `tanh` differs on 5.6% of all float patterns and is outside the default tolerance on 86,770 of
    them (largest difference 8e-6). `sin` and `cos` are another matter: the card's are fixed-point, about 3.6e-7 absolute error, so a sine near zero is far
    outside a relative tolerance (37.6% of the inputs of ordinary size are outside the default for `sin`, 0.3% for `cos`), and for arguments of many turns
    the simulator's own value is not the card's at all. **A kernel that takes `sinf` or `cosf` needs `VGPU_HOST_GPU_ATOL=1e-6` to verify clean**, and its
@@ -190,13 +190,13 @@ Memory has no types, so the compare guesses, and these are the guesses that can 
    from run to run; compare-and-swap and exchange never repeat. The defaults stand.
 4. `... tensor <out> <build>`: `HMMA`, `IMMA`, `DMMA` (and `BMMA`, not yet named) gave the simulator's bits in 394 launches, on inputs whose products
    are exact; an accumulation that rounds was not tested.
-5. `tools/bench/hostgpu/run.py` (section 6) over the three corpora: the round's tables. Relaxed adds five programs to exact's (one of them 78x); the
+5. `tools/bench/hostgpu/run.py` (section 6) over the three corpora: the round's tables. Turbo adds five programs to exact's (one of them 78x); the
    `never` class refused nothing; `extra` was met in one kernel, which verified clean. What limits both modes is the first-launch rule, not the classes.
 
 ## 6. The benchmark harness
 
 `tools/bench/hostgpu/run.py` runs the prebuilt programs of `tools/bench/real` (PolyBench/GPU, Rodinia, the reduced HeCBench list; the same
-layout, arguments and scratch directories) as sim, exact and relaxed, `--runs` times each, interleaved, and optionally once as relaxed with
+layout, arguments and scratch directories) as sim, exact and turbo, `--runs` times each, interleaved, and optionally once as turbo with
 `VGPU_HOST_GPU_VERIFY=all`. It writes JSON and a markdown table: wall time, speed-up over sim, launches on the card of all launches, seconds
 on the card and in the simulator, launches kept in the simulator by reason, verify's counts, and the program's output against the sim
 run's: identical, numeric (the same words, every number with a fraction or exponent within `atol + rtol * |sim|`; integers and hashes
@@ -206,7 +206,7 @@ The form `exactdiv` is exact with `VGPU_HOST_GPU_DIV=1`; a program slower than `
 
 ```
 python3 tools/bench/hostgpu/run.py --build build --corp /path/to/corp --gpu nvidia/a10g --runs 3 \
-    --forms sim,exact,relaxed,verify --timeout 600 --json hostgpu.json --md hostgpu.md
+    --forms sim,exact,turbo,verify --timeout 600 --json hostgpu.json --md hostgpu.md
 ```
 
 ## 7. Tests
@@ -215,7 +215,7 @@ python3 tools/bench/hostgpu/run.py --build build --corp /path/to/corp --gpu nvid
 |---|---|---|
 | `test_host_gpu_logic` | every CI job | the mode names; exact's set against a frozen copy and every decoder mnemonic; each class; joined modifiers; calls; the switches and the off list |
 | `test_host_gpu_tol` | every CI job | the rule, the three readings, NaN, infinity, denormals, signed zero, range ends, the float-array hole, parsing of the tolerances |
-| `e2e_host_gpu_stub` | CI jobs with nvcc (a stand-in driver, no card) | relaxed reaches the card path for expf, rcp and division beside expf; exact does not; the lines for scripts; the atomics opt-in and the off list; unreadable values; verify against a card that computes nothing; the timeout; a contended reduction under verify |
+| `e2e_host_gpu_stub` | CI jobs with nvcc (a stand-in driver, no card) | turbo reaches the card path for expf, rcp and division beside expf; exact does not; the lines for scripts; the atomics opt-in and the off list; unreadable values; verify against a card that computes nothing; the timeout; a contended reduction under verify |
 | `hostgpu_bench_selftest` | every CI job | the harness: parsing, output classes, the table, a hang that is killed |
 | `e2e_host_gpu`, `tools/card-ci/run-card-ci.sh` | a machine with a card only (passed on an A10G, Round sp59) | section 5, item 1 |
 

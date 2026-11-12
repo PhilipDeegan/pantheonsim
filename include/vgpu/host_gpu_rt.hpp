@@ -1,5 +1,5 @@
 // Host-GPU mode, the part that talks to the machine's real driver (docs/perf-design/09-host-gpu-spike.md). Off unless the program
-// runs with VGPU_HOST_GPU=exact or =relaxed (docs/perf-design/12-host-gpu-relaxed.md); the decisions are in vgpu/host_gpu.hpp.
+// runs with VGPU_HOST_GPU=exact or =turbo (docs/perf-design/12-host-gpu-turbo.md); the decisions are in vgpu/host_gpu.hpp.
 #pragma once
 
 #include <cstdint>
@@ -20,14 +20,14 @@ struct Stats {
   // VGPU_HOST_GPU_VERIFY: launches run on both, by whether the kernel passed the exact scan and whether the bytes were equal.
   uint64_t pushed_bytes = 0, pulled_bytes = 0;   // moved to and from the card
   uint64_t same_exact_set = 0, differ_exact_set = 0, same_other = 0, differ_other = 0;
-  // The machine-readable lines (host_gpu_relaxed:, host_gpu_refusals:). `card_runs` counts every launch that ran on the card, the ones a verify run
+  // The machine-readable lines (host_gpu_turbo:, host_gpu_refusals:). `card_runs` counts every launch that ran on the card, the ones a verify run
   // repeats in the simulator included; the seconds are wall time of the card path (copies, launch, wait) and of the simulator's launches.
   uint64_t card_runs = 0;
   double card_seconds = 0, sim_seconds = 0;
-  // Launches kept in the simulator for their kernel's code, by why (vgpu/host_gpu.hpp RelaxedRefusal); `refused_exact` is exact mode's count of
-  // launches whose kernel relaxed mode would admit with its default switches.
+  // Launches kept in the simulator for their kernel's code, by why (vgpu/host_gpu.hpp TurboRefusal); `refused_exact` is exact mode's count of
+  // launches whose kernel turbo mode would admit with its default switches.
   uint64_t refused_never = 0, refused_atomics = 0, refused_off = 0, refused_exact = 0;
-  TolReport tol;   // relaxed mode's verify: every compared launch
+  TolReport tol;   // turbo mode's verify: every compared launch
 };
 
 class Runtime {

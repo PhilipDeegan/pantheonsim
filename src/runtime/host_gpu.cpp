@@ -1,6 +1,6 @@
 // Host-GPU mode, `exact` (docs/perf-design/09-host-gpu-spike.md): a launch whose kernel passes the eligibility scan and whose
 // size rule says the card path wins runs on the machine's real GPU, on the simulator's own device memory.
-// `relaxed` (docs/perf-design/12-host-gpu-relaxed.md) is the same machinery with a wider eligibility scan (kernels whose result is the card's, not the
+// `turbo` (docs/perf-design/12-host-gpu-turbo.md) is the same machinery with a wider eligibility scan (kernels whose result is the card's, not the
 // simulator's bits) and a verify that compares by tolerance; every safety check, the size rule and the residency protocol are shared.
 //
 // How, in this first form (write-through, no state between launches): the simulator's device memory stays the truth. For a launch
@@ -162,22 +162,22 @@ struct Runtime::Impl : CardGate {
     bool runnable = false;   // everything but the instruction scan passed: the card could run it
     bool back_edge = false;  // the code has a loop (a branch to itself or an earlier instruction)
     Refused kind = Refused::No;
-    RelaxedRefusal rr = RelaxedRefusal::None;   // Code: which class of instruction (in exact mode: what relaxed mode would say with its defaults)
+    TurboRefusal rr = TurboRefusal::None;   // Code: which class of instruction (in exact mode: what turbo mode would say with its defaults)
     const char* why = "";                       // the reason given on a later launch of the same kernel
   };
   Mode mode = Mode::Exact;
-  RelaxedSwitches sw;      // relaxed mode's switches; the defaults in exact mode (where they only class the refusals for the summary)
-  Tolerance tol;           // relaxed mode's verify (VGPU_HOST_GPU_ATOL, VGPU_HOST_GPU_RTOL)
+  TurboSwitches sw;      // turbo mode's switches; the defaults in exact mode (where they only class the refusals for the summary)
+  Tolerance tol;           // turbo mode's verify (VGPU_HOST_GPU_ATOL, VGPU_HOST_GPU_RTOL)
   struct KernelTol {
     TolReport rep;
     unsigned said = 0;     // launches outside tolerance already reported without VGPU_HOST_GPU_LOG
   };
   std::map<std::string, KernelTol> tol_by_kernel;
 
-  // VGPU_HOST_GPU_TIMEOUT (seconds; relaxed mode: 600 unless set, exact mode: none unless set). cuCtxSynchronize has no deadline, a kernel on the card
+  // VGPU_HOST_GPU_TIMEOUT (seconds; turbo mode: 600 unless set, exact mode: none unless set). cuCtxSynchronize has no deadline, a kernel on the card
   // cannot be cancelled, and with a kernel still running the card's memory cannot be read back, so there is nothing to fall back to: when a launch has
   // been on the card for longer than the limit the process says so and ends, instead of hanging without a word. Exact mode had no such launch to fear
-  // beyond the program's own (the card computes the simulator's bits, so it loops exactly when the simulator would); in relaxed mode a loop that waits
+  // beyond the program's own (the card computes the simulator's bits, so it loops exactly when the simulator would); in turbo mode a loop that waits
   // on a value the card computes differently, or on a lock another thread never gives back, is the card's to run.
   struct Watchdog {
     std::mutex mu;
@@ -487,7 +487,7 @@ struct Runtime::Impl : CardGate {
     bool ok = false;
     const char* why = "";
     Refused kind = Refused::No;
-    RelaxedRefusal rr = RelaxedRefusal::None;
+    TurboRefusal rr = TurboRefusal::None;
     uint64_t instrs = 0;
     bool runnable = false, back_edge = false;
   };
@@ -526,8 +526,8 @@ struct Runtime::Impl : CardGate {
       return d;
     };
     if (const auto it = eligible.find(key); it != eligible.end()) return decision_of(it->second);
-    const bool relaxed = mode == Mode::Relaxed;
-    const bool say = logging() && !relaxed;   // exact mode's log lines, as they always were; relaxed mode says its own below
+    const bool turbo = mode == Mode::Turbo;
+    const bool say = logging() && !turbo;   // exact mode's log lines, as they always were; turbo mode says its own below
     Verdict v;
     bool ok = true;
     const char* why = "";
@@ -545,14 +545,14 @@ struct Runtime::Impl : CardGate {
     if (ok) {
       const sass::Code& code = m.code[ci->second];
       v.instrs = code.count;
-      // The classes of the code (vgpu/host_gpu.hpp relaxed_class) and its branches. Nothing is printed here and exact mode decides nothing by it.
+      // The classes of the code (vgpu/host_gpu.hpp turbo_class) and its branches. Nothing is printed here and exact mode decides nothing by it.
       const uint64_t code_lo = code.count ? code.instr(0).pc : 0, code_hi = code.count ? code.instr(code.count - 1).pc : 0;
       for (size_t i = 0; i < code.count; ++i) {
         const sass::Instr& ins = code.instr(i);
         if (ins.op == sass::Op::BRA)
           for (const auto& o : ins.src)
             if (o.kind == sass::Kind::Label) branches.emplace_back(ins.pc, static_cast<uint64_t>(o.imm));
-        InsnClass c = relaxed_class(ins.mnemonic, ins.mods);
+        InsnClass c = turbo_class(ins.mnemonic, ins.mods);
         if (ins.op == sass::Op::CALL && c == InsnClass::Call) {
           // The scan has seen this section only: a call that leaves it (another section, a register, an absolute address) runs code nobody classed.
           const bool label = !ins.src.empty() && ins.src[0].kind == sass::Kind::Label;
@@ -609,21 +609,21 @@ struct Runtime::Impl : CardGate {
     }
     if (runnable_here) {
       const bool exact_ok = ok;
-      v.rr = exact_ok ? RelaxedRefusal::None : relaxed_refusal(classes, sw);
-      if (relaxed) ok = v.rr == RelaxedRefusal::None;   // (a kernel of the exact set, the division idiom included, is admitted whatever is switched off)
+      v.rr = exact_ok ? TurboRefusal::None : turbo_refusal(classes, sw);
+      if (turbo) ok = v.rr == TurboRefusal::None;   // (a kernel of the exact set, the division idiom included, is admitted whatever is switched off)
       if (!ok) {
         v.kind = Refused::Code;
-        static const char* const kRelaxedWhy[] = {"", "an instruction of no relaxed class", "a class switched off with VGPU_HOST_GPU_RELAXED_OFF",
+        static const char* const kTurboWhy[] = {"", "an instruction of no turbo class", "a class switched off with VGPU_HOST_GPU_TURBO_OFF",
                                                   "an atomic that needs VGPU_HOST_GPU_ATOMICS=1"};
-        why = relaxed ? kRelaxedWhy[static_cast<unsigned>(v.rr)] : why;
-        v.why = relaxed ? why : "kernel code not in the exact set (cached)";
+        why = turbo ? kTurboWhy[static_cast<unsigned>(v.rr)] : why;
+        v.why = turbo ? why : "kernel code not in the exact set (cached)";
       }
-      if (relaxed) {
-        // One line per kernel, for the benchmark to list what relaxed mode still cannot send: said like the summary (not under VGPU_QUIET alone).
+      if (turbo) {
+        // One line per kernel, for the benchmark to list what turbo mode still cannot send: said like the summary (not under VGPU_QUIET alone).
         static const char* const kRefusalName[] = {"", "never", "off", "atomics"};
         if (!ok && (!quiet() || logging()))
           std::fprintf(stderr, "host_gpu_refused: kernel=%s class=%s insn=%s\n", fn.name.c_str(), kRefusalName[static_cast<unsigned>(v.rr)],
-                       (v.rr == RelaxedRefusal::Never ? first_never : first_gated).c_str());
+                       (v.rr == TurboRefusal::Never ? first_never : first_gated).c_str());
         if (logging()) {
           std::string held;
           for (unsigned c = 0; c < kInsnClasses; ++c)
@@ -667,11 +667,11 @@ void print_summary(Runtime::Impl* im) {
   // VGPU_QUIET silences the prose, not a report that was asked for: VGPU_HOST_GPU_VERIFY and VGPU_HOST_GPU_LOG each exist to be read at the end of the run.
   if (quiet() && !im->verify && !logging()) return;
   const Stats& s = im->stats;
-  const bool relaxed = im->mode == Mode::Relaxed;
+  const bool turbo = im->mode == Mode::Turbo;
   const auto ull = [](uint64_t v) { return static_cast<unsigned long long>(v); };
-  if (relaxed)
+  if (turbo)
     std::fprintf(stderr,
-                 "host_gpu: %llu launches ran on the card, %llu in the simulator (%llu kernels not admitted by relaxed mode, %llu too small, %llu unsupported launch shapes, %llu failed on the card)\n",
+                 "host_gpu: %llu launches ran on the card, %llu in the simulator (%llu kernels not admitted by turbo mode, %llu too small, %llu unsupported launch shapes, %llu failed on the card)\n",
                  ull(s.offloaded), ull(s.simulated), ull(s.refused_kernel), ull(s.refused_size), ull(s.refused_launch), ull(s.failed));
   else
     std::fprintf(stderr,
@@ -681,21 +681,21 @@ void print_summary(Runtime::Impl* im) {
   if (im->verify)   // (the second line is for scripts: the card CI parses it, not the prose above)
     std::fprintf(stderr, "host_gpu_verify: in_set_identical=%llu in_set_different=%llu other_identical=%llu other_different=%llu\n", ull(s.same_exact_set),
                  ull(s.differ_exact_set), ull(s.same_other), ull(s.differ_other));
-  if (im->verify && !relaxed)
+  if (im->verify && !turbo)
     std::fprintf(stderr, "host_gpu: verify: kernels in the exact set: %llu identical, %llu different; other kernels: %llu identical, %llu different\n",
                  ull(s.same_exact_set), ull(s.differ_exact_set), ull(s.same_other), ull(s.differ_other));
-  // The two lines for scripts (tools/bench/hostgpu/run.py): always in relaxed mode; in exact mode only with VGPU_HOST_GPU_LOG, so that exact mode's
+  // The two lines for scripts (tools/bench/hostgpu/run.py): always in turbo mode; in exact mode only with VGPU_HOST_GPU_LOG, so that exact mode's
   // summary is what it was. launches_card counts every launch that ran on the card, the ones a verify run repeats in the simulator included.
-  if (relaxed || logging()) {
+  if (turbo || logging()) {
     uint64_t kernels_outside = 0;
     for (const auto& [k, kt] : im->tol_by_kernel) kernels_outside += kt.rep.outside > 0;
     std::fprintf(stderr,
-                 "host_gpu_relaxed: mode=%s launches_card=%llu launches_sim=%llu card_s=%.6f sim_s=%.6f words_compared=%llu words_different=%llu words_outside=%llu words_subnormal=%llu kernels_outside=%llu max_abs=%.9g max_rel=%.9g\n",
-                 relaxed ? "relaxed" : "exact", ull(s.card_runs), ull(s.simulated), s.card_seconds, s.sim_seconds, ull(s.tol.words), ull(s.tol.different), ull(s.tol.outside),
+                 "host_gpu_turbo: mode=%s launches_card=%llu launches_sim=%llu card_s=%.6f sim_s=%.6f words_compared=%llu words_different=%llu words_outside=%llu words_subnormal=%llu kernels_outside=%llu max_abs=%.9g max_rel=%.9g\n",
+                 turbo ? "turbo" : "exact", ull(s.card_runs), ull(s.simulated), s.card_seconds, s.sim_seconds, ull(s.tol.words), ull(s.tol.different), ull(s.tol.outside),
                  ull(s.tol.subnormal), ull(kernels_outside), s.tol.max_abs, s.tol.max_rel);
     std::fprintf(stderr, "host_gpu_refusals: refused_never=%llu refused_atomics=%llu refused_off=%llu refused_exact=%llu refused_safety=%llu too_small=%llu failed=%llu\n",
                  ull(s.refused_never), ull(s.refused_atomics), ull(s.refused_off), ull(s.refused_exact), ull(s.refused_launch), ull(s.refused_size), ull(s.failed));
-    if (relaxed && im->verify)
+    if (turbo && im->verify)
       for (const auto& [k, kt] : im->tol_by_kernel)
         if (kt.rep.outside)
           std::fprintf(stderr, "host_gpu_outside: kernel=%s words_compared=%llu words_different=%llu words_outside=%llu max_abs=%.9g max_rel=%.9g first=0x%llx:card=0x%08x:sim=0x%08x\n",
@@ -711,7 +711,7 @@ Runtime* Runtime::for_device(const DeviceProfile& profile, int ordinal) {
   static Runtime* rt = nullptr;
   std::call_once(once, [&] {
     const char* mode_text = std::getenv("VGPU_HOST_GPU");
-    if (!mode_text_is_known(mode_text)) std::fprintf(stderr, "host_gpu: VGPU_HOST_GPU=%s is not a mode (off, exact or relaxed); mode off\n", mode_text);
+    if (!mode_text_is_known(mode_text)) std::fprintf(stderr, "host_gpu: VGPU_HOST_GPU=%s is not a mode (off, exact or turbo); mode off\n", mode_text);
     const Mode mode = mode_from_text(mode_text);
     if (mode == Mode::Off) return;
     // Said even under VGPU_QUIET: someone who asked for the mode and got none must be told why.
@@ -724,16 +724,16 @@ Runtime* Runtime::for_device(const DeviceProfile& profile, int ordinal) {
       if (!quiet()) std::fprintf(stderr, "host_gpu: only NVIDIA devices; mode off\n");
       return;
     }
-    // Relaxed mode's own switches. A value that cannot be read turns the mode off with a message (said even under VGPU_QUIET): someone who asked for a
+    // Turbo mode's own switches. A value that cannot be read turns the mode off with a message (said even under VGPU_QUIET): someone who asked for a
     // tolerance or for a class to be off must not get a run under another.
-    RelaxedSwitches sw;
+    TurboSwitches sw;
     Tolerance tol;
-    double timeout_s = mode == Mode::Relaxed ? 600 : 0;
-    if (mode == Mode::Relaxed) {
+    double timeout_s = mode == Mode::Turbo ? 600 : 0;
+    if (mode == Mode::Turbo) {
       if (const char* v = std::getenv("VGPU_HOST_GPU_ATOMICS"); v && *v && *v != '0') sw.atomics = true;
       std::string bad;
-      if (!parse_relaxed_off(std::getenv("VGPU_HOST_GPU_RELAXED_OFF"), &sw.off, &bad)) {
-        std::fprintf(stderr, "host_gpu: VGPU_HOST_GPU_RELAXED_OFF: %s is not a class (mufu, tensor, half, call, atomics, red, extra); mode off\n", bad.c_str());
+      if (!parse_turbo_off(std::getenv("VGPU_HOST_GPU_TURBO_OFF"), &sw.off, &bad)) {
+        std::fprintf(stderr, "host_gpu: VGPU_HOST_GPU_TURBO_OFF: %s is not a class (mufu, tensor, half, call, atomics, red, extra); mode off\n", bad.c_str());
         return;
       }
       const std::pair<const char*, double*> tolerances[] = {{"VGPU_HOST_GPU_ATOL", &tol.atol}, {"VGPU_HOST_GPU_RTOL", &tol.rtol}};
@@ -789,7 +789,7 @@ void Runtime::before_simulated(MemoryManager& mem) {
     // Verifying: this launch already ran on the card and the simulator runs it now, on its own memory, which is the truth. The card's copy is given up
     // (nothing is pulled). Until Round sp59 it was kept valid, which was wrong twice over: the simulator then ran its launch through the gate's slow
     // path, where an atomic of one host thread could lose the update of another (HeCBench atomicAggregate printed FAIL under VERIFY with 4 host threads
-    // and PASS with 1), and the next launch on the card started from the card's own earlier results instead of the simulator's, so in relaxed mode the
+    // and PASS with 1), and the next launch on the card started from the card's own earlier results instead of the simulator's, so in turbo mode the
     // differences of one launch carried into the next. The price is that a verify run pushes all live memory before every launch.
     impl_->verify_card_ran = false;
     for (auto& [b, a] : impl_->res) {
@@ -827,10 +827,10 @@ void Runtime::note_simulated(const ptx::EntryFn& fn, const exec::LaunchConfig& c
   }
   Impl::Pending& p = impl_->pending;
   if (p.active && mem && p.kernel == fn.name) {
-    const bool relaxed = impl_->mode == Mode::Relaxed;
+    const bool turbo = impl_->mode == Mode::Turbo;
     bool same = true;
     uint64_t bad_chunks = 0;
-    TolReport rep;   // relaxed mode: the differing chunks word by word (vgpu/host_gpu_tol.hpp); equal chunks only add to the count of words
+    TolReport rep;   // turbo mode: the differing chunks word by word (vgpu/host_gpu_tol.hpp); equal chunks only add to the count of words
     std::vector<uint8_t> sim_bytes;
     for (size_t i = 0; i < p.ranges.size(); ++i) {
       sim_bytes.resize(p.ranges[i].second);
@@ -840,15 +840,15 @@ void Runtime::note_simulated(const ptx::EntryFn& fn, const exec::LaunchConfig& c
         if (std::memcmp(sim_bytes.data() + c, p.card[i].data() + c, n) != 0) {
           same = false;
           ++bad_chunks;
-          if (relaxed) compare_words(p.card[i].data() + c, sim_bytes.data() + c, p.ranges[i].first + c, n, impl_->tol, rep);
-        } else if (relaxed) {
+          if (turbo) compare_words(p.card[i].data() + c, sim_bytes.data() + c, p.ranges[i].first + c, n, impl_->tol, rep);
+        } else if (turbo) {
           rep.words += tol_word_count(p.ranges[i].first + c, n);
         }
       }
     }
     Stats& st = impl_->stats;
     ++(p.in_exact_set ? (same ? st.same_exact_set : st.differ_exact_set) : (same ? st.same_other : st.differ_other));
-    if (relaxed) {
+    if (turbo) {
       st.tol.add(rep);
       Impl::KernelTol& kt = impl_->tol_by_kernel[fn.name];
       kt.rep.add(rep);
@@ -887,14 +887,14 @@ bool Runtime::try_launch(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, 
   const char* const why = dec.why;
   const uint64_t static_instrs = dec.instrs;
   const bool runnable = dec.runnable, back_edge = dec.back_edge;
-  const bool in_exact_set = dec.ok;   // (in relaxed mode: admitted by its classes)
+  const bool in_exact_set = dec.ok;   // (in turbo mode: admitted by its classes)
   im.last.in_set = in_exact_set;
   const uint64_t blocks = uint64_t{cfg.grid[0]} * cfg.grid[1] * cfg.grid[2];
   // (The driver is not started here, whatever the kernel: only a launch that has been decided to go to the card starts it, below, at await_start.)
   if (!in_exact_set && !(im.verify == 2 && runnable)) {
     if (dec.kind == Impl::Refused::Code) {
       ++im.stats.refused_kernel;
-      ++(dec.rr == RelaxedRefusal::Never ? im.stats.refused_never : dec.rr == RelaxedRefusal::Off ? im.stats.refused_off : dec.rr == RelaxedRefusal::Atomics ? im.stats.refused_atomics : im.stats.refused_exact);
+      ++(dec.rr == TurboRefusal::Never ? im.stats.refused_never : dec.rr == TurboRefusal::Off ? im.stats.refused_off : dec.rr == TurboRefusal::Atomics ? im.stats.refused_atomics : im.stats.refused_exact);
     } else {
       ++im.stats.refused_launch;
     }

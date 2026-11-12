@@ -21,21 +21,21 @@
 
 namespace vgpu::hostgpu {
 
-enum class Mode { Off, Exact, Relaxed };
+enum class Mode { Off, Exact, Turbo };
 
-// "exact" and "relaxed" turn the mode on; anything else, empty or null is off. (`approx` is not a mode: a typo must not turn one on.)
-// Relaxed (docs/perf-design/12-host-gpu-relaxed.md) also sends kernels to the card whose results are the card's own and not the simulator's bits.
+// "exact" and "turbo" turn the mode on; anything else, empty or null is off. (`approx` is not a mode: a typo must not turn one on.)
+// Turbo (docs/perf-design/12-host-gpu-turbo.md) also sends kernels to the card whose results are the card's own and not the simulator's bits.
 inline Mode mode_from_text(const char* text) {
   if (!text) return Mode::Off;
   const std::string t(text);
-  return t == "exact" ? Mode::Exact : t == "relaxed" ? Mode::Relaxed : Mode::Off;
+  return t == "exact" ? Mode::Exact : t == "turbo" ? Mode::Turbo : Mode::Off;
 }
 
-// A mode value that is none of off, exact and relaxed (a typo, or `approx`, which is not a mode) must be said, never read as off in silence.
+// A mode value that is none of off, exact and turbo (a typo, or `approx`, which is not a mode) must be said, never read as off in silence.
 inline bool mode_text_is_known(const char* text) {
   if (!text || !*text) return true;
   const std::string t(text);
-  return t == "off" || t == "exact" || t == "relaxed" || t == "0";
+  return t == "off" || t == "exact" || t == "turbo" || t == "0";
 }
 
 // The switches of diagnostics that only the simulator can give: with any of them on the mode refuses to start (08 section 3), never quietly drops them.
@@ -89,7 +89,7 @@ inline bool exact_mnemonic_allowed(const std::string& m) {
 // Modifiers that turn an allowed mnemonic into an order- or implementation-dependent one: a floating-point reduction adds in
 // whatever order the blocks arrive, and a reduction on a float is not the integer one.
 // The decoder prints a float type and its rounding as ONE modifier ("F32.FTZ.RN", "F16x2.RN", "F32x2.FTZ.RN"), so the dot-separated parts are
-// looked at, and a type by how it starts. (Until relaxed mode was added this compared whole modifiers with "F32", "F64" and "F16", which the decoder
+// looked at, and a type by how it starts. (Until turbo mode was added this compared whole modifiers with "F32", "F64" and "F16", which the decoder
 // never prints alone: a float reduction passed as an integer one on sm_75 to sm_89. On sm_90 and later the mnemonic is REDG, which is not in the set.)
 inline bool exact_mods_allowed(const std::string& mnemonic, const std::vector<std::string>& mods) {
   if (mnemonic == "RED") {
@@ -213,8 +213,8 @@ inline CodeInsn::Kind classify_for_idiom(const std::string& mnemonic, const std:
   return exact_mnemonic_allowed(mnemonic) ? K::Other : K::Memory;
 }
 
-// ---- relaxed mode: what a kernel's code is made of (docs/perf-design/12-host-gpu-relaxed.md) ------------------------------------------------
-// VGPU_HOST_GPU=relaxed also sends kernels to the card whose result is the card's and not the simulator's bits. Every instruction of a kernel is put in
+// ---- turbo mode: what a kernel's code is made of (docs/perf-design/12-host-gpu-turbo.md) ------------------------------------------------
+// VGPU_HOST_GPU=turbo also sends kernels to the card whose result is the card's and not the simulator's bits. Every instruction of a kernel is put in
 // one class, once, and the mode admits a kernel by the classes it holds. It stays a whitelist: a mnemonic that is not named below is Never.
 enum class InsnClass : uint8_t {
   Exact,       // today's exact set
@@ -259,7 +259,7 @@ inline bool mods_undecoded(const std::vector<std::string>& mods) {
   return any_mod_part(mods, [](const std::string& p) { return p[0] == '('; });
 }
 
-inline InsnClass relaxed_class(const std::string& mnemonic, const std::vector<std::string>& mods) {
+inline InsnClass turbo_class(const std::string& mnemonic, const std::vector<std::string>& mods) {
   using C = InsnClass;
   const auto is_one_of = [&](std::initializer_list<const char*> names) {
     for (const char* n : names)
@@ -300,13 +300,13 @@ inline bool call_stays_inside(bool relative, bool to_label, int64_t target, uint
 using ClassMask = uint32_t;
 inline constexpr ClassMask class_bit(InsnClass c) { return ClassMask{1} << static_cast<unsigned>(c); }
 
-struct RelaxedSwitches {
+struct TurboSwitches {
   bool atomics = false;     // VGPU_HOST_GPU_ATOMICS=1: float atomics with a returned value, CAS, CAST.SPIN and EXCH
-  ClassMask off = 0;        // VGPU_HOST_GPU_RELAXED_OFF: classes switched off for an experiment
+  ClassMask off = 0;        // VGPU_HOST_GPU_TURBO_OFF: classes switched off for an experiment
 };
 
-// VGPU_HOST_GPU_RELAXED_OFF=mufu,tensor,half,call,atomics,red,extra (a comma list). False, with the bad name in *bad, for anything else.
-inline bool parse_relaxed_off(const char* text, ClassMask* off, std::string* bad = nullptr) {
+// VGPU_HOST_GPU_TURBO_OFF=mufu,tensor,half,call,atomics,red,extra (a comma list). False, with the bad name in *bad, for anything else.
+inline bool parse_turbo_off(const char* text, ClassMask* off, std::string* bad = nullptr) {
   *off = 0;
   if (!text) return true;
   const std::string t(text);
@@ -330,18 +330,18 @@ inline bool parse_relaxed_off(const char* text, ClassMask* off, std::string* bad
   return true;
 }
 
-// Why relaxed mode keeps a kernel in the simulator, by the classes of its code. The first that applies, in this order.
-enum class RelaxedRefusal : uint8_t {
+// Why turbo mode keeps a kernel in the simulator, by the classes of its code. The first that applies, in this order.
+enum class TurboRefusal : uint8_t {
   None,      // admitted
   Never,     // an instruction outside every class
-  Off,       // a class switched off with VGPU_HOST_GPU_RELAXED_OFF
+  Off,       // a class switched off with VGPU_HOST_GPU_TURBO_OFF
   Atomics,   // a float atomic with a returned value, a CAS or an EXCH, without VGPU_HOST_GPU_ATOMICS=1
 };
-inline RelaxedRefusal relaxed_refusal(ClassMask classes, const RelaxedSwitches& sw) {
-  if (classes & class_bit(InsnClass::Never)) return RelaxedRefusal::Never;
-  if (classes & sw.off) return RelaxedRefusal::Off;
-  if (!sw.atomics && (classes & (class_bit(InsnClass::AtomFloat) | class_bit(InsnClass::AtomSwap)))) return RelaxedRefusal::Atomics;
-  return RelaxedRefusal::None;
+inline TurboRefusal turbo_refusal(ClassMask classes, const TurboSwitches& sw) {
+  if (classes & class_bit(InsnClass::Never)) return TurboRefusal::Never;
+  if (classes & sw.off) return TurboRefusal::Off;
+  if (!sw.atomics && (classes & (class_bit(InsnClass::AtomFloat) | class_bit(InsnClass::AtomSwap)))) return TurboRefusal::Atomics;
+  return TurboRefusal::None;
 }
 
 // ---- residency (the design for a card copy that outlives a launch) ---------------------------------------------------------
