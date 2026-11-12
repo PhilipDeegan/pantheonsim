@@ -133,10 +133,23 @@ runs:
       run: |
         . /etc/os-release
         repo="https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${VERSION_ID//./}/x86_64"
-        wget -qO "$RUNNER_TEMP/cuda-keyring.deb" "$repo/cuda-keyring_1.1-1_all.deb"
+        # apt against NVIDIA's repository has hung a hosted runner until the job timeout (the same
+        # kind of hang as in "Install build tools"), so every network step here is bounded and retried.
+        retry() {  # three attempts; the caller bounds each one with timeout
+          local attempt
+          for attempt in 1 2 3; do
+            "$@" && return 0
+            echo "::warning::'$*' failed or timed out (attempt $attempt of 3)"
+            $SUDO dpkg --configure -a || true
+          done
+          return 1
+        }
+        retry timeout 120 wget -qO "$RUNNER_TEMP/cuda-keyring.deb" "$repo/cuda-keyring_1.1-1_all.deb" \
+          || { echo "::error::could not download the CUDA keyring from $repo"; exit 1; }
         $SUDO dpkg -i "$RUNNER_TEMP/cuda-keyring.deb"
         [ ! -x "${GITHUB_ACTION_PATH}/scripts/apt-mirror-fallback.sh" ] || "${GITHUB_ACTION_PATH}/scripts/apt-mirror-fallback.sh"
-        $SUDO apt-get update -qq
+        retry $SUDO timeout 300 apt-get update -qq \
+          || { echo "::error::apt-get update with NVIDIA's repository did not finish in three attempts"; exit 1; }
         v="${TOOLKIT//./-}"
         # CUDA 13 renamed the NVVM package.
         nvvm="cuda-nvvm-$v"; [[ "${TOOLKIT%%.*}" -ge 13 ]] && nvvm="libnvvm-$v"
@@ -144,7 +157,7 @@ runs:
         # it builds each one against the toolkit's own declarations. And
         # nvJitLink, which the toolkit's cuSPARSE needs to link a program
         # against it, though NVIDIA's packages do not say so.
-        $SUDO apt-get install -y -qq --no-install-recommends \
+        retry $SUDO timeout 900 apt-get install -y -qq --no-install-recommends \
           "cuda-nvcc-$v" "cuda-cudart-dev-$v" "cuda-crt-$v" "$nvvm" \
           "cuda-nvml-dev-$v" "cuda-cupti-dev-$v" "cuda-nvrtc-dev-$v" "libcublas-dev-$v" \
           "libcufft-dev-$v" "libcurand-dev-$v" "libcusparse-dev-$v" "libnvjpeg-dev-$v" \

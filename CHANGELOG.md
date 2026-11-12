@@ -12,6 +12,11 @@ release says what runs and what it produces, never how fast a real GPU would run
   measured gain 5 % or more: lavaMD 1.18x, RSBench 1.39x, LULESH 1.07x); single-precision programs and hosts without AVX-512 are
   unchanged, the results are the same bits, and `VGPU_SIMD=avx2` keeps the 256-bit kernel. New unit test `test_lanes512` (skipped on
   a host without AVX-512).
+- Tier 2 (`VGPU_JIT=1`, still off by default): a code section the cache has nothing for no longer runs in the counting loop all the
+  way to its compile threshold. It waits on the plain run loop, where only the warp instructions of each call are added up, and is
+  counted region by region again for the last `VGPU_JIT_PROFILE` (4,000,000) instructions before the threshold. Programs that never
+  reach the threshold paid 2 to 16 % for the counting with `VGPU_JIT=1`; results and counters are unchanged
+  ([round sp57](docs/perf-design/rounds/11-rounds-sp36-sp41.md), which also says why the JIT stays opt-in).
 - CI and setup action: when the apt mirror host of a GitHub-hosted runner image (azure.archive.ubuntu.com) does not resolve, the
   toolchain install points apt at the first of archive.ubuntu.com and four mirrors outside ubuntu.com whose name does resolve,
   instead of failing three times with exit 100 (`scripts/apt-mirror-fallback.sh`, run before every hosted-runner `apt-get update`;
