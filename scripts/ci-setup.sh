@@ -108,6 +108,7 @@ pkgs="cmake ninja-build g++ ca-certificates wget gnupg python3"
 [[ "$TOOLKIT" == apt ]] && pkgs="$pkgs nvidia-cuda-toolkit g++-12"
 # The simulator is C++20 and needs gcc 12 or newer; 22.04's default is 11.
 [[ $old_ubuntu ]] && pkgs="$pkgs g++-12"
+[[ -x "$(dirname "$0")/apt-mirror-fallback.sh" ]] && "$(dirname "$0")/apt-mirror-fallback.sh"
 $sudo apt-get update -qq
 # Unpacking the NVIDIA runtime libraries that nvidia-cuda-toolkit pulls in has hung a
 # hosted runner for 45 minutes. Bound each attempt, and finish what dpkg left

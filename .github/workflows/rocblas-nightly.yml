@@ -47,6 +47,7 @@ jobs:
       - name: Build it
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
+          [ ! -x scripts/apt-mirror-fallback.sh ] || scripts/apt-mirror-fallback.sh
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends cmake libgtest-dev libgmock-dev libopenblas-dev \
             libnuma1 libdrm2 libdrm-dev libdrm-amdgpu1 libelf1 zlib1g-dev
@@ -97,6 +98,7 @@ jobs:
           fail-on-cache-miss: true
       - name: Build the simulator's HIP runtime
         run: |
+          [ ! -x scripts/apt-mirror-fallback.sh ] || scripts/apt-mirror-fallback.sh
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends build-essential cmake ninja-build \
             libopenblas0-pthread libgfortran5 libnuma1 libdrm2 libdrm-amdgpu1 libelf1
