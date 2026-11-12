@@ -281,6 +281,7 @@ struct Runtime::Impl : CardGate {
   // `always` samples whatever the process's age (sample_affordable is not asked), for tests and experiments; `log` does not ask it either and
   // prints what it would have said.
   enum class SampleMode : uint8_t { On, Off, Log, Always } sample_mode = SampleMode::On;
+  size_t copies_running_at_exit = 0;   // sampled copies that had answered and not yet ended when the process came to its end (they were waited for)
   double sample_spent_s = 0;      // what the samples of this process have cost
   double sample_dearest_s = 0;    // the dearest of them
   // VGPU_HOST_GPU_EARLY_START (an experiment of Round sp60b, off by default): 1 starts the driver, on its thread, at the first launch of an admitted
@@ -736,7 +737,8 @@ void print_summary(Runtime::Impl* im) {
                  ull(s.tol.subnormal), ull(kernels_outside), s.tol.max_abs, s.tol.max_rel);
     std::fprintf(stderr, "host_gpu_refusals: refused_never=%llu refused_atomics=%llu refused_off=%llu refused_exact=%llu refused_safety=%llu too_small=%llu failed=%llu\n",
                  ull(s.refused_never), ull(s.refused_atomics), ull(s.refused_off), ull(s.refused_exact), ull(s.refused_launch), ull(s.refused_size), ull(s.failed));
-    std::fprintf(stderr, "host_gpu_sampled: sampled=%llu sent=%llu timeouts=%llu cost_s=%.6f\n", ull(s.sampled), ull(s.sample_sent), ull(s.sample_timeouts), s.sample_seconds);
+    std::fprintf(stderr, "host_gpu_sampled: sampled=%llu sent=%llu timeouts=%llu cost_s=%.6f after_driver=%llu copies_running_at_exit=%zu copies_left=%zu\n", ull(s.sampled),
+                 ull(s.sample_sent), ull(s.sample_timeouts), s.sample_seconds, ull(s.sample_after_driver), im->copies_running_at_exit, sample_copies_reap(false));
     if (turbo && im->verify)
       for (const auto& [k, kt] : im->tol_by_kernel)
         if (kt.rep.outside)
@@ -817,6 +819,7 @@ Runtime* Runtime::for_device(const DeviceProfile& profile, int ordinal) {
     if (const char* mb = std::getenv("VGPU_HOST_GPU_MAX_MIB")) r->impl_->max_bytes = std::strtoull(mb, nullptr, 10) << 20;
     g_summary_impl = r->impl_;
     std::atexit([] {
+      g_summary_impl->copies_running_at_exit = sample_copies_reap(true);   // (no child is left behind, whatever the summary prints)
       g_summary_impl->settle_start();
       print_summary(g_summary_impl);
     });
@@ -1237,11 +1240,24 @@ void Runtime::Impl::consider_sample(const ptx::EntryFn& fn, const exec::LaunchCo
 
 bool Runtime::sample_plan(const ptx::EntryFn&, SamplePlan* plan) {
   if (!t_sample_hint.set) return false;
+  {
+    // A process that holds, or is loading, the real driver is never forked: asked again here, at the fork, under the lock that guards the start.
+    std::lock_guard<GateLock> g(impl_->mu);
+    if (impl_->start_sh || impl_->start_failed) {
+      t_sample_hint = {};
+      return false;
+    }
+  }
   plan->limit = sample_blocks(t_sample_hint.blocks);
   plan->stride = sample_stride(t_sample_hint.blocks);
   plan->budget_s = kSampleBudgetSeconds;
   plan->timeout_s = kSampleTimeoutSeconds;
   return plan->limit != 0;
+}
+
+bool Runtime::driver_start_begun() const {
+  std::lock_guard<GateLock> g(impl_->mu);
+  return impl_->start_sh != nullptr;
 }
 
 bool Runtime::sample_decide(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, const std::vector<std::vector<uint8_t>>& args, MemoryManager& mem,
@@ -1252,6 +1268,7 @@ bool Runtime::sample_decide(const ptx::EntryFn& fn, const exec::LaunchConfig& cf
   if (!hint.set) return false;
   std::lock_guard<GateLock> g(im.mu);
   ++im.stats.sampled;
+  if (run.driver_started_at_fork) ++im.stats.sample_after_driver;
   im.stats.sample_seconds += run.wall_s;
   im.sample_spent_s += run.wall_s;
   im.sample_dearest_s = std::max(im.sample_dearest_s, run.wall_s);

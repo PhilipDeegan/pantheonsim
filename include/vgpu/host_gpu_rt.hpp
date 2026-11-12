@@ -31,8 +31,13 @@ struct Stats {
   // Sampled launches (vgpu/host_gpu.hpp "The first blocks of a launch, timed"): how many, how many of them the card then ran (`sample_sent`, also
   // in `offloaded`), how many copies did not answer in time, and what the samples cost the process in wall seconds (the fork and the wait).
   uint64_t sampled = 0, sample_sent = 0, sample_timeouts = 0;
+  uint64_t sample_after_driver = 0;   // samples made although the driver's start had begun: always 0 (sample_plan refuses), printed to show it
   double sample_seconds = 0;
 };
+
+// The forked copies of sampled launches (runtime.cpp): reaps the ones that have ended, waits for the rest when asked. Returns how many were
+// still running.
+size_t sample_copies_reap(bool wait);
 
 class Runtime {
  public:
@@ -57,9 +62,11 @@ class Runtime {
     double budget_s = 0, timeout_s = 0;
   };
   bool sample_plan(const ptx::EntryFn& fn, SamplePlan* plan);
+  bool driver_start_begun() const;
   // What the copy reported (`answered` false: it did not, in time, and was ended), and what the sample cost the process in wall seconds.
   struct SampleRun {
     bool answered = false;
+    bool driver_started_at_fork = false;   // whether the driver's start had begun when the process was forked (never: sample_plan refuses)
     exec::LaunchPart part;
     double wall_s = 0, fork_s = 0;
   };

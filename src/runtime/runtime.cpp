@@ -1266,6 +1266,7 @@ void Device::launch(const ptx::EntryFn& fn, const exec::LaunchConfig& in_cfg,
     // launch to the card (vgpu/host_gpu.hpp "The first blocks of a launch, timed"). Nothing of the sample exists in this process afterwards.
     if (hostgpu::Runtime::SamplePlan plan; hg && hg->sample_plan(fn, &plan)) {
       hostgpu::Runtime::SampleRun run;
+      run.driver_started_at_fork = hg->driver_start_begun();
       run.answered = sample_in_copy(fn, cfg, args, syms, plan.limit, plan.stride, plan.budget_s, plan.timeout_s, &run.part, &run.wall_s, &run.fork_s);
       if (hg->sample_decide(fn, cfg, args, mem_, run)) {
         if (telemetry_) telemetry_->note_kernel(static_cast<uint32_t>(physical_), 0.0);
@@ -1361,19 +1362,37 @@ void Device::launch(const ptx::EntryFn& fn, const exec::LaunchConfig& in_cfg,
 // blocks on it, writes the part's times to a pipe and ends with _exit: no handler, destructor or buffered output of the program runs in it, and what
 // it wrote to memory was its own (copy-on-write). A copy that does not answer within `timeout_s` (a lock another thread held when the process was
 // forked, a first block that is longer than that) is ended, and the caller has no estimate.
+namespace {
+std::mutex g_copies_mu;
+std::vector<pid_t> g_copies;   // sampled copies that answered and had not ended when last asked
+}  // namespace
+
+// Reaps the sampled copies that have ended; with `wait`, waits for the others too (they have answered and are on their way out). Returns how
+// many were still running when it was called.
+size_t hostgpu::sample_copies_reap(bool wait) {
+  std::lock_guard<std::mutex> g(g_copies_mu);
+  size_t running = 0;
+  for (size_t i = 0; i < g_copies.size();) {
+    pid_t r = waitpid(g_copies[i], nullptr, WNOHANG);
+    if (r == 0) {
+      ++running;
+      if (wait) {
+        while ((r = waitpid(g_copies[i], nullptr, 0)) < 0 && errno == EINTR) {}
+      }
+    }
+    if (r != 0) g_copies.erase(g_copies.begin() + static_cast<std::ptrdiff_t>(i));
+    else ++i;
+  }
+  return running;
+}
+
 bool Device::sample_in_copy(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, const std::vector<std::vector<uint8_t>>& args,
                             const exec::SymbolTable* syms, uint64_t limit, uint64_t stride, double budget_s, double timeout_s, exec::LaunchPart* out, double* wall_s,
                             double* fork_s) {
   *wall_s = *fork_s = 0;
-  // Copies that answered are not waited for (a process takes a millisecond to be torn down): they are reaped here, at the next sample, or by init.
-  static std::mutex reap_mu;
-  static std::vector<pid_t> unreaped;
-  {
-    std::lock_guard<std::mutex> g(reap_mu);
-    for (size_t i = 0; i < unreaped.size();)
-      if (waitpid(unreaped[i], nullptr, WNOHANG) != 0) unreaped.erase(unreaped.begin() + static_cast<std::ptrdiff_t>(i));
-      else ++i;
-  }
+  // Copies that answered are not waited for (a process takes a millisecond to be torn down): they are reaped at the next sample, and the mode's
+  // exit handler waits for the ones still there (hostgpu::sample_copies_reap), so the process leaves no child behind.
+  hostgpu::sample_copies_reap(false);
   struct Message {
     uint64_t next, total;
     uint32_t threads;
@@ -1391,6 +1410,7 @@ bool Device::sample_in_copy(const ptx::EntryFn& fn, const exec::LaunchConfig& cf
     return false;
   }
   if (pid == 0) {
+    exec::g_sample_copy.store(true, std::memory_order_relaxed);
     int status = 3;
     try {
       exec::LaunchPart part;
@@ -1441,8 +1461,8 @@ bool Device::sample_in_copy(const ptx::EntryFn& fn, const exec::LaunchConfig& cf
     // (what became of it, for the log: 3 is a launch that threw in the copy, 9 a copy that was ended for not answering)
     out->next = WIFEXITED(st) ? static_cast<uint64_t>(WEXITSTATUS(st)) : WIFSIGNALED(st) ? static_cast<uint64_t>(WTERMSIG(st)) : 0;
   } else if (waitpid(pid, nullptr, WNOHANG) == 0) {
-    std::lock_guard<std::mutex> g(reap_mu);
-    unreaped.push_back(pid);
+    std::lock_guard<std::mutex> g(g_copies_mu);
+    g_copies.push_back(pid);
   }
   if (got == sizeof msg) {
     out->next = msg.next;

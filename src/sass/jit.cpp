@@ -1,4 +1,5 @@
 // Tier 2 of the SASS executor, milestone 1: see jit.hpp.
+#include "vgpu/exec/launch.hpp"
 #include "jit.hpp"
 
 #include <dlfcn.h>
@@ -1567,6 +1568,7 @@ struct Manager {
   }
 
   void submit(Job job, std::shared_ptr<Unit> u) {
+    if (exec::g_sample_copy.load(std::memory_order_relaxed)) return;   // (a sample's copy of the process compiles nothing and writes no cache)
     if (sync) {
       run(job, u);
       return;

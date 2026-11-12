@@ -105,6 +105,8 @@ def parse_stderr(text):
             r["turbo"] = _fields(line.split(": ", 1)[1])
         elif line.startswith("host_gpu_refusals: "):
             r["refusals"] = _fields(line.split(": ", 1)[1])
+        elif line.startswith("host_gpu_sampled: "):   # launches sampled in a forked copy, how many were sent, what the samples cost
+            r["sampled"] = _fields(line.split(": ", 1)[1])
         elif line.startswith("host_gpu_verify: "):
             r["verify"] = _fields(line.split(": ", 1)[1])
         elif line.startswith("host_gpu_refused: "):
@@ -281,6 +283,8 @@ def summarise(form, runs, ref, a):
     if s:
         # every launch is either offloaded or counted in "simulated" (a verify run counts its launches there)
         rec["launches_total"] = s["offloaded"] + s["simulated"]
+    if info.get("sampled"):
+        rec["sampled"] = info["sampled"]
     if info["refusals"]:
         rec["refusals"] = info["refusals"]
     elif s:
@@ -353,7 +357,7 @@ def bench(a):
             env["VGPU_HOST_GPU_LOG"] = "1"
             r = run_program(argv, cwd, copy_cwd, env, base_env, a.timeout)
             st = summarise("exact", [r], None, a)
-            for k in ("card_s", "sim_s", "refusals", "launches_card", "launches_sim"):
+            for k in ("card_s", "sim_s", "refusals", "launches_card", "launches_sim", "sampled"):
                 if st.get(k) is not None:
                     rec["exact"][k] = st[k]
         if "verify" in forms:
@@ -520,6 +524,7 @@ host_gpu: 96.0 MiB went to the card, 12.5 MiB came back
 host_gpu_verify: in_set_identical=3 in_set_different=34 other_identical=0 other_different=5
 host_gpu_turbo: mode=turbo launches_card=37 launches_sim=12 card_s=0.412345 sim_s=3.250000 words_compared=9437184 words_different=4711 words_outside=2 words_subnormal=0 kernels_outside=1 max_abs=2.38418579e-07 max_rel=0.5
 host_gpu_refusals: refused_never=3 refused_atomics=2 refused_off=0 refused_exact=0 refused_safety=1 too_small=3 failed=0
+host_gpu_sampled: sampled=2 sent=1 timeouts=0 cost_s=0.006100 after_driver=0 copies_running_at_exit=0 copies_left=0
 host_gpu_outside: kernel=_Z4histPiS_i words_compared=262144 words_different=2 words_outside=2 max_abs=1 max_rel=0.5 first=0x7f4a00001040:card=0x00000003:sim=0x00000002
 """
 CANNED_EXACT = """host_gpu: 8 launches ran on the card, 41 in the simulator (30 kernels not in the exact set, 2 too small, 4 unsupported launch shapes, 0 failed on the card)
@@ -542,6 +547,7 @@ def selftest():
     check(r["turbo"]["card_s"] == 0.412345 and r["turbo"]["sim_s"] == 3.25, "host_gpu_turbo seconds")
     check(r["turbo"]["words_compared"] == 9437184 and r["turbo"]["words_different"] == 4711 and r["turbo"]["words_outside"] == 2, "host_gpu_turbo words")
     check(r["turbo"]["kernels_outside"] == 1 and abs(r["turbo"]["max_abs"] - 2.38418579e-07) < 1e-15 and r["turbo"]["max_rel"] == 0.5, "host_gpu_turbo maxima")
+    check(r["sampled"]["sampled"] == 2 and r["sampled"]["sent"] == 1 and r["sampled"]["after_driver"] == 0 and r["sampled"]["copies_left"] == 0, "host_gpu_sampled")
     check(r["refusals"] == {"refused_never": 3, "refused_atomics": 2, "refused_off": 0, "refused_exact": 0, "refused_safety": 1, "too_small": 3, "failed": 0}, "host_gpu_refusals")
     check(r["verify"] == {"in_set_identical": 3, "in_set_different": 34, "other_identical": 0, "other_different": 5}, "host_gpu_verify")
     check(len(r["refused_kernels"]) == 2 and r["refused_kernels"][0] == {"kernel": "_Z9tex_fetchPfi", "class": "never", "insn": "TEX.SCR.LL R4, R5, R2, R2, 0x0, 0x58, 2D, 0x1"}, "host_gpu_refused")
