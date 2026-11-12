@@ -63,17 +63,12 @@ M = [
     ("floor: the two added", "return std::max(kSampleStaticFloorSeconds, 3.0 * kSampleSecondsPerLiveByte * static_cast<double>(live_bytes));", "return kSampleStaticFloorSeconds + 3.0 * kSampleSecondsPerLiveByte * static_cast<double>(live_bytes);"),
     ("constant: the faults' cost per byte", "inline constexpr double kSampleSecondsPerLiveByte = 6e-10;", "inline constexpr double kSampleSecondsPerLiveByte = 6e-12;"),
     ("worth: a kernel with no loop is sampled", "if (!w.loop || sample_blocks(w.blocks) == 0) return false;", "if (sample_blocks(w.blocks) == 0) return false;"),
-    ("loop: a cycle the entry cannot reach counts", "for (size_t root = 0; root < std::min<size_t>(n, 1); ++root) {
-    stack.emplace_back(root, 0);", "for (size_t root = 0; root < n; ++root) {
-    if (state[root]) continue;
-    stack.emplace_back(root, 0);"),
+    ("loop: a cycle the entry cannot reach counts", "for (size_t root = 0; root < std::min<size_t>(n, 1); ++root) {\n    stack.emplace_back(root, 0);", "for (size_t root = 0; root < n; ++root) {\n    if (state[root]) continue;\n    stack.emplace_back(root, 0);"),
     ("loop: an instruction seen before counts as a cycle", "if (state[next] == 1) return true;", "if (state[next] != 0) return true;"),
     ("loop: no cycle is ever found", "if (state[next] == 1) return true;", ""),
     ("loop: an exit goes on", "if (edge == 0 && code[i].falls_through && i + 1 < n) next = i + 1;", "if (edge == 0 && i + 1 < n) next = i + 1;"),
     ("loop: a branch is never taken", "if (edge == 1 && code[i].target >= 0 && static_cast<size_t>(code[i].target) < n) next = static_cast<size_t>(code[i].target);", ""),
-    ("loop: indirect flow is ignored", "  for (const FlowInsn& f : code)
-    if (f.indirect) return true;
-", ""),
+    ("loop: indirect flow is ignored", "  for (const FlowInsn& f : code)\n    if (f.indirect) return true;\n", ""),
     ("constant: the static floor", "inline constexpr double kSampleStaticFloorSeconds = 0.030;", "inline constexpr double kSampleStaticFloorSeconds = 0.001;"),
     ("constant: the card's assumed speed-up", "inline constexpr double kSampleCardSpeedup = 8.0;", "inline constexpr double kSampleCardSpeedup = 2000.0;"),
     ("constant: the most blocks", "inline constexpr uint64_t kSampleMaxBlocks = 32;", "inline constexpr uint64_t kSampleMaxBlocks = 4096;"),
