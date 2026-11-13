@@ -44,6 +44,10 @@ release says what runs and what it produces, never how fast a real GPU would run
 - Setup action: the build cache is saved by an `actions/cache/save` step right after the build (on a miss only) instead of by
   `actions/cache`'s post step, which runs only when the whole job succeeds; a caller whose tests failed no longer throws the build away
   and rebuilds it for about 15 minutes next run (pantheonsim #582).
+- CUDA runtime and driver: a kernel's `maxThreadsPerBlock` (`cudaFuncGetAttributes`, `CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK`)
+  counts whole warps per sub-partition, as the launch check does. A kernel of 104 registers a thread reported 608 threads and a
+  launch of 608 was refused ("cannot place a single block ... limited by registers"); it reports 512, as an RTX 5080 does for
+  the same kernel.
 - PTX: `ld.weak` and `st.weak` are accepted (the explicit spelling of the default memory semantics, PTX ISA 6.0 and later). They
   stopped GiMMiK 4.0's matrix-multiply kernels, and so PyFR's CUDA backend, at module load (pantheonsim #554).
 - NVRTC (the built-in compiler, used when no toolkit is visible): `--ftz=`, `--prec-div=` and `--prec-sqrt=` are accepted beside
