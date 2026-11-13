@@ -620,6 +620,9 @@ struct Group {
 // thread: it still shares device memory with the other dispatch. The unlocked read-modify-write of a lone thread is
 // right only while no other dispatch is running (Machine::conc below).
 std::atomic<int> g_dispatches_in_flight{0};
+// The lone dispatch's atomic instruction in progress, if one is (Machine::LoneRmw): a dispatch that starts while another runs
+// alone waits for it to be 0, so that it never makes an atomic on a word the lone one is between reading and writing (#610).
+std::atomic<int> g_lone_rmw{0};
 
 struct Machine {
   Machine(const Dispatch& dispatch, MemoryManager& memory, DecodeCache& cache)
@@ -639,7 +642,35 @@ struct Machine {
   // wave's lanes take their turns in order, which is atomic already.
   bool concurrent = false;
   // Whether a read-modify-write has to be atomic against another thread: this dispatch uses several, or another dispatch is running.
-  bool conc() const { return concurrent || g_dispatches_in_flight.load(std::memory_order_relaxed) > 1; }
+  bool conc() const { return concurrent || rmw_conc_ || g_dispatches_in_flight.load(std::memory_order_relaxed) > 1; }
+  // Held over an atomic instruction of device memory (#610). That conc() was false when the instruction began does not keep it so:
+  // another dispatch can start between this one's unlocked read and its write, and the add of that one's that lands in between
+  // was lost. So a lone dispatch says it is in an atomic instruction (g_lone_rmw) before it looks at the count, both in the single
+  // order of sequentially consistent operations, and a dispatch that starts looks at g_lone_rmw after counting itself in
+  // (execute): either this one sees two dispatches and takes the locked path, or the other waits for this instruction to end. Where
+  // another dispatch was seen, the whole instruction is the locked path (rmw_conc_), even if the other ends half-way through it.
+  struct LoneRmw {
+    Machine& m;
+    bool held = false, prev = false;
+    LoneRmw(Machine& machine, bool atomic) : m(machine), prev(machine.rmw_conc_) {
+      if (!atomic || m.concurrent || m.rmw_conc_) return;
+      if (g_dispatches_in_flight.load(std::memory_order_relaxed) <= 1) {
+        g_lone_rmw.fetch_add(1, std::memory_order_seq_cst);
+        if (g_dispatches_in_flight.load(std::memory_order_seq_cst) <= 1) {
+          held = true;
+          return;
+        }
+        g_lone_rmw.fetch_sub(1, std::memory_order_release);
+      }
+      m.rmw_conc_ = true;
+    }
+    ~LoneRmw() {
+      if (held) g_lone_rmw.fetch_sub(1, std::memory_order_release);
+      m.rmw_conc_ = prev;
+    }
+    LoneRmw(const LoneRmw&) = delete;
+    LoneRmw& operator=(const LoneRmw&) = delete;
+  };
   // Whether the matrix instructions take the tile path (set_matrix_fast_path); read once, as the machine is made.
   bool matrix_fast = matrix_fast_path();
   // Across threads, an atomic on an ordinary word of device memory is a compare-and-swap on the word, not a lock.
@@ -648,6 +679,7 @@ struct Machine {
   // (Not while PC sampling is attached: the tier would step past the instructions that are to be sampled.)
   // (Whether the debugger is on is fixed for the process, so step asks once, here, and not through a call on each instruction.)
   const bool debug_on = debug::active();
+  bool rmw_conc_ = false;   // (LoneRmw: this atomic instruction takes the locked path whatever the count says now)
   // The counters a tier instruction adds one to by its unit (gcn::tier::Unit): kUnitNone's is a dummy.
   uint64_t unit_none = 0;
   uint64_t* const unit_slot[5] = {&unit_none, &stats.counts.valu, &stats.counts.salu, &stats.counts.branch, &stats.counts.lds};
@@ -2881,6 +2913,7 @@ struct Machine {
     if (mf.smem == SK::Atomic) {
       // One value for the whole wave, read and replaced at once; with glc
       // the data register gets back what memory held.
+      const LoneRmw lone(*this, true);
       const bool wide = mf.s_wide;
       const uint32_t bytes = wide ? 8 : 4, r = in.dst[0].index;
       const uint64_t mask = wide ? ~uint64_t{0} : 0xFFFFFFFFull;
@@ -8858,6 +8891,7 @@ struct Machine {
     // work-group reaches, done in place; in the device's, as a global one.
     if (mf.atomic_bytes) {
       const AtomicOp a = atomic_of(mf);
+      const LoneRmw lone(*this, true);
       for (uint32_t lane = 0; lane < kLanes; ++lane) {
         if (!(w.exec >> lane & 1)) continue;
         const uint64_t addr = flat_address(w, in, lane, bytes_per_lane);
@@ -9184,6 +9218,7 @@ struct Machine {
     const bool sample = gather || name.find("sample") != std::string::npos || name == "image_get_lod";
     const bool store = name.rfind("image_store", 0) == 0;
     const bool atomic = name.rfind("image_atomic", 0) == 0;
+    const LoneRmw lone(*this, atomic);
     const bool resinfo = name == "image_get_resinfo";
     // gfx90a (MI200): no DIM field -- the T#'s TYPE and the DA bit say the
     // shape and whether an array index is passed -- and the address
@@ -9773,6 +9808,7 @@ struct Machine {
     const Half h = half_of(mf);
     const bool is_half = mf.half_bytes != 0;
     const bool atomic = mf.body_atomic;
+    const LoneRmw lone(*this, atomic);
     const bool returns = atomic && (in.cache & 1);
     // A resource whose data format is 0 (BUF_DATA_FORMAT_INVALID) holds
     // nothing: every access is out of range, which MIOpen's hand-written
@@ -10493,6 +10529,7 @@ struct Machine {
     const gcn::MemFacts& mf = gcn::mem_facts(in, mem_scratch);
     using Kind = gcn::MemKind;
     const Kind kind = mf.kind;
+    const LoneRmw lone(*this, kind == Kind::Atomic);
     if (kind == Kind::AddTid) {
       // gfx1250: "RETURN_DATA.u32 = MEM[SGPR_ADDR[63:0] + INST_OFFSET[11:0].b64 + 64'B(laneID.i32 * 4)].u32" (CDNA5 ISA, GLOBAL_LOAD_ADDTID_B32), and the
       // store's likewise: a scalar base, the 12-bit offset, and four bytes a lane.
@@ -13578,7 +13615,11 @@ bool dispatches_abandoned() { return g_abandoned.load(); }
 
 DispatchStats execute(const Dispatch& d, MemoryManager& mem) {
   struct InFlight {
-    InFlight() { g_dispatches_in_flight.fetch_add(1, std::memory_order_relaxed); }
+    InFlight() {
+      // (Counted in first, then wait for a dispatch that ran alone to finish the atomic instruction it is in: Machine::LoneRmw.)
+      if (g_dispatches_in_flight.fetch_add(1, std::memory_order_seq_cst) > 0)
+        while (g_lone_rmw.load(std::memory_order_seq_cst) != 0) std::this_thread::yield();
+    }
     ~InFlight() { g_dispatches_in_flight.fetch_sub(1, std::memory_order_relaxed); }
   } in_flight;
   if (g_abandoned.load(std::memory_order_relaxed)) abandon();

@@ -1,3 +1,4 @@
+data/asm_atomic_race.gfx942.o	5a13a207028af20a
 data/asm_atomics.gfx942.o	c0525c9e0ff55482
 data/asm_barrier_order.gfx942.o	1ed129783c025ac3
 data/asm_bcast.gfx942.o	7ef39c85c9e333dc
