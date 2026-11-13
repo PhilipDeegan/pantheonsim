@@ -83,7 +83,7 @@ against a CUDA 13 build), or if a `DT_RPATH` would hide the simulator (see
 
 | Option | Meaning |
 | --- | --- |
-| `--preload` | Also `LD_PRELOAD` the shim. Needed when the program carries a `DT_RPATH` naming a directory of the real CUDA libraries: the loader reads that old-style tag *before* `LD_LIBRARY_PATH`, so the simulator never gets in front. (A `DT_RUNPATH`, which modern toolchains emit, comes after and is harmless.) `vgpu run` tells you when it applies. For an interpreter such as `python` with PyTorch, which names no CUDA library itself, every CUDA library the shim carries is preloaded. |
+| `--preload` | Also `LD_PRELOAD` the shim. Needed when the program carries a `DT_RPATH` naming a directory of the real CUDA libraries: the loader reads that old-style tag *before* `LD_LIBRARY_PATH`, so the simulator never gets in front. (A `DT_RUNPATH`, which modern toolchains emit, comes after and is harmless.) `vgpu run` tells you when it applies. For an interpreter such as `python` with PyTorch, which names no CUDA library itself, every CUDA library the shim carries is preloaded; the driver's libraries and NVRTC among them are loaded privately (`RTLD_LOCAL`) as the preloaded runtime starts (`VGPU_PRELOAD_PRIVATE`), so that a library keeping their functions in exported pointers of the same names (ThrustRTC) does not have those pointers bound to the shim's code. |
 | `--print-env` | Print the environment and the command, then exit. |
 
 Examples:
