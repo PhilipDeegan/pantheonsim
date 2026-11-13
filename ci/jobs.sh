@@ -37,7 +37,8 @@
 # settle (CI_MEM_SETTLE_SECS) so a job that just started is counted, and only then samples the
 # memory. The ledger is a file under CI_RESERVE_DIR, edited under flock; a share is the profile's
 # minimum, and the capacity is CI_RESERVE_CAPACITY_GIB (default 5: one heavy job at a time, a
-# host with room for two sets 10). --release gives the share back; a share a killed runner never
+# host with room for two sets 10;
+# the default is 10 on the AWS burst runners, RUNNER_NAME burst-*). --release gives the share back; a share a killed runner never
 # released expires after CI_RESERVE_TTL_SECS (default 4 hours). No usable ledger (no directory
 # or no flock) is a warning, never a failure: the check then works as it always did.
 #
@@ -292,7 +293,10 @@ if [[ $mode == check ]]; then
   if [[ ${CI_RESERVE:-1} != 0 ]] && (( need_kib > 0 )); then
     if why=$(ledger_open); then
       id=$(reserve_id)
-      cap_gib=${CI_RESERVE_CAPACITY_GIB:-5}
+      # An AWS burst instance (runner burst-i-...) is 32 GiB with two runners and each container capped at
+      # 16 GiB (BURST_CONTAINER_OPTIONS), so it takes two heavy jobs; every other host takes one (#575).
+      cap_default=5; [[ ${RUNNER_NAME:-} == burst-* ]] && cap_default=10
+      cap_gib=${CI_RESERVE_CAPACITY_GIB:-$cap_default}
       is_num "$cap_gib" || die "CI_RESERVE_CAPACITY_GIB is not a number: $cap_gib"
       # A share larger than the capacity could never be taken.
       cap_mib=$(awk -v c="$cap_gib" -v m="$pmin" 'BEGIN { if (m > c) c = m; printf "%d", c * 1024 }')
