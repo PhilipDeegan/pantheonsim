@@ -68,12 +68,12 @@ namespace vgpu {
 
 // The windows of a line's record, for the race test only (tests/unit/test_exact_lines_race.cpp, which compiles this file with
 // VGPU_SPEC_TEST_HOOKS): `spec_test::hook` is called at each (a block about to write another's record out, and having taken it;
-// a block about to keep its line's bytes, having taken it; a block about to note more in its own record; a block waiting at a
-// busy line), so that the test can hold one thread inside a window while another comes to the line. Without the definition
+// a block half way through writing it out; a block about to keep its line's bytes, having taken it; a block about to note more
+// in its own record, or to take an untouched line as its first reader; a block waiting at a busy line), so that the test can hold one thread inside a window while another comes to the line. Without the definition
 // nothing is compiled in.
 #ifdef VGPU_SPEC_TEST_HOOKS
 namespace spec_test {
-enum : int { kOutBefore = 1, kOutBusy = 2, kKeepBusy = 3, kWaitBusy = 4, kOwnBefore = 5 };
+enum : int { kOutBefore = 1, kOutBusy = 2, kKeepBusy = 3, kWaitBusy = 4, kOwnBefore = 5, kOutHalf = 6, kFirstBefore = 7 };
 void (*hook)(int at) = nullptr;
 }  // namespace spec_test
 #define VGPU_SPEC_HOOK(at) (spec_test::hook ? spec_test::hook(spec_test::at) : void())
@@ -366,8 +366,10 @@ class MemoryManager::Spec {
     VGPU_SPEC_HOOK(kOutBusy);
     const uint32_t b = owner(v), r = read_bits(v), wr = written_bits(v);
     Word* words = page->words + l * kLineWords;
-    for (uint64_t i = 0; i < kLineWords; ++i)
+    for (uint64_t i = 0; i < kLineWords; ++i) {
       words[i].store((wr >> i & 1) ? (b | kWrite) : (r >> i & 1) ? b : 0, std::memory_order_relaxed);
+      if (i == kLineWords / 2 - 1) VGPU_SPEC_HOOK(kOutHalf);
+    }
     line.store(kLineByWord);
     ++w.st.lines_by_word;
     v = kLineByWord;
@@ -432,6 +434,7 @@ class MemoryManager::Spec {
         return;
       }
       if (v == 0) {
+        VGPU_SPEC_HOOK(kFirstBefore);
         if (!line.take(v, uint64_t{tag} | as_read(m))) continue;
         w.st.words_read_first += static_cast<uint64_t>(__builtin_popcount(m));
         return;

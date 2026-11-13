@@ -30,7 +30,7 @@ extern void (*hook)(int at);
 
 namespace {
 
-constexpr int kOutBefore = 1, kOutBusy = 2, kKeepBusy = 3, kWaitBusy = 4, kOwnBefore = 5;
+constexpr int kOutBefore = 1, kOutBusy = 2, kKeepBusy = 3, kWaitBusy = 4, kOwnBefore = 5, kOutHalf = 6, kFirstBefore = 7;
 constexpr uint64_t kPage = 4096;
 
 // The hook: the one thread that is armed parks at its window, once, until the test lets it go; a thread that waits at a busy line
@@ -189,7 +189,8 @@ VTEST(a_record_another_block_wrote_out_first_is_not_written_out_again) {
   }
 }
 
-// Block 1 has taken block 0's record to write it out (the line is busy) and is held there. A third block reads or writes in the
+// Block 1 has taken block 0's record to write it out (the line is busy) and is held there (before the first of the sixteen
+// stores, or after the eighth). A third block reads or writes in the
 // line: it must wait for the words, then be stopped where they stop it (block 0 wrote word 3 and read word 9), and not where they
 // do not (word 7 and word 9 for a read).
 VTEST(a_block_that_finds_a_line_being_written_out_waits_for_the_words) {
@@ -199,13 +200,15 @@ VTEST(a_block_that_finds_a_line_being_written_out_waits_for_the_words) {
     bool writes, stops;
   };
   const Case cases[] = {{3, false, true}, {3, true, true}, {9, true, true}, {7, false, false}, {7, true, false}, {9, false, false}};
+  for (const int window : {kOutBusy, kOutHalf})   // (held before the first store of the words, or half way through them)
   for (const Case& c : cases) {
-    const std::string what = std::string(c.writes ? "write" : "read") + " of word " + std::to_string(c.word);
+    const std::string what = std::string(c.writes ? "write" : "read") + " of word " + std::to_string(c.word) +
+                             (window == kOutHalf ? ", half written out" : "");
     Lines d;
     d.mem.spec_begin(3, &d.by_word);
     VCHECK(!access(d, 0, 0, 9, false));
     VCHECK(!access(d, 0, 0, 3, true));   // block 0's record: word 9 read, word 3 written
-    arm(kOutBusy);
+    arm(window);
     Access b(d, 1, 1, 1, false, true);   // block 1 reads word 1, takes the record, and is held with the line busy
     VCHECK(within(10000, [] { return g_parked.load() == 1; }));
     Access c2(d, 2, 2, c.word, c.writes);
@@ -296,6 +299,27 @@ VTEST(a_block_about_to_note_more_in_its_record_while_another_writes_it_out_loses
         undone(d, d.mem.spec_end(), what);
       }
     }
+  }
+}
+
+// Block 0 is about to take an untouched line as its first reader (it has seen the record 0) and is held there; meanwhile block 1
+// takes the line first (it writes word 6, or reads it). Block 0, let go, must not put a record of its own over block 1's: a third
+// block must still find block 1's mark.
+VTEST(two_first_comers_to_an_untouched_line_do_not_lose_a_mark) {
+  Hooked hooked;
+  for (const bool other_writes : {false, true}) {
+    Lines d;
+    d.mem.spec_begin(3, &d.by_word);
+    arm(kFirstBefore);
+    Access a(d, 0, 0, 2, false, true);   // block 0 reads word 2 of the untouched line, held before it takes the record
+    VCHECK(within(10000, [] { return g_parked.load() == 1; }));
+    VCHECK(!access(d, 1, 1, 6, other_writes));
+    g_release.store(1);
+    VCHECK(!a.end());
+    // Block 2 at word 6 (a write: stopped by block 1's mark, read or written) and at word 2 (a write: stopped by block 0's).
+    if (!access(d, 2, 2, 6, true)) throw vtest::Failure(std::string("block 1's ") + (other_writes ? "write" : "read") + " was lost");
+    if (!access(d, 2, 2, 2, true)) throw vtest::Failure("block 0's read was lost");
+    undone(d, d.mem.spec_end(), "two first comers");
   }
 }
 
