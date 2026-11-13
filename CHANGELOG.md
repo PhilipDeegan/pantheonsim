@@ -46,6 +46,30 @@ release says what runs and what it produces, never how fast a real GPU would run
   removed, and the cache is capped (`VGPU_JIT_CACHE_MAX_MB`, default 256, least recently loaded objects first). The notice about a missing
   compiler or an unusable cache is given at most once a day per cache directory, and `VGPU_JIT=auto` turns the JIT on without those notices.
   Results and counters are unchanged.
+- Kernels no longer die with SIGFPE when the host program enabled floating-point traps (`feenableexcept`, gfortran
+  `-ffpe-trap=invalid,zero,overflow`, which SPECFEM3D's configure puts in `FLAGS_CHECK`). The engines did the device's arithmetic
+  under the host's traps, on the launching thread and on the worker threads that copy its environment, so the first inf or NaN a
+  kernel made killed the process; an RTX 3060 runs the same program with the traps on. A launch (PTX, SASS and AMD) now runs with
+  the traps masked, and the host gets its whole floating-point environment back afterwards, traps, rounding mode and sticky flags,
+  none raised by the kernel (`include/vgpu/exec/host_fp.hpp`). New unit tests `test_launch_fp_traps` and `test_amd_gcn_fp_traps`
+  (pantheonsim #605).
+- Runtime: driver functions taken from `cudaGetDriverEntryPoint` / `cudaGetDriverEntryPointByVersion` by a program that does not
+  link libcuda (gputools does this) see what the runtime has done, as on an RTX 3060: the driver is initialised (they returned
+  `CUDA_ERROR_NOT_INITIALIZED`), a thread the runtime has used has its primary context current (they returned
+  `CUDA_ERROR_INVALID_CONTEXT` from `cuModuleLoadData`), and a thread it has not used has none. Before any runtime call,
+  `cudaGetDriverEntryPoint` initialises the driver and makes no context current, as on the card. New e2e test
+  `e2e_driver_entry_late` (pantheonsim #604).
+- PTX: `ld.param::entry`, `ld.param::func` and `st.param::func`, the explicit `.param` state spaces of PTX ISA 8.3, are accepted as
+  `ld.param` / `st.param`; jax 0.12's kernels failed to load ("unrecognized ld/st modifier '.param::entry'"). `st.param::entry`
+  stays refused, as ptxas refuses it. Unit test `ld_param_entry_and_func_state_spaces` in `test_exec3` (pantheonsim #589).
+- Runtime: `cudaDestroyTextureObject` and `cudaDestroySurfaceObject` of a handle that is no object (0, one never made, one already
+  destroyed) return `cudaSuccess` and leave the last error alone, as an RTX 3060 does; they returned `cudaErrorInvalidValue`, which
+  MaCh3's teardown left in the last error for CUDAProb3's next check to exit on. Unit test in `test_runtime_exports`
+  (pantheonsim #618).
+- NPP, CUDA 12 build: `nppGetStreamContext`, `nppGetStream` and `nppSetStream` (NPP 12's own stream, which CUDA 13's NPP removed)
+  are exported from the shim, filling the context as NPP 12.3 does on an RTX 3060. New e2e test `e2e_npp_stream_context` (skips
+  on CUDA 13). `nppiFilterGaussBorder_8u_C1R_Ctx` is still absent (pantheonsim #617).
+
 - Setup action: a release carries the simulator prebuilt for linux-x86_64, one tarball and `.sha256` per runner and toolkit the
   action sets up (ubuntu-24.04 with CUDA 12.0, 12.6, 13.0 or none, ubuntu-22.04 with CUDA 12.6 or none), built and attached by
   `.github/workflows/release-binaries.yml` when a `v*` tag is pushed. The action, pinned at that release, downloads the tarball,

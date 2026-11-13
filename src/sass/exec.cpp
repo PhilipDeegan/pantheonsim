@@ -15,6 +15,7 @@ asm(".pushsection .text,\"ax\",@progbits\n.p2align 12\n.popsection");
 // Every instruction completes before the next: the control bits' stall counts
 // and scoreboards are timing, which VirtualGPU does not model.
 #include "vgpu/exec/devrt.hpp"
+#include "vgpu/exec/host_fp.hpp"
 #include "vgpu/exec/launch_env.hpp"
 #include "vgpu/exec/lockstep.hpp"
 #include "vgpu/exec/worker_pool.hpp"
@@ -2636,6 +2637,7 @@ exec::LaunchStats launch(const Module& m, const std::string& kernel, const exec:
                          const DeviceProfile& profile) {
   const auto it = m.kernel_index.find(kernel);
   if (it == m.kernel_index.end()) throw Error(Err::NotFound, "no kernel " + kernel + " in the module");
+  const exec::DeviceFpScope fp;   // host FP traps do not reach the kernel, nor its flags the host (vgpu/exec/host_fp.hpp, #605)
   Launches dl;
   dl.mem = &mem;
   exec::LaunchStats stats;
