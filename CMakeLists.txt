@@ -1556,6 +1556,13 @@ endforeach()
 add_test(NAME test_sass_chain_cont_jit_wait COMMAND test_sass_chain_cont)
 set_tests_properties(test_sass_chain_cont_jit_wait PROPERTIES ENVIRONMENT
   "VGPU_JIT=1;VGPU_JIT_EXPECT_WAIT=1;VGPU_JIT_THRESHOLD=20000;VGPU_JIT_LOOKUP_AFTER=256;VGPU_JIT_PROFILE=2000;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-wait-test_sass_chain_cont")
+# The wait before the lookup (round sp63): the share rule on (a sample of 1,000 instructions, a bar of 1 %; one call of the hook loop runs up to 14,000 of
+# these kernels' instructions, so the lookup is far enough past the sample to leave a wait), so that a kept section waits on the plain loop for its lookup and
+# then for its threshold, and is compiled after both; test_sass_chain_cont checks the words, the counters and that both waits happened
+# (VGPU_JIT_EXPECT_PREWAIT).
+add_test(NAME test_sass_chain_cont_jit_prewait COMMAND test_sass_chain_cont)
+set_tests_properties(test_sass_chain_cont_jit_prewait PROPERTIES ENVIRONMENT
+  "VGPU_JIT=1;VGPU_JIT_EXPECT_PREWAIT=1;VGPU_JIT_THRESHOLD=100000;VGPU_JIT_LOOKUP_AFTER=40000;VGPU_JIT_SAMPLE=1000;VGPU_JIT_MIN_SHARE=1;VGPU_JIT_PROFILE=5000;VGPU_JIT_SYNC=1;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-prewait-test_sass_chain_cont")
 # And with linking (VGPU_JIT_LINK=1, round sp52: the generated code goes on past a branch or cont op in a diverged warp while the chain would pick its group again):
 # test_sass_chain_cont's kernels diverge, loop apart and meet; the same words, counters and clocks as the interpreter, and the linking must have happened.
 # (VGPU_JIT_LINK_RULE=0: every section linked. The loop rule of round sp53 leaves a section with a loop and no BSSY, BSYNC, CALL or RET unlinked, and several of
@@ -1808,6 +1815,10 @@ target_include_directories(test_jit_share PRIVATE src)
 # Tier 2, round sp57: a section far from its compile threshold waits for it on the plain loop (State::Waiting) and counts again just before it.
 vgpu_unit_test(test_jit_wait)
 target_include_directories(test_jit_wait PRIVATE src)
+# Tier 2, round sp63: the wait before the lookup, a compile that did not finish compiled at the next run's lookup, the cache's directory, size cap and
+# age rule, and the notices (once a day; none with VGPU_JIT=auto, none for a compile cancelled at exit: child processes of the test itself).
+vgpu_unit_test(test_jit_cold)
+target_include_directories(test_jit_cold PRIVATE src)
 # Register residence of the generated code against the register-file code, on random regions (VGPU_JIT_RANDOM_UNITS=<n> for more).
 vgpu_unit_test(test_jit_resid)
 target_include_directories(test_jit_resid PRIVATE src)
