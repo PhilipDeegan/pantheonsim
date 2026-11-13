@@ -121,12 +121,16 @@ VTEST(a_launch_runs_every_task_once_and_all_at_the_same_time) {
     amd::pool::run(n, [&](unsigned i) {
       ++ran[i];
       ++started;
-      const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(20);
-      while (started.load() < n)
+      // The wait yields: tasks that spin flat out starve the ones not yet started when there are fewer cores
+      // than tasks (a 4-core hosted runner under ThreadSanitizer timed out twice at 20 s on 2026-11-12).
+      const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+      while (started.load() < n) {
         if (std::chrono::steady_clock::now() > limit) {
           timed_out = true;
           break;
         }
+        std::this_thread::yield();
+      }
     });
     VCHECK(!timed_out.load());
     for (unsigned i = 0; i < n; ++i) VCHECK_EQ(ran[i].load(), 1u);
