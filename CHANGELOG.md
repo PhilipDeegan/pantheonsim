@@ -46,6 +46,87 @@ release says what runs and what it produces, never how fast a real GPU would run
   removed, and the cache is capped (`VGPU_JIT_CACHE_MAX_MB`, default 256, least recently loaded objects first). The notice about a missing
   compiler or an unusable cache is given at most once a day per cache directory, and `VGPU_JIT=auto` turns the JIT on without those notices.
   Results and counters are unchanged.
+- Kernels no longer die with SIGFPE when the host program enabled floating-point traps (`feenableexcept`, gfortran
+  `-ffpe-trap=invalid,zero,overflow`, which SPECFEM3D's configure puts in `FLAGS_CHECK`). The engines did the device's arithmetic
+  under the host's traps, on the launching thread and on the worker threads that copy its environment, so the first inf or NaN a
+  kernel made killed the process; an RTX 3060 runs the same program with the traps on. A launch (PTX, SASS and AMD) now runs with
+  the traps masked, and the host gets its whole floating-point environment back afterwards, traps, rounding mode and sticky flags,
+  none raised by the kernel (`include/vgpu/exec/host_fp.hpp`). New unit tests `test_launch_fp_traps` and `test_amd_gcn_fp_traps`
+  (pantheonsim #605).
+- Runtime: driver functions taken from `cudaGetDriverEntryPoint` / `cudaGetDriverEntryPointByVersion` by a program that does not
+  link libcuda (gputools does this) see what the runtime has done, as on an RTX 3060: the driver is initialised (they returned
+  `CUDA_ERROR_NOT_INITIALIZED`), a thread the runtime has used has its primary context current (they returned
+  `CUDA_ERROR_INVALID_CONTEXT` from `cuModuleLoadData`), and a thread it has not used has none. Before any runtime call,
+  `cudaGetDriverEntryPoint` initialises the driver and makes no context current, as on the card. New e2e test
+  `e2e_driver_entry_late` (pantheonsim #604).
+- PTX: `ld.param::entry`, `ld.param::func` and `st.param::func`, the explicit `.param` state spaces of PTX ISA 8.3, are accepted as
+  `ld.param` / `st.param`; jax 0.12's kernels failed to load ("unrecognized ld/st modifier '.param::entry'"). `st.param::entry`
+  stays refused, as ptxas refuses it. Unit test `ld_param_entry_and_func_state_spaces` in `test_exec3` (pantheonsim #589).
+- Runtime: `cudaDestroyTextureObject` and `cudaDestroySurfaceObject` of a handle that is no object (0, one never made, one already
+  destroyed) return `cudaSuccess` and leave the last error alone, as an RTX 3060 does; they returned `cudaErrorInvalidValue`, which
+  MaCh3's teardown left in the last error for CUDAProb3's next check to exit on. Unit test in `test_runtime_exports`
+  (pantheonsim #618).
+- NPP, CUDA 12 build: `nppGetStreamContext`, `nppGetStream` and `nppSetStream` (NPP 12's own stream, which CUDA 13's NPP removed)
+  are exported from the shim, filling the context as NPP 12.3 does on an RTX 3060. New e2e test `e2e_npp_stream_context` (skips
+  on CUDA 13). `nppiFilterGaussBorder_8u_C1R_Ctx` is still absent (pantheonsim #617).
+
+- Peer access: after `cudaDeviceEnablePeerAccess` (or `cuCtxEnablePeerAccess`), a kernel on one simulated device reads, writes and
+  atomically updates the peer device's allocations in place, as on a card (unified addressing). It stopped with `[invalid-pointer]
+  ... (belongs to a different device)` and `cudaErrorIllegalAddress`, so a program that asks `cudaDeviceCanAccessPeer` and takes the
+  direct route when the answer is yes failed (accl-kaust/GPU-IBS on two simulated H100s, pantheonsim #598). Without peer access, or
+  after `cudaDeviceDisablePeerAccess`, the access still faults, as it does on two RTX 3060s (measured). Only an access that missed every
+  allocation of the device looks at the peer; launch caching (`VGPU_MEMO=1`) and host-GPU mode stand aside while a peer link exists.
+  New test `e2e_peer_kernel` (SASS and PTX paths).
+- `vgpu run --preload`: `import ThrustRTC` (PyPI 0.3.20) no longer crashes with a segmentation fault (pantheonsim #597). ThrustRTC
+  keeps the driver's and NVRTC's functions in exported pointers named like them (`cuInit`, `nvrtcVersion`, ...), and with the shim's
+  `libcuda.so.1` preloaded its references to its own `cuInit` bound to the shim's function, whose code its `dlsym` result then
+  overwrote (NVIDIA's own `libcuda.so.1` preloaded does the same). The driver's libraries and NVRTC are now loaded privately
+  (`RTLD_LOCAL`) by the preloaded runtime as it starts (`VGPU_PRELOAD_PRIVATE`), so every later request for those sonames still gets
+  the simulator's, and the global scope no longer holds their functions. New test `e2e_preload_fnptr`. ThrustRTC's kernels still do
+  not compile through the simulator's NVRTC (its own `cstdint` meets the host's `/usr/include`).
+- `e2e_sass_jit` (steps shard): a fault run whose compile did not happen (it outlasted its time limit on a loaded runner, or the
+  compiler was killed) no longer fails the comparison with the tier. The JIT's notice on stderr ("pantheonsim: JIT: ... stay on the
+  tier") was the only difference: the fault itself was reported the same, byte for byte, in 72 runs of the tier, the JIT and the JIT
+  without exceptions on an idle and on a loaded machine (pantheonsim #611). The fault runs give a compile 840 s and take a run that
+  could not compile once more; a failure now names the notice or shows the diff, and a compiler killed on its first compile checks the
+  retry.
+- `test_lockstep_look`: `a_block_that_stands_still_is_still_found_out_and_slept_on` no longer depends on how many turns a thread
+  takes in 100 ms of wall time, which failed under load and under ThreadSanitizer (pantheonsim #612). `lockstep_worker` takes the
+  nap it sleeps between passes as a callable (the engines' sleeps, unchanged); the test counts the naps: the first after the third
+  look, then 5, 10, 20 ... 500 microseconds, and none for a block that computes.
+- AMD: `v_div_fixup_f32`/`_f64` and `v_div_fmas_f32`/`_f64` with the VOP3 `clamp` bit or an output modifier (`mul:2`, `mul:4`,
+  `div:2`) wrote the result unchanged, in the interpreter and in the tier. clang folds `fmin(fmax(a / b, 0), 1)` into the clamp of the
+  division's last instruction (`v_div_fixup_f64 ... clamp`) at -O2 and up, so such code got the unclamped quotient (llnl/exadis on gfx942).
+  They now clamp and scale as every other VOP3 float result does; `v_div_fixup_f16` already did. New test `test_amd_gcn_div_clamp`
+  (pantheonsim #613).
+- AMD: an atomic add (or any read-modify-write) of a dispatch that started while another dispatch ran alone could be lost. The lone
+  dispatch decided at the start of an atomic instruction that it needed no lock, and the other's atomic landed between its read and its
+  write. A dispatch now marks such an instruction before it looks at the count of running dispatches, and a dispatch that starts waits
+  for that instruction to end; results of programs that run one dispatch at a time are unchanged. New test
+  `a_dispatch_that_starts_while_another_runs_alone_does_not_lose_atomic_adds` in `test_amd_gcn_atomics` (pantheonsim #610).
+- AMD: a kernel built with `.amdhsa_uses_dynamic_stack 1` (recursion, indirect or virtual calls) gets
+  max(`hipLimitStackSize`, its static `private_segment_fixed_size`) bytes of scratch per work-item, as ROCm's HIP gives it
+  (CLR `VirtualGPU::submitKernelInternal`), instead of only its static size; an HSA dispatch packet's `private_segment_size` is
+  honoured where it is larger, `HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_DYNAMIC_CALLSTACK` reports the descriptor's bit, and
+  `hipDeviceSetLimit(hipLimitStackSize)` rounds up to 16 bytes and refuses more than a wave's scratch offset addresses (131004 bytes on
+  gfx9), as CLR does. New tests `test_amd_gcn_dyn_stack` and `test_amd_hip_dyn_stack` (pantheonsim #585).
+- Tests: `e2e_group_ballot_barrier`, a cell-list neighbour build in the shape of fastMD's `nl_build_kernel` (groups of four lanes
+  at different copies of a group-masked `__ballot_sync`, then a full-mask `__shfl_down_sync` and `__syncthreads`), on a simulated
+  H100 as PTX and as SASS, every count and listed neighbour checked against the host; it passes on an RTX 3060. fastMD's
+  `VerletList.GrowsOnOverflowAndStaysComplete` (and the rest of `test_verlet`) and `Simulation.LayerStressSumRules` pass on main
+  on both paths (pantheonsim #574).
+- cuBLAS: the band and packed matrix-vector routines (`tbmv`, `tpmv`, `gbmv`, `sbmv`/`hbmv`, `spmv`/`hpmv`, every type) read the
+  band where it is stored and loop over it, instead of building the full n x n matrix on every call. SCS's diagonal scaling
+  (`cublasDtbmv` with k = 0 on a vector of 1500) mapped 34 MiB, took 8,000 page faults and summed 2.25 million products on each
+  call; with transparent huge pages at `madvise`, as GitHub's runners ship them, that was most of the run. SCS's `max_ent` solve
+  on a 7.0 kernel with `madvise`: 574 s before, 5.5 s after, the same iterations; the answers are the full loops' bits (an
+  infinity or NaN in x still runs the full loops, which make NaN of the zeros it meets). `tbsv`/`tpsv` still use the full matrix.
+  Making a device also fixes glibc's heap thresholds where its dynamic rule ends up (32 MiB mmap, 64 MiB trim), so a
+  host-computed library call that loads and frees a few MiB of operands (cuSPARSE SpMV) no longer gives the heap back to the
+  kernel and faults it in again each time (`VGPU_HOST_HEAP=0`, or a threshold set in the environment, keeps glibc's own).
+  The setup action has a `huge-pages` input (default `true`): on a GitHub-hosted runner whose transparent huge pages are
+  `madvise` it sets `always` for the job when sudo works, says what it did, and never fails the step
+  (`scripts/thp-always.sh`). New tests `test_cublas_band_heap`, `test_host_heap` and `lint_thp_always` (pantheonsim #551).
 - Setup action: a release carries the simulator prebuilt for linux-x86_64, one tarball and `.sha256` per runner and toolkit the
   action sets up (ubuntu-24.04 with CUDA 12.0, 12.6, 13.0 or none, ubuntu-22.04 with CUDA 12.6 or none), built and attached by
   `.github/workflows/release-binaries.yml` when a `v*` tag is pushed. The action, pinned at that release, downloads the tarball,

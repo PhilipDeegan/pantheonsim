@@ -1458,6 +1458,8 @@ vgpu_unit_test(test_ptx_block_reuse)
 vgpu_unit_test(test_worker_pool)
 # VGPU_HOST_STATS: the host-kernel counters line for a run that is slower on one kernel than another (#551).
 vgpu_unit_test(test_host_stats)
+# Device memory is madvised for huge pages, and making a device fixes glibc's heap thresholds (#551).
+vgpu_unit_test(test_host_heap)
 vgpu_unit_test(test_sched)
 # The SASS executor's atomics (vgpu/exec/sass_atomics.hpp), and its lane-state helpers and shuffle shapes (vgpu/exec/sass_lanes.hpp,
 # src/sass/tier.hpp), against the lane-by-lane code they replaced.
@@ -1614,6 +1616,8 @@ vgpu_unit_test(test_lockstep_look)
 vgpu_unit_test(test_sass_lea)
 # ULDC c[bank][URa + offset]: the offset is signed and the address wraps in the 64 KiB bank (pantheonsim #499).
 vgpu_unit_test(test_sass_uldc_indexed)
+# Kernels launched while the host has floating-point traps enabled (#605): no SIGFPE, the host environment as it was.
+vgpu_unit_test(test_launch_fp_traps)
 # The SIMD lane kernels, bit for bit against scalar code at every level the CPU has.
 vgpu_unit_test(test_simd)
 # An RTX 3060's tensor-core sum (include/vgpu/exec/tc_ampere.hpp): card-measured vectors, an independent form, special values.
@@ -2045,6 +2049,13 @@ foreach(_t gfx1100 gfx1030)
   add_test(NAME test_amd_gcn_threads_${_t} COMMAND test_amd_gcn_threads)
   set_tests_properties(test_amd_gcn_threads_${_t} PROPERTIES ENVIRONMENT "VGPU_TEST_TARGET=${_t}")
 endforeach()
+# A dispatch while the host has floating-point traps enabled (#605): no SIGFPE, the host environment as it was.
+vgpu_unit_test(test_amd_gcn_fp_traps amd/tests/unit/test_gcn_fp_traps.cpp)
+target_compile_definitions(test_amd_gcn_fp_traps PRIVATE VGPU_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+foreach(_t gfx1100 gfx1030)
+  add_test(NAME test_amd_gcn_fp_traps_${_t} COMMAND test_amd_gcn_fp_traps)
+  set_tests_properties(test_amd_gcn_fp_traps_${_t} PROPERTIES ENVIRONMENT "VGPU_TEST_TARGET=${_t}")
+endforeach()
 # A stream's queue (amd/src/hip_queue.hpp): order, the numbering of items, and a waited-for item run on the calling thread
 # when the stream is idle.
 vgpu_unit_test(test_amd_hip_queue amd/tests/unit/test_hip_queue.cpp)
@@ -2057,6 +2068,18 @@ target_compile_definitions(test_amd_gcn_cdna_gaps PRIVATE VGPU_SOURCE_DIR="${CMA
 # Three bugs other programs ran into (issues #578, #579, #580): a negative scratch offset, a scalar load into VCC, a packed constant zero.
 vgpu_unit_test(test_amd_gcn_issues_nov11 amd/tests/unit/test_gcn_issues_nov11.cpp)
 target_compile_definitions(test_amd_gcn_issues_nov11 PRIVATE VGPU_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+# A kernel with a dynamic stack gets the device's stack size of scratch (issue #585): the code object and execute, then a HIP launch.
+vgpu_unit_test(test_amd_gcn_dyn_stack amd/tests/unit/test_gcn_dyn_stack.cpp)
+target_compile_definitions(test_amd_gcn_dyn_stack PRIVATE VGPU_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+add_executable(test_amd_hip_dyn_stack amd/tests/unit/test_hip_dyn_stack.cpp)
+target_link_libraries(test_amd_hip_dyn_stack PRIVATE vgpuhip)
+target_include_directories(test_amd_hip_dyn_stack PRIVATE tests/framework amd/include)
+target_compile_definitions(test_amd_hip_dyn_stack PRIVATE VGPU_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+add_test(NAME test_amd_hip_dyn_stack COMMAND test_amd_hip_dyn_stack)
+set_tests_properties(test_amd_hip_dyn_stack PROPERTIES ENVIRONMENT "VGPU_GPU=amd/mi300x;VGPU_QUIET=1" FAIL_REGULAR_EXPRESSION "FAIL")
+# v_div_fmas / v_div_fixup with the clamp bit or an output modifier (issue #613).
+vgpu_unit_test(test_amd_gcn_div_clamp amd/tests/unit/test_gcn_div_clamp.cpp)
+target_compile_definitions(test_amd_gcn_div_clamp PRIVATE VGPU_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 vgpu_unit_test(test_amd_gcn_abandon amd/tests/unit/test_gcn_abandon.cpp)
 target_compile_definitions(test_amd_gcn_abandon PRIVATE VGPU_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 vgpu_unit_test(test_amd_hostcall amd/tests/unit/test_hostcall.cpp)
@@ -2929,6 +2952,12 @@ if(TARGET vgpucublas)
   target_include_directories(test_cublas_complex_heap PRIVATE tests/framework ${CUDA_ABI_INCLUDE})
   add_test(NAME test_cublas_complex_heap COMMAND test_cublas_complex_heap)
   set_tests_properties(test_cublas_complex_heap PROPERTIES ENVIRONMENT "VGPU_GPU=nvidia/rtx3060;VGPU_QUIET=1;VGPU_THREADS=2" TIMEOUT 600)
+  # The band and packed matrix-vector routines hold the band, not a full n x n copy, and give the full loops' bits (#551).
+  add_executable(test_cublas_band_heap nvidia/tests/unit/test_cublas_band_heap.cpp)
+  target_link_libraries(test_cublas_band_heap PRIVATE vgpucublas vgpucudart)
+  target_include_directories(test_cublas_band_heap PRIVATE tests/framework ${CUDA_ABI_INCLUDE})
+  add_test(NAME test_cublas_band_heap COMMAND test_cublas_band_heap)
+  set_tests_properties(test_cublas_band_heap PROPERTIES ENVIRONMENT "VGPU_GPU=nvidia/rtx3060;VGPU_QUIET=1" TIMEOUT 600)
 endif()
 # cublasGemmEx with half, bfloat16 and int8 operands, likewise.
 if(TARGET vgpucublas)
@@ -3084,7 +3113,7 @@ if(TARGET vgpucublas)
                           "blas_lt_together:cublas:cublasLt" "blas_ex_paths:cublas" "blas_rot_paths:cublas"
                           "blas_level23_paths:cublas" "blas_host_sums:cublas" "blas_grouped:cublas" "blas_packed_paths:cublas"
                           "blas_batched_paths:cublas" "blas_64_paths:cublas" "blas_legacy_paths:cublas"
-                          "rand_paths:curand" "rand_host_fill:curand" "npp_host_ops:nppc:nppial:nppif:nppig:nppim:nppitc" "managed_paths:cuda" "array_paths:cuda" "complex_paths:cublas:cusolver"
+                          "rand_paths:curand" "rand_host_fill:curand" "driver_entry_late:cudart" "npp_stream_context:nppc:nppidei:nppial" "npp_host_ops:nppc:nppial:nppif:nppig:nppim:nppitc" "managed_paths:cuda" "array_paths:cuda" "complex_paths:cublas:cusolver"
                           "nvrtc_paths:nvrtc:cuda" "statevec_paths:custatevec" "cudss_kkt:cudss" "cudss1_kkt:cudss1" "cudss_paths:cudss"
                           "cufile_paths:cufile" "nvcomp_paths:nvcomp" "nvcomp_manager:nvcomp" "nvcomp_streaming:nvcomp" "nvcomp_cpu:nvcomp_cpu:nvcomp"
                           "nvshmem_host:nvshmem_host" "solver_dense_paths:cusolver" "solver_rf_paths:cusolver"
@@ -3378,6 +3407,14 @@ if(TARGET vgpucublas)
       ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
       SKIP_REGULAR_EXPRESSION "^SKIP:"
       TIMEOUT 300)
+    # A kernel reaches a peer device's allocations once peer access is enabled, and faults without it (#598).
+    add_test(NAME e2e_peer_kernel
+             COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_peer_kernel.sh)
+    set_tests_properties(e2e_peer_kernel PROPERTIES
+      DEPENDS "vgpucudart;vgpucuda"
+      ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
+      SKIP_REGULAR_EXPRESSION "^SKIP:"
+      TIMEOUT 300)
   endif()
 
   add_test(NAME e2e_device_functions
@@ -3467,6 +3504,16 @@ if(TARGET vgpucublas)
     DEPENDS vgpucudart
     ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
     TIMEOUT 300)
+
+  # Sub-warp groups at different copies of a group-masked ballot, then a full-mask shuffle and __syncthreads (#574):
+  # a cell-list neighbour build, PTX and SASS, checked against the host.
+  add_test(NAME e2e_group_ballot_barrier
+           COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_group_ballot_barrier.sh)
+  set_tests_properties(e2e_group_ballot_barrier PROPERTIES
+    DEPENDS vgpucudart
+    ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
+    SKIP_REGULAR_EXPRESSION "^SKIP:"
+    TIMEOUT 600)
 
   add_test(NAME e2e_host_atomics
            COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_host_atomics.sh)
@@ -4304,6 +4351,11 @@ add_test(NAME lint_ci_reservation
 add_test(NAME lint_apt_mirror_fallback COMMAND ${CMAKE_SOURCE_DIR}/tests/lint/check_apt_mirror_fallback.sh)
 set_tests_properties(lint_apt_mirror_fallback PROPERTIES TIMEOUT 60)
 
+# scripts/thp-always.sh sets transparent huge pages to always on a GitHub-hosted runner shipped with madvise, when it can,
+# and never fails the action's step (#551).
+add_test(NAME lint_thp_always COMMAND ${CMAKE_SOURCE_DIR}/tests/lint/check_thp_always.sh)
+set_tests_properties(lint_thp_always PROPERTIES TIMEOUT 60)
+
 # The merge-conflict guards (ci/pr-guard.sh at the start of a heavy job,
 # ci/cancel-conflicting-prs.sh after main moves) against a fake gh and curl.
 add_test(NAME lint_pr_guard COMMAND ${CMAKE_SOURCE_DIR}/tests/lint/check_pr_guard.sh)
@@ -4792,6 +4844,13 @@ set_tests_properties(e2e_vgpu_run PROPERTIES
   DEPENDS vgpu_cli
   ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
   TIMEOUT 600)
+# vgpu run --preload and a library that keeps the driver's and NVRTC's functions in exported pointers named like them (ThrustRTC, #597).
+add_test(NAME e2e_preload_fnptr COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_preload_fnptr.sh)
+set_tests_properties(e2e_preload_fnptr PROPERTIES
+  DEPENDS vgpu_cli
+  ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
+  SKIP_REGULAR_EXPRESSION "^SKIP:"
+  TIMEOUT 300)
 # The per-thread default stream's names (cudaMemcpy_ptds, ...), which a
 # program built with nvcc --default-stream per-thread calls; COLMAP does.
 add_test(NAME e2e_per_thread_stream COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_per_thread_stream.sh)
