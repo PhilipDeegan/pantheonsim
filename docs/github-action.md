@@ -56,13 +56,11 @@ To compile with a newer CUDA than Ubuntu's, give its version:
    - AMD: ROCm's `hipcc`, with the clang and device libraries it compiles
      with, from AMD's repository. Only the compiler: the simulator is the
      runtime, so no driver or ROCm runtime is installed.
-2. Gets the simulator for the ref the job named: the prebuilt tarball from
-   that release when the ref is a release with one for this runner and
-   toolkit (its sha256 checked), otherwise a build from source, cached against
-   a hash of its source and the toolkit version so later runs skip it. See
+2. Gets the simulator at the commit the release pins: the prebuilt tarball
+   from that release when it has one for this runner and toolkit (its sha256
+   checked), otherwise a build from source, cached against a hash of its
+   source and the toolkit version so later runs skip it. See
    [Setup time](#setup-time).
-2. Builds the simulator at the commit the release pins, and caches the build against
-   a hash of its source and the toolkit version, so later runs skip it.
 3. Puts the simulator's tools first on `PATH` and sets `VGPU_GPU` and
    `VGPU_DEVICE_COUNT` for the rest of the job.
 
