@@ -4778,6 +4778,13 @@ set_tests_properties(e2e_vgpu_run PROPERTIES
   DEPENDS vgpu_cli
   ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
   TIMEOUT 600)
+# vgpu run --preload and a library that keeps the driver's and NVRTC's functions in exported pointers named like them (ThrustRTC, #597).
+add_test(NAME e2e_preload_fnptr COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_preload_fnptr.sh)
+set_tests_properties(e2e_preload_fnptr PROPERTIES
+  DEPENDS vgpu_cli
+  ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
+  SKIP_REGULAR_EXPRESSION "^SKIP:"
+  TIMEOUT 300)
 # The per-thread default stream's names (cudaMemcpy_ptds, ...), which a
 # program built with nvcc --default-stream per-thread calls; COLMAP does.
 add_test(NAME e2e_per_thread_stream COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_per_thread_stream.sh)

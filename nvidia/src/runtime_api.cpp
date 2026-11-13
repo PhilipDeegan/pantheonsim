@@ -115,6 +115,24 @@ bool quiet() {
 bool trace(const char* t) { return t && t[0] == '1'; }
 bool trace() { return trace(std::getenv("VGPU_TRACE")); }
 
+// `vgpu run --preload` (src/cli/run.cpp) names the driver's libraries and NVRTC in VGPU_PRELOAD_PRIVATE instead of LD_PRELOAD: they are
+// loaded here, while the preloaded runtime starts, before the program's own code runs, and privately (RTLD_LOCAL). Loaded under their
+// sonames, they are what every later request for one gets, as a preloaded library is; but their functions are not in the global scope,
+// where a library's own exported variable of the same name (ThrustRTC's function pointers `cuInit`, `nvrtcVersion`, ... that it fills
+// from dlsym) would bind to them, and the library would then write over their code (#597).
+__attribute__((constructor)) static void load_private_preloads() {
+  const char* v = std::getenv("VGPU_PRELOAD_PRIVATE");
+  if (!v || !*v) return;
+  const std::string list = v;
+  for (size_t at = 0; at < list.size();) {
+    const size_t end = std::min(list.find(' ', at), list.size());
+    const std::string path = list.substr(at, end - at);
+    at = end + 1;
+    if (path.empty()) continue;
+    if (!dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL) && !quiet())
+      std::fprintf(stderr, "[vgpu] --preload: cannot load %s: %s\n", path.c_str(), dlerror());
+  }
+}
 
 // A fatbin registered by the host boilerplate. PTX is parsed into a runtime
 // module lazily on first use for the active device.

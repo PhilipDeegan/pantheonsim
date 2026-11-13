@@ -14,6 +14,13 @@ release says what runs and what it produces, never how fast a real GPU would run
   after `cudaDeviceDisablePeerAccess`, the access still faults, as it does on two RTX 3060s (measured). Only an access that missed every
   allocation of the device looks at the peer; launch caching (`VGPU_MEMO=1`) and host-GPU mode stand aside while a peer link exists.
   New test `e2e_peer_kernel` (SASS and PTX paths).
+- `vgpu run --preload`: `import ThrustRTC` (PyPI 0.3.20) no longer crashes with a segmentation fault (pantheonsim #597). ThrustRTC
+  keeps the driver's and NVRTC's functions in exported pointers named like them (`cuInit`, `nvrtcVersion`, ...), and with the shim's
+  `libcuda.so.1` preloaded its references to its own `cuInit` bound to the shim's function, whose code its `dlsym` result then
+  overwrote (NVIDIA's own `libcuda.so.1` preloaded does the same). The driver's libraries and NVRTC are now loaded privately
+  (`RTLD_LOCAL`) by the preloaded runtime as it starts (`VGPU_PRELOAD_PRIVATE`), so every later request for those sonames still gets
+  the simulator's, and the global scope no longer holds their functions. New test `e2e_preload_fnptr`. ThrustRTC's kernels still do
+  not compile through the simulator's NVRTC (its own `cstdint` meets the host's `/usr/include`).
 - `e2e_sass_jit` (steps shard): a fault run whose compile did not happen (it outlasted its time limit on a loaded runner, or the
   compiler was killed) no longer fails the comparison with the tier. The JIT's notice on stderr ("pantheonsim: JIT: ... stay on the
   tier") was the only difference: the fault itself was reported the same, byte for byte, in 72 runs of the tier, the JIT and the JIT
