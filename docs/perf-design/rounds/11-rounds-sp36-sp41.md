@@ -2406,8 +2406,6 @@ No setting wins: the line costs gaussian 4 to 7 % at 4 threads and 10 to 12 % at
 | perplexity-cuda | 0.38 | 1.22x / 1.83x / 1.82x | 1.16x / 1.73x / 1.75x | 0.951 / 0.946 / 0.961 | 2.49x | 0.999 | 0.957 | same |
 | s3d-cuda | 0.39 | 0.94x / 1.27x / 1.54x | 1.00x / 1.34x / 1.65x | 1.068 / 1.060 / 1.071 | 2.29x | 1.004 | 1.011 | same |
 | silu-cuda | 0.48 | 1.49x / 2.15x / 2.85x | 1.58x / 2.27x / 3.05x | 1.060 / 1.053 / 1.070 | 3.21x | 1.001 | 1.030 | same |
-| program, threads | base s | new 0,0 | new 0,1 | new 2,1 | new 4,0 | new 4,1 | new 8,1 |
-|---|---:|---:|---:|---:|---:|---:|---:|
 
 Reading:
 
