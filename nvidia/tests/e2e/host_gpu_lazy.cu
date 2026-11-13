@@ -27,6 +27,21 @@ __global__ void scramble(uint32_t* d, int n, int rounds) {
   }
   d[i] = x;
 }
+// `scramble` with its loop kept whole (`few`, Round sp61): nvcc unrolls `scramble`'s loop by 4 and counts the unrolled part through a register it adds
+// to the counter, which the in-block sample does not follow (it follows a counter compared to a bound, plus a constant at most).
+__global__ void scramble1(uint32_t* d, int n, int rounds) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  uint32_t x = d[i] ^ (uint32_t(i) * 2654435761u);
+#pragma unroll 1
+  for (int r = 0; r < rounds; ++r) {
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    x += uint32_t(r) * 0x9e3779b9u;
+  }
+  d[i] = x;
+}
 __global__ void use_expf(float* d, int n) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) d[i] = expf(d[i] * 0.001f) + float(i);
@@ -107,6 +122,7 @@ int main(int argc, char** argv) {
     else if (iatom) iatomk<<<(n + 255) / 256, 256>>>(static_cast<unsigned*>(d), n);
     else if (fatom) fatomk<<<(n + 255) / 256, 256>>>(static_cast<float*>(d), n);
     else if (cas) cask<<<(n + 255) / 256, 256>>>(static_cast<unsigned*>(d), n);
+    else if (few) scramble1<<<(n + 255) / 256, 256>>>(static_cast<uint32_t*>(d), n, rounds);
     else scramble<<<(n + 255) / 256, 256>>>(static_cast<uint32_t*>(d), n, rounds);
     cudaDeviceSynchronize();
     if (launch == 0) std::fprintf(stderr, "first_launch_ms=%.0f\n", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
