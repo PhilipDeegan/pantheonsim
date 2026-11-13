@@ -94,6 +94,22 @@ release says what runs and what it produces, never how fast a real GPU would run
   takes in 100 ms of wall time, which failed under load and under ThreadSanitizer (pantheonsim #612). `lockstep_worker` takes the
   nap it sleeps between passes as a callable (the engines' sleeps, unchanged); the test counts the naps: the first after the third
   look, then 5, 10, 20 ... 500 microseconds, and none for a block that computes.
+- AMD: `v_div_fixup_f32`/`_f64` and `v_div_fmas_f32`/`_f64` with the VOP3 `clamp` bit or an output modifier (`mul:2`, `mul:4`,
+  `div:2`) wrote the result unchanged, in the interpreter and in the tier. clang folds `fmin(fmax(a / b, 0), 1)` into the clamp of the
+  division's last instruction (`v_div_fixup_f64 ... clamp`) at -O2 and up, so such code got the unclamped quotient (llnl/exadis on gfx942).
+  They now clamp and scale as every other VOP3 float result does; `v_div_fixup_f16` already did. New test `test_amd_gcn_div_clamp`
+  (pantheonsim #613).
+- AMD: an atomic add (or any read-modify-write) of a dispatch that started while another dispatch ran alone could be lost. The lone
+  dispatch decided at the start of an atomic instruction that it needed no lock, and the other's atomic landed between its read and its
+  write. A dispatch now marks such an instruction before it looks at the count of running dispatches, and a dispatch that starts waits
+  for that instruction to end; results of programs that run one dispatch at a time are unchanged. New test
+  `a_dispatch_that_starts_while_another_runs_alone_does_not_lose_atomic_adds` in `test_amd_gcn_atomics` (pantheonsim #610).
+- AMD: a kernel built with `.amdhsa_uses_dynamic_stack 1` (recursion, indirect or virtual calls) gets
+  max(`hipLimitStackSize`, its static `private_segment_fixed_size`) bytes of scratch per work-item, as ROCm's HIP gives it
+  (CLR `VirtualGPU::submitKernelInternal`), instead of only its static size; an HSA dispatch packet's `private_segment_size` is
+  honoured where it is larger, `HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_DYNAMIC_CALLSTACK` reports the descriptor's bit, and
+  `hipDeviceSetLimit(hipLimitStackSize)` rounds up to 16 bytes and refuses more than a wave's scratch offset addresses (131004 bytes on
+  gfx9), as CLR does. New tests `test_amd_gcn_dyn_stack` and `test_amd_hip_dyn_stack` (pantheonsim #585).
 - Setup action: a release carries the simulator prebuilt for linux-x86_64, one tarball and `.sha256` per runner and toolkit the
   action sets up (ubuntu-24.04 with CUDA 12.0, 12.6, 13.0 or none, ubuntu-22.04 with CUDA 12.6 or none), built and attached by
   `.github/workflows/release-binaries.yml` when a `v*` tag is pushed. The action, pinned at that release, downloads the tarball,
