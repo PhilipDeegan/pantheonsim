@@ -115,6 +115,25 @@ bool quiet() {
 bool trace(const char* t) { return t && t[0] == '1'; }
 bool trace() { return trace(std::getenv("VGPU_TRACE")); }
 
+// `vgpu run --preload` (src/cli/run.cpp) names the driver's libraries and NVRTC in VGPU_PRELOAD_PRIVATE instead of LD_PRELOAD: they are
+// loaded here, while the preloaded runtime starts, before the program's own code runs, and privately (RTLD_LOCAL). Loaded under their
+// sonames, they are what every later request for one gets, as a preloaded library is; but their functions are not in the global scope,
+// where a library's own exported variable of the same name (ThrustRTC's function pointers `cuInit`, `nvrtcVersion`, ... that it fills
+// from dlsym) would bind to them, and the library would then write over their code (#597).
+__attribute__((constructor)) static void load_private_preloads() {
+  const char* v = std::getenv("VGPU_PRELOAD_PRIVATE");
+  if (!v || !*v) return;
+  const std::string list = v;
+  for (size_t at = 0; at < list.size();) {
+    const size_t end = std::min(list.find(' ', at), list.size());
+    const std::string path = list.substr(at, end - at);
+    at = end + 1;
+    if (path.empty()) continue;
+    if (!dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL) && !quiet())
+      std::fprintf(stderr, "[vgpu] --preload: cannot load %s: %s\n", path.c_str(), dlerror());
+  }
+}
+
 // A fatbin registered by the host boilerplate. PTX is parsed into a runtime
 // module lazily on first use for the active device.
 // A fatbin nvcc's host code registered. Its PTX is taken out the first time
@@ -2189,8 +2208,11 @@ static cudaError_t cudaDeviceReset_body(void) {
   release(pinned(s), true);
   release(s.managed_allocs, true);
   release(registered(s), false);
-  std::erase_if(s.peer_access,
-                [dev](const std::pair<int, int>& p) { return p.first == dev || p.second == dev; });
+  std::erase_if(s.peer_access, [&](const std::pair<int, int>& p) {
+    if (p.first != dev && p.second != dev) return false;
+    s.rt->device(p.first).memory().set_peer(s.rt->device(p.second).memory(), false);
+    return true;
+  });
   // Registered fatbins load again on the next launch, as they would into a
   // freshly created context.
   for (auto& m : s.modules) m->module_per_device.erase(dev);
@@ -2747,9 +2769,10 @@ static cudaError_t cudaDeviceCanAccessPeer_traced(int* can, int device, int peer
 VGPU_EXPORT cudaError_t cudaDeviceCanAccessPeer(int* can, int device, int peerDevice) {
   return traced_call("cudaDeviceCanAccessPeer", cudaDeviceCanAccessPeer_traced, can, device, peerDevice);
 }
-// Peer mappings are implicit in this engine -- every device window is reachable
-// from every kernel -- but whether one has been enabled is state a program can
-// observe, and callers act on the documented answers: enabling twice is
+// Once enabled, a kernel on the current device reaches the peer's allocations
+// (MemoryManager::set_peer), as on a card; before, an access there is an
+// invalid pointer (a card faults too). Callers also act on the documented
+// answers: enabling twice is
 // cudaErrorPeerAccessAlreadyEnabled, which frameworks deliberately tolerate,
 // and disabling what was never enabled is cudaErrorPeerAccessNotEnabled. Both
 // used to succeed unconditionally, whatever the flags, and so did disabling a
@@ -2767,6 +2790,7 @@ static cudaError_t cudaDeviceEnablePeerAccess_traced(int peerDevice, unsigned in
     if (!peer_path(s, t_current_device, peerDevice)) return cudaErrorPeerAccessUnsupported;
     if (!s.peer_access.emplace(t_current_device, peerDevice).second)
       return cudaErrorPeerAccessAlreadyEnabled;
+    s.rt->device(t_current_device).memory().set_peer(s.rt->device(peerDevice).memory(), true);
     return cudaSuccess;
   });
 }
@@ -2778,6 +2802,7 @@ static cudaError_t cudaDeviceDisablePeerAccess_traced(int peerDevice) {
   return guard("cudaDeviceDisablePeerAccess", [&](State& s) -> cudaError_t {
     if (peerDevice < 0 || peerDevice >= s.rt->device_count()) return cudaErrorInvalidDevice;
     if (!s.peer_access.erase({t_current_device, peerDevice})) return cudaErrorPeerAccessNotEnabled;
+    s.rt->device(t_current_device).memory().set_peer(s.rt->device(peerDevice).memory(), false);
     return cudaSuccess;
   });
 }
