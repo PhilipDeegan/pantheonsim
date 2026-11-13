@@ -2966,7 +2966,9 @@ struct Machine {
 
   // The three instructions a float division is built from: v_div_scale, v_div_fmas and v_div_fixup (gcn_divide.hpp has the pseudocode
   // they follow, and where it departs from the guides). The compiler scales the operands, refines a reciprocal, and these put the
-  // result back; the sequence lands on the correctly rounded quotient.
+  // result back; the sequence lands on the correctly rounded quotient. v_div_fmas and v_div_fixup are VOP3 float results like any other:
+  // the output modifier and the clamp apply (clang folds fmin(fmax(a / b, 0), 1) into the fixup's clamp bit, issue #613). v_div_scale's
+  // result is written whole.
   void divide_step(Wave& w, const Inst& in, uint32_t lane) {
     const OpName op(in);
     if (op.size() > 4 && op.compare(op.size() - 4, 4, "_f64") == 0) {
@@ -2976,9 +2978,9 @@ struct Machine {
         write_lane64(w, in.dst[0], lane, as_bits(r.value));
         if (r.vcc) sdst_bits |= uint64_t{1} << lane;
       } else if (op == "v_div_fmas_f64"_op) {
-        write_lane64(w, in.dst[0], lane, as_bits(gcn::divide::div_fmas(s0, s1, s2, (w.vcc >> lane) & 1)));
+        write_double(w, in, lane, gcn::divide::div_fmas(s0, s1, s2, (w.vcc >> lane) & 1));
       } else {   // v_div_fixup_f64
-        write_lane64(w, in.dst[0], lane, as_bits(gcn::divide::div_fixup(s0, s1, s2)));
+        write_double(w, in, lane, gcn::divide::div_fixup(s0, s1, s2));
       }
       return;
     }
@@ -2988,9 +2990,9 @@ struct Machine {
       write_lane(w, in.dst[0], lane, as_bits(r.value));
       if (r.vcc) sdst_bits |= uint64_t{1} << lane;
     } else if (op == "v_div_fmas_f32"_op) {
-      write_lane(w, in.dst[0], lane, as_bits(gcn::divide::div_fmas(s0, s1, s2, (w.vcc >> lane) & 1)));
+      write_float(w, in, lane, gcn::divide::div_fmas(s0, s1, s2, (w.vcc >> lane) & 1));
     } else {   // v_div_fixup_f32
-      write_lane(w, in.dst[0], lane, as_bits(gcn::divide::div_fixup(s0, s1, s2)));
+      write_float(w, in, lane, gcn::divide::div_fixup(s0, s1, s2));
     }
   }
 

@@ -30,6 +30,8 @@ data/asm_cdna_valu.gfx942.o	11f8eec498c52939
 data/asm_cdna_valu.gfx950.o	30f3b5cda3b4735a
 data/asm_cvt_ubyte.gfx942.o	2184726caf006e09
 data/asm_cycles.gfx1201.o	35d16a3102b42685
+data/asm_div_clamp.gfx90a.o	8502e1a0fdc0ff9f
+data/asm_div_clamp.gfx942.o	17befd168be7c34c
 data/asm_dot_clamp.gfx942.o	6b808558de0b7282
 data/asm_ds_tr.gfx950.o	cd632a50402cd1e2
 data/asm_fminmax11.gfx1100.o	186f82fb6abc01b9
