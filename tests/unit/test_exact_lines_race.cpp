@@ -30,7 +30,7 @@ extern void (*hook)(int at);
 
 namespace {
 
-constexpr int kOutBefore = 1, kOutBusy = 2, kKeepBusy = 3, kWaitBusy = 4;
+constexpr int kOutBefore = 1, kOutBusy = 2, kKeepBusy = 3, kWaitBusy = 4, kOwnBefore = 5;
 constexpr uint64_t kPage = 4096;
 
 // The hook: the one thread that is armed parks at its window, once, until the test lets it go; a thread that waits at a busy line
