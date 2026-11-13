@@ -1,0 +1,20 @@
+new build rc=0
+test_exact_threads [X=1] rc=0 11/11 tests passed
+test_exact_threads [VGPU_TIER=0] rc=0 11/11 tests passed
+test_exact_threads [VGPU_FASTPATH=0] rc=0 11/11 tests passed
+test_host_gpu_logic [X=1] rc=0 54/54 tests passed
+test_host_gpu_ref [X=1] rc=0 7/7 tests passed
+test_host_gpu_track [X=1] rc=0 14/14 tests passed
+test_memory [X=1] rc=0 80/80 tests passed
+test_memfast [X=1] rc=0 15/15 tests passed
+test_memalloc [X=1] rc=0 18/18 tests passed
+test_memrmw [X=1] rc=0 10/10 tests passed
+test_memhot_sp8 [X=1] rc=0 4/4 tests passed
+test_load_batch16 [X=1] rc=0 3/3 tests passed
+test_memcopy_direct [X=1] rc=0 6/6 tests passed
+test_memrmw_lockfree [X=1] rc=0 6/6 tests passed
+test_memcount_forms [X=1] rc=0 10/10 tests passed
+test_atom_rmw [X=1] rc=0 1/1 tests passed
+test_memo [X=1] rc=0 49/49 tests passed
+failed_block_not_a_stop          killed by default, tier0, fastpath0
+(no mutant)                      passes

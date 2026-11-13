@@ -639,9 +639,90 @@ class MemoryManager {
   static bool memo_trace_active();
   static constexpr uint64_t kMemoPage = 4096;
 
+  // ---- exact parallel launches (VGPU_EXACT_THREADS; docs/exact-threads.md, src/core/memory_spec.cpp) ----
+  // A launch whose blocks must give the bits of one host thread running them in order may still run them on several, on trial:
+  // while the trial lasts every access of a block to device memory is noted in a shadow of the device's address range (one word
+  // for four bytes: untouched, read by one block, read by several, written by one block), a block that would read what another
+  // wrote, or write what another read or wrote, stops the trial before it makes that access, and the first write of a block to
+  // a word keeps the bytes that were there. A trial that ends with no such access ran blocks that each saw the memory of
+  // before the launch and their own stores only, on disjoint bytes: any order of them, the serial one too, leaves the same
+  // bytes and the same counts. Any other trial is undone (the kept bytes go back) and the launch runs in order as it always did.
+  //
+  // What stops a trial is thrown as this, from the access that found it, and by every later access of the trial.
+  struct SpecStop {};
+  class Spec;   // the shadow and the undo log (src/core/memory_spec.cpp)
+  //
+  // The note is kept at two grains (src/core/memory_spec.cpp). A 4 KiB page that blocks only read is noted as a whole: one
+  // state for the page (untouched, read by one block, read by several) and nothing per word. A page a block writes in is
+  // noted by word from then on. A block that writes in a page it alone has read by page state takes every word of the page as
+  // read by it, which is more than it read; a stop that such a page, or a page state, may have made by itself is "coarse": the
+  // trial is undone like any other, and the caller may try again with the allocation noted by word from the start.
+  struct SpecPlan {
+    bool pages = true;   // false: every page is noted by word from its first touch
+    std::vector<std::pair<uint64_t, uint64_t>> by_word;   // [first, end) address ranges noted by word from the first touch
+  };
+  // What the notes of a trial cost, for VGPU_EXACT_STATS and the tests (sums over the workers).
+  struct SpecStats {
+    uint64_t hooks = 0;                 // calls of the hooks
+    uint64_t pages_read = 0;            // pages a block took as their first reader, by page state
+    uint64_t pages_shared = 0;          // ... that a second block then read (several readers)
+    uint64_t pages_by_word = 0;         // pages noted by word from their first touch
+    uint64_t pages_coarse = 0;          // pages their only reader went on to write in (every word marked read by it)
+    uint64_t page_looks = 0;            // reads that had to look at the shadow (no memory of the page, the run or the words)
+    uint64_t words_read = 0;            // words looked at for a read in pages noted by word
+    uint64_t words_read_first = 0;      // ... taken by compare-and-swap as their first reader
+    uint64_t words_read_shared = 0;     // ... moved to several readers by compare-and-swap
+    uint64_t words_written = 0;         // words looked at for a write
+    uint64_t words_written_first = 0;   // ... taken by compare-and-swap (their bytes are kept)
+    uint64_t keeps = 0;                 // pieces kept for undoing
+    uint64_t runs_known = 0;            // accesses inside a run of words the worker remembered its block had noted
+    uint64_t word_pages = 0;            // pages of words put in place
+    void add(const SpecStats& o);
+  };
+  struct SpecOutcome {
+    bool committed = false;
+    const char* why = "";          // what stopped the trial ("" when it committed)
+    uint64_t kept_bytes = 0;       // bytes kept for undoing
+    uint64_t shadow_pages = 0;     // 4 KiB pages of device memory the blocks touched
+    bool coarse = false;           // stopped, and a note coarser than the words may have made the stop
+    std::vector<std::pair<uint64_t, uint64_t>> by_word;   // the allocations of the coarse stops: what to add to the next trial's SpecPlan
+    SpecStats stats;
+  };
+  // Whether the device's memory can be shadowed at all: nothing mapped twice or outside the chunk tables (virtual-memory
+  // reservations and handles, shared-file memory), no fault armed, no card behind it, no result cache or trace listening.
+  bool spec_possible() const;
+  // The launching thread, before the blocks: starts a trial for `workers` host threads. Nothing else may use the device until spec_end.
+  // `plan` (null: every page may be noted as a whole) says what is noted by word from the start.
+  void spec_begin(unsigned workers, const SpecPlan* plan = nullptr);
+  // A host thread of the trial says which worker it is (0 .. workers-1), then which block it is about to run; spec_leave when it has no more.
+  void spec_enter(unsigned worker);
+  void spec_block(uint64_t block);
+  void spec_leave();
+  bool spec_active() const { return spec_ != nullptr; }
+  bool spec_stopped() const;
+  // Stops the trial for a reason of the caller's (a block failed, the kernel asked for something that depends on the thread).
+  void spec_stop(const char* why);
+  // The launching thread, after every worker left: keeps the trial's memory, or puts back what was there. The shadow is cleared.
+  SpecOutcome spec_end();
+
  private:
   AccessFault* access_fault_ = nullptr;
   memo::EventSink* memo_sink_ = nullptr;
+  // The trial in progress (null outside one: every hook below is this null test), and the shadow kept between trials.
+  Spec* spec_ = nullptr;
+  std::shared_ptr<Spec> spec_kept_;
+  // The hooks: every method that reads or writes device bytes calls one first when a trial is on. They throw SpecStop.
+  void spec_read(uint64_t addr, uint64_t len) const;
+  void spec_write(uint64_t addr, uint64_t len) const;
+  void spec_read_each(const uint64_t* addrs, size_t count, uint32_t size) const;
+  void spec_write_each(const uint64_t* addrs, size_t count, uint32_t size) const;
+  void spec_write_strided(uint64_t a0, int64_t stride, size_t count, uint32_t size) const;
+  [[noreturn]] void spec_refuse(const char* why) const;
+  void spec_read_in(Spec& s, void* worker, uint64_t addr, uint64_t len) const;
+  void spec_write_in(Spec& s, void* worker, uint64_t addr, uint64_t len) const;
+  void* spec_worker() const;
+  // The bytes of ordinary allocations in [addr, addr + len), for the undo log: appends (address, bytes) pieces to the calling worker's log.
+  void spec_keep(uint64_t addr, uint64_t len) const;
   size_t memo_host_map_count() const;
   MovableAtomic<CardGate*> card_gate_{nullptr};
   MovableAtomic<int32_t> card_resident_{0};

@@ -1,0 +1,128 @@
+[
+ {
+  "name": "polybench/ATAX",
+  "instr_before": 20949909805,
+  "instr_after": 21012814563,
+  "cycles_before": 6798981726,
+  "cycles_after": 6736086721,
+  "counters_same": true,
+  "load": 3.49169921875
+ },
+ {
+  "name": "polybench/SYRK",
+  "instr_before": 110543134127,
+  "instr_after": 110778147540,
+  "cycles_before": 25208224752,
+  "cycles_after": 25253433771,
+  "counters_same": true,
+  "load": 2.65380859375
+ },
+ {
+  "name": "polybench/3MM",
+  "instr_before": 30434412350,
+  "instr_after": 30535077470,
+  "cycles_before": 9672258585,
+  "cycles_after": 9766429548,
+  "counters_same": true,
+  "load": 2.39892578125
+ },
+ {
+  "name": "polybench/JACOBI2D",
+  "instr_before": 10151252568,
+  "instr_after": 10163212070,
+  "cycles_before": 2436332729,
+  "cycles_after": 2444731305,
+  "counters_same": true,
+  "load": 2.28662109375
+ },
+ {
+  "name": "polybench/MVT",
+  "instr_before": 21047941799,
+  "instr_after": 21110849285,
+  "cycles_before": 7376031656,
+  "cycles_after": 7385152332,
+  "counters_same": true,
+  "load": 2.24853515625
+ },
+ {
+  "name": "polybench/LU",
+  "instr_before": 507666291246,
+  "instr_after": 507932241156,
+  "cycles_before": 132473806093,
+  "cycles_after": 132255905694,
+  "counters_same": true,
+  "load": 1.1142578125
+ },
+ {
+  "name": "rodinia/hotspot",
+  "instr_before": 18166283441,
+  "instr_after": 18167875645,
+  "cycles_before": 4632712330,
+  "cycles_after": 4670515402,
+  "counters_same": true,
+  "load": 1.10498046875
+ },
+ {
+  "name": "rodinia/gaussian",
+  "instr_before": 70624659332,
+  "instr_after": 70544455731,
+  "cycles_before": 16828507747,
+  "cycles_after": 17601559788,
+  "counters_same": true,
+  "load": 1.07421875
+ },
+ {
+  "name": "rodinia/lavaMD",
+  "instr_before": 35748489189,
+  "instr_after": 35713061354,
+  "cycles_before": 8049335129,
+  "cycles_after": 7956692988,
+  "counters_same": true,
+  "load": 1.13720703125
+ },
+ {
+  "name": "rodinia/needle",
+  "instr_before": 5587800041,
+  "instr_after": 5589154577,
+  "cycles_before": 1427035744,
+  "cycles_after": 1448153047,
+  "counters_same": true,
+  "load": 1.13720703125
+ },
+ {
+  "name": "hecbench/shmembench-cuda",
+  "instr_before": 108361568148,
+  "instr_after": 108361559800,
+  "cycles_before": 22519096139,
+  "cycles_after": 22538869282,
+  "counters_same": true,
+  "load": 1.08203125
+ },
+ {
+  "name": "hecbench/s3d-cuda",
+  "instr_before": 4707795525,
+  "instr_after": 4713442268,
+  "cycles_before": 1697531433,
+  "cycles_after": 1705163872,
+  "counters_same": true,
+  "load": 1.08203125
+ },
+ {
+  "name": "hecbench/aobench-cuda",
+  "instr_before": 9033594948,
+  "instr_after": 9033680210,
+  "cycles_before": 2706136184,
+  "cycles_after": 2686304084,
+  "counters_same": true,
+  "load": 1.0751953125
+ },
+ {
+  "name": "hecbench/atomicPerf-cuda",
+  "instr_before": 22479743058,
+  "instr_after": 22487506845,
+  "cycles_before": 4962788589,
+  "cycles_after": 4952604747,
+  "counters_same": true,
+  "load": 1.06884765625
+ }
+]

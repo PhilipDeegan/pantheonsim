@@ -257,6 +257,7 @@ add_library(vgpu STATIC
   src/core/profile.cpp
   src/core/registry.cpp
   src/core/memory.cpp
+  src/core/memory_spec.cpp
   src/core/memo_hash.cpp
   src/core/memory_backing.cpp
   src/core/telemetry.cpp
@@ -1524,6 +1525,18 @@ vgpu_unit_test(test_atom_rmw)
 vgpu_unit_test(test_sass_code_at)
 # The SASS executor's block, kept between blocks and launches and set up again each time (Runner::init_block).
 vgpu_unit_test(test_sass_block_reuse)
+# VGPU_EXACT_THREADS: a launch in order (VGPU_THREADS=1) on several host threads, kept only when a shadow of device memory proves it the
+# same (docs/exact-threads.md): same bits and counters as the run in order for independent, conflicting, faulting and SM-reading kernels; every
+# MemoryManager method noted by the shadow; a stopped trial undone to the byte.
+vgpu_unit_test(test_exact_threads)
+# The same with the interpreter's fast path alone (VGPU_TIER=0) and with every fast path off: the accesses then go by other methods of the memory manager.
+add_test(NAME test_exact_threads_tier0 COMMAND test_exact_threads)
+set_tests_properties(test_exact_threads_tier0 PROPERTIES ENVIRONMENT "VGPU_TIER=0")
+add_test(NAME test_exact_threads_fastpath0 COMMAND test_exact_threads)
+set_tests_properties(test_exact_threads_fastpath0 PROPERTIES ENVIRONMENT "VGPU_FASTPATH=0")
+# ... and with every page noted by word from its first touch (VGPU_EXACT_PAGES=0: the note of round sp47, which the note by page must agree with).
+add_test(NAME test_exact_threads_pages0 COMMAND test_exact_threads)
+set_tests_properties(test_exact_threads_pages0 PROPERTIES ENVIRONMENT "VGPU_EXACT_PAGES=0")
 vgpu_unit_test(test_sass_alu_runs)
 # The same kernels with the interpreter's fast path alone (no tier) and with the baseline SIMD kernels.
 add_test(NAME test_sass_alu_runs_tier0 COMMAND test_sass_alu_runs)
@@ -1551,6 +1564,11 @@ foreach(_t test_sass_chain_cont test_sass_store_gate test_sass_alu_runs test_sas
   set_tests_properties(${_t}_jit PROPERTIES ENVIRONMENT
     "VGPU_JIT=1;VGPU_JIT_THRESHOLD=1;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-${_t}")
 endforeach()
+# The wait on the plain loop (round sp57): a threshold that is far and a short profile, so that the sections of these kernels are hooked, wait on the plain
+# loop, are hooked again and compiled, all inside one kernel; test_sass_chain_cont checks that sections did wait and came back (VGPU_JIT_EXPECT_WAIT).
+add_test(NAME test_sass_chain_cont_jit_wait COMMAND test_sass_chain_cont)
+set_tests_properties(test_sass_chain_cont_jit_wait PROPERTIES ENVIRONMENT
+  "VGPU_JIT=1;VGPU_JIT_EXPECT_WAIT=1;VGPU_JIT_THRESHOLD=20000;VGPU_JIT_LOOKUP_AFTER=256;VGPU_JIT_PROFILE=2000;VGPU_JIT_SYNC=1;VGPU_JIT_HOT_PERMILLE=0;VGPU_JIT_MIN_REGION=2;VGPU_JIT_MAX_OPS=100000000;VGPU_QUIET=1;VGPU_JIT_CACHE=${CMAKE_BINARY_DIR}/jit-cache-wait-test_sass_chain_cont")
 # And with linking (VGPU_JIT_LINK=1, round sp52: the generated code goes on past a branch or cont op in a diverged warp while the chain would pick its group again):
 # test_sass_chain_cont's kernels diverge, loop apart and meet; the same words, counters and clocks as the interpreter, and the linking must have happened.
 # (VGPU_JIT_LINK_RULE=0: every section linked. The loop rule of round sp53 leaves a section with a loop and no BSSY, BSYNC, CALL or RET unlinked, and several of
@@ -1629,6 +1647,16 @@ endforeach()
 # An empty VGPU_SIMD is no setting at all: the default table.
 add_test(NAME test_simd_dispatch_simd_empty COMMAND test_simd_dispatch)
 set_tests_properties(test_simd_dispatch_simd_empty PROPERTIES ENVIRONMENT "VGPU_SIMD=")
+# The binary64 lane kernel of the AVX-512 table (dop_m, src/simd/lanes512.inc) against the AVX2 table's, bit for bit, on a host that runs both; on
+# any other host the executable prints "SKIP: ..." and the test is reported as skipped, not as passed.
+vgpu_unit_test(test_lanes512)
+set_tests_properties(test_lanes512 PROPERTIES SKIP_REGULAR_EXPRESSION "^SKIP:")
+# The tests of the SASS tier's ALU forms again with the 256-bit dop_m pinned (VGPU_SIMD=avx2): on a host with AVX-512 the default run of each is the
+# 512-bit kernel, and the AVX2 one is what every other host runs (a host without AVX-512 runs the same code twice).
+foreach(_t test_simd test_tier test_sass_alu_runs)
+  add_test(NAME ${_t}_lanes_avx2 COMMAND ${_t})
+  set_tests_properties(${_t}_lanes_avx2 PROPERTIES ENVIRONMENT "VGPU_SIMD=avx2")
+endforeach()
 # The PTX engine's tile route for the other mma.sync forms against the general form, bit for bit.
 vgpu_unit_test(test_mma_tiles)
 # The SASS executor's tile route for the MMA forms its SIMD HMMA kernel does not take, against its general form (the kernels off in a second run).
@@ -1800,6 +1828,9 @@ target_include_directories(test_jit PRIVATE src)
 # Tier 2, round 14: the share rule (a section whose regions are a small part of its work is declined and runs on the plain loop).
 vgpu_unit_test(test_jit_share)
 target_include_directories(test_jit_share PRIVATE src)
+# Tier 2, round sp57: a section far from its compile threshold waits for it on the plain loop (State::Waiting) and counts again just before it.
+vgpu_unit_test(test_jit_wait)
+target_include_directories(test_jit_wait PRIVATE src)
 # Register residence of the generated code against the register-file code, on random regions (VGPU_JIT_RANDOM_UNITS=<n> for more).
 vgpu_unit_test(test_jit_resid)
 target_include_directories(test_jit_resid PRIVATE src)
@@ -4147,6 +4178,10 @@ if(Python3_Interpreter_FOUND)
   # Relative links, anchors and docs/*.md references in the Markdown files resolve (seconds, no build).
   add_test(NAME lint_doc_links
            COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tests/lint/check_doc_links.py ${CMAKE_SOURCE_DIR})
+  # tools/bench/real/short.py puts every perf sample of a short program in a start-up phase by its call chain; the
+  # rules are checked against chains of the shapes perf gives (seconds, no build, no perf).
+  add_test(NAME lint_short_split_selftest
+           COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/bench/real/short.py selftest)
   # A key repeated in a workflow file makes GitHub refuse the whole file (it then runs on every push as a
   # failure with no jobs, and its schedule stops): the check reads every workflow for one.
   add_test(NAME lint_workflow_yaml

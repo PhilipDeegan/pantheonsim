@@ -10,6 +10,8 @@
 //   * a branch that the whole group takes, or none of it, and one that a guard lets only some lanes run;
 //   * two warps that each load, add and store one word in a loop of S2Rs, 3000 times: where the 4096-call turns end decides which updates
 //     are lost, so the final word and the clocks agree only if the saved calls are counted as the interpreter's are.
+#include <unistd.h>
+
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -622,5 +624,26 @@ VTEST(the_groups_of_a_diverged_warp_loop_apart_and_meet_where_the_chain_picks_th
 }
 
 VTEST(one_warp_alone_gives_the_same_words_and_counters) { compare(loop_kernel(2000, 3), 32, "one warp"); }
+
+// Round sp57 (ctest test_sass_chain_cont_jit_wait: a compile threshold that is far, a short profile). A section that asks the cache and gets nothing goes to
+// the plain loop (jit::State::Waiting) and is counted there by what each call of the loop ran; short of the threshold it comes back to the hook loop and is
+// compiled. The words and counters of kernels that cross all four stretches are the interpreter's (compare), and since a run in which no section waited, or
+// none came back, would compare equal too, the counts are checked. The iteration counts differ from run to run so that the cache never has these sections.
+VTEST(a_section_waits_for_a_far_threshold_on_the_plain_loop_and_is_compiled_after_it) {
+  if (!std::getenv("VGPU_JIT_EXPECT_WAIT") || !sass::jit::requested()) return;
+  const auto& s = sass::jit::stats();
+  const unsigned long long w0 = s.waits.load(), e0 = s.wait_ends.load(), r0 = s.units_ready.load(), f0 = s.failures.load();
+  const unsigned salt = static_cast<unsigned>(::getpid()) % 1000u;
+  compare(loop_kernel(20000 + salt, 3), 32, "one warp, the threshold far");
+  compare(loop_kernel(20000 + salt, 1), 64, "two warps, the threshold far");
+  compare(diamond_loop_kernel(9000 + salt, 16, 2), 64, "diamond, two warps, the threshold far");
+  if (s.failures.load() != f0) return;   // (no compiler on PATH: the lookup failed and the tier ran it all)
+  std::printf("  sections that waited on the plain loop: %llu, came back to count: %llu, compiled after it: %llu\n",
+              static_cast<unsigned long long>(s.waits.load()) - w0, static_cast<unsigned long long>(s.wait_ends.load()) - e0,
+              static_cast<unsigned long long>(s.units_ready.load()) - r0);
+  VCHECK(s.waits.load() >= w0 + 3);
+  VCHECK(s.wait_ends.load() >= e0 + 3);
+  VCHECK(s.units_ready.load() >= r0 + 3);
+}
 
 VTEST_MAIN

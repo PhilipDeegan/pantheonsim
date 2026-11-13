@@ -1,0 +1,16 @@
+test_lanes512 VGPU_SIMD=default rc 0 :: 2/2 tests passed
+test_lanes512 VGPU_SIMD=avx2 rc 0 :: 2/2 tests passed
+test_lanes512 VGPU_SIMD=avx512 rc 0 :: 2/2 tests passed
+test_simd VGPU_SIMD=default rc 0 :: 30/30 tests passed
+test_simd VGPU_SIMD=avx2 rc 0 :: 30/30 tests passed
+test_simd VGPU_SIMD=avx512 rc 0 :: 30/30 tests passed
+test_tier VGPU_SIMD=default rc 0 :: 9/9 tests passed
+test_tier VGPU_SIMD=avx2 rc 0 :: 9/9 tests passed
+test_tier VGPU_SIMD=avx512 rc 0 :: 9/9 tests passed
+test_sass_alu_runs VGPU_SIMD=default rc 0 :: 6/6 tests passed
+test_sass_alu_runs VGPU_SIMD=avx2 rc 0 :: 6/6 tests passed
+test_sass_alu_runs VGPU_SIMD=avx512 rc 0 :: 6/6 tests passed
+test_simd_dispatch VGPU_SIMD=default rc 0 :: 3/3 tests passed
+test_simd_dispatch VGPU_SIMD=avx2 rc 0 :: 3/3 tests passed
+test_simd_dispatch VGPU_SIMD=avx512 rc 0 :: 3/3 tests passed
+check_hot_unit_layout.py build/CMakeFiles/vgpu.dir :: hot units: 6 objects, plain machine code on 64-byte function boundaries

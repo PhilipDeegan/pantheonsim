@@ -48,3 +48,44 @@ python3 tools/bench/real/profile.py --build /tmp/sp5-fin3/build --corp /tmp/corp
   share of cycles spent in the program's own binary, which no simulator
   change can remove.
 * Very short programs (< 0.3 s) time process start-up, not simulation.
+
+## Short programs: where start-up goes (`short.py`)
+
+`real.py` scales the Rodinia sizes up so that it times simulation. `short.py`
+goes the other way: the same corpora, with Rodinia at the sizes of the card/sim
+runner (tens of milliseconds), to see what a program that finishes well under a
+second, as most CI programs do, spends its wall time on.
+
+```
+python3 tools/bench/real/short.py survey --build B --corp C                   # wall time of every candidate
+python3 tools/bench/real/short.py split  --build B --corp C --programs samples/vectorAdd,rodinia/bfs \
+    --reps 10 --sudo [--env VGPU_SASS=0] [--top 8] [--keep DIR] [--json F]    # the phases of each, by perf
+python3 tools/bench/real/short.py ab     --build B --corp C --programs ... --runs 7 \
+    --variant off:VGPU_SASS_CACHE=0 --variant 'cold:PRE=rm -f <cache>/sass-ok-v1-*' --variant warm:
+python3 -I tools/bench/real/short.py selftest                                  # the phase rules (CMake: lint_short_split_selftest)
+```
+
+* `split` records each program `--reps` times with `perf record -F 20000 -g -e
+  cycles` (user and kernel, one CPU) and puts every sample of the program's
+  process in one phase by its call chain: `loader` (exec and the dynamic
+  loader), `device-init` (profile, device, telemetry), `module-load` (fatbin
+  and cubin), `sass-decode` (the check that a cubin runs in full, and decoding
+  a code section when first run), `tier-build` (the pre-decoded tier's
+  analysis, the JIT), `ptx-parse` (parsing and lowering PTX), `execute`,
+  `teardown`, `sim-other` (the simulator's API outside those: allocation,
+  memcpy, page faults of device memory), `program-host` (the program's own
+  code and libc) and `kernel-other`. The first rule that matches any frame of
+  the chain wins, in that order of specificity, so decoding done inside the
+  first launch is decoding. A rule looks at a frame's function name only (no
+  parameter list, no template arguments). Chains are cut short under the
+  tier's handlers; a sample no chain rule placed is `execute` when its leaf is
+  one of the executor's leaves.
+* perf needs `kernel.perf_event_paranoid` <= 1 or root. `--sudo` runs
+  `sudo -n perf record ... -- sudo -n -u <you> -- env -i ... <program>`: perf
+  as root, the program as you, no system setting changed.
+* `ab` alternates any number of named variants (environment settings, and
+  `PRE=<shell command>` run before each run of that variant), medians of
+  `--runs`, the same output check as `real.py`, and the geometric mean of the
+  first variant over each of the others.
+* Set `XDG_CACHE_HOME` to a directory of your own first: the SASS verdict file
+  lives there, and `cold` deletes it.

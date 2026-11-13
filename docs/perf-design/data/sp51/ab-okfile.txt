@@ -1,0 +1,22 @@
+polybench/ADI                      off=216.92 cold=215.41 warm=216.01  same
+polybench/BICG                     off=277.14 cold=277.36 warm=276.99  same
+rodinia/backprop                   off=35.41 cold=35.55 warm=35.45  same
+rodinia/gaussian                   off=11.08 cold=11.09 warm=10.96  same
+rodinia/lud                        off=32.53 cold=32.25 warm=31.79  same
+rodinia/srad_v2                    off=4.33 cold=4.19 warm=4.30  same
+rodinia/particlefilter_float       off=82.52 cold=81.91 warm=81.55  DIFFER
+rodinia/bfs                        off=8.63 cold=8.08 warm=8.43  same
+hecbench/adam-cuda                 off=22.40 cold=22.62 warm=22.16  same
+hecbench/atan2-cuda                off=18.32 cold=18.90 warm=18.02  same
+hecbench/backprop-cuda             off=9.24 cold=9.93 warm=9.46  same
+hecbench/sortKV-cuda               off=173.47 cold=174.55 warm=170.69  same
+samples/fp16ScalarProduct          off=19.58 cold=19.47 warm=19.34  same
+samples/simpleTemplates            off=2.92 cold=3.41 warm=2.69  same
+samples/vectorAdd                  off=3.90 cold=4.72 warm=3.79  same
+samples/scalarProd                 off=32.25 cold=32.58 warm=32.45  same
+samples/shfl_scan                  off=95.38 cold=95.85 warm=96.12  same
+samples/binaryPartitionCG          off=11.10 cold=11.41 warm=10.93  same
+samples/cdpQuadtree                off=8.93 cold=9.41 warm=8.25  same
+samples/cdpSimpleQuicksort         off=4.92 cold=5.92 warm=4.50  same
+geomean off/cold = 0.9692 over 20 programs
+geomean off/warm = 1.0199 over 20 programs

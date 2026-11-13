@@ -1,0 +1,38 @@
+M01 killed (11 s): iadd3: the addend left out of lanes 16 to 31 :: iadd3_and_imad_give_the_avx2_bits
+M02 killed (13 s): imad: a * a + c :: iadd3_and_imad_give_the_avx2_bits
+M03 killed (13 s): lop3: table 0xe8 run as 0xe0 :: lop3_gives_the_avx2_bits_for_every_table
+M05 killed (12 s): ffma: multiply, round, then add (not fused) :: ffma_fadd_fmul_give_the_avx2_bits_in_every_rounding_mode, every_edge_value_in_every_lane_of_the_float_kernels
+M06 killed (15 s): float kernels: the NaN is 0x7fc00000, not 0x7fffffff :: ffma_fadd_fmul_give_the_avx2_bits_in_every_rounding_mode, every_edge_value_in_every_lane_of_the_float_kernels
+M09 killed (12 s): icmp_mask: signed less-than compared unsigned :: icmp_mask_gives_the_avx2_bits
+M11 killed (11 s): blend_m: the upper sixteen lanes take the lower lanes' mask :: blend_m_gives_the_avx2_bits_for_every_shape_of_mask
+M12 killed (12 s): iadd3x: two carries counted only when the first addition is one of them :: iadd3x_gives_the_avx2_bits_and_carries
+M14 killed (18 s): imad_wide: the odd lanes take the even lanes' carry in :: imad_wide_gives_the_avx2_bits_and_carries
+M17 killed (14 s): mufu: a subnormal result not flushed :: mufu_gives_the_avx2_bits_in_every_rounding_mode
+M19 killed (15 s): dop_m: the NaN rule applied to the operands after |x| and -x :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
+M24 killed (21 s): warp_rows: the stride check steps by four strides :: warp_rows_and_warp_run_give_the_avx2_answers
+M27 killed (19 s): warp_run: a carry with no high row is let through :: warp_rows_and_warp_run_give_the_avx2_answers
+M30 killed (23 s): pick_group: lanes that do not run take part in the minimum :: the_lane_address_functions_give_the_avx2_answers
+M33 killed (10 s): set_pcs: each step takes the mask bits of a 4-lane step :: the_lane_address_functions_give_the_avx2_answers
+M34 killed (11 s): select_pcs: target and next exchanged :: the_lane_address_functions_give_the_avx2_answers
+M36 killed (18 s): dispatch: the Avx512 table keeps the AVX2 ffma :: the_avx512_table_has_its_own_lane_kernels
+M07 killed (25 s): fadd: always to nearest, whatever the rounding mode :: ffma_fadd_fmul_give_the_avx2_bits_in_every_rounding_mode, every_edge_value_in_every_lane_of_the_float_kernels
+M18 killed (12 s): mufu: the double rounded to float to nearest, whatever the rounding mode :: mufu_gives_the_avx2_bits_in_every_rounding_mode
+M21 killed (14 s): dop_m: every lane written, whatever the mask :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
+M22 killed (15 s): dop_m: the product and the sum not fused :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
+M16 killed (21 s): imad_wide: the carry of the carry-in addition not looked at (even lanes) :: imad_wide_gives_the_avx2_bits_and_carries
+M25 killed (20 s): warp_rows: the window test on the whole difference, not its high half :: warp_rows_and_warp_run_give_the_avx2_answers
+M28 killed (11 s): warp_run: the high word's carry not added :: warp_rows_and_warp_run_give_the_avx2_answers
+M31 killed (20 s): pick_group: a signed minimum :: the_lane_address_functions_give_the_avx2_answers
+M35 killed (9 s): select_pcs: lanes outside the group written :: the_lane_address_functions_give_the_avx2_answers
+M04 killed (14 s): lop3: a minterm's c input not complemented in the general form :: lop3_gives_the_avx2_bits_for_every_table
+M08 killed (16 s): fmul: lanes 16 to 31 not written :: ffma_fadd_fmul_give_the_avx2_bits_in_every_rounding_mode, every_edge_value_in_every_lane_of_the_float_kernels
+M10 killed (24 s): icmp_mask: lanes 32 to 63 never compared :: icmp_mask_gives_the_avx2_bits
+M13 killed (18 s): iadd3x: the second carry in ignored :: iadd3x_gives_the_avx2_bits_and_carries
+M15 killed (15 s): imad_wide: the signed product of the odd lanes made unsigned :: imad_wide_gives_the_avx2_bits_and_carries
+M20 killed (16 s): dop_m: the fma's NaN rule leaves out the addend :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
+M23 killed (18 s): dop_m: -x applied before |x| :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
+M26 killed (21 s): warp_rows: the high words not shifted into place :: warp_rows_and_warp_run_give_the_avx2_answers
+M29 killed (20 s): warp_run: lanes 16 to 31 stepped by 8 elements :: warp_rows_and_warp_run_give_the_avx2_answers
+M32 killed (15 s): pick_group: the group not limited to the lanes that run :: the_lane_address_functions_give_the_avx2_answers
+M37 killed (17 s): dispatch: warp_rows_at gives the AVX2 kernel for Avx512 :: warp_rows_and_warp_run_give_the_avx2_answers
+MUTANTS DONE

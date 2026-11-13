@@ -16,7 +16,28 @@ what, how changes get in, and how that will change as more people contribute.
 
 - Every change goes through a pull request. `main` is protected, and that
   applies to the maintainer too. CI runs on every pull request, and a pull
-  request is merged only once it passes.
+  request is merged only once its required checks pass (see below).
+- The required checks are these jobs of the `CI` workflow
+  (`.github/workflows/ci.yml`):
+  - `build + unit tests`
+  - `pantheon workloads`
+  - `AMD code objects and CDNA decoding`
+  - `image / find the toolchain images` (the job the two above wait for)
+
+  The first three run on GitHub's hosted runners. `main`'s branch protection
+  requires these checks, and the CI badge in the README shows the `CI`
+  workflow on `main`. A change to this list changes both this file and the
+  branch protection.
+- The heavy jobs run on the project's self-hosted runners, which share their
+  memory: `SASS on every architecture`, `ollama on every GPU`, `ollama on
+  <AMD GPU>` (one per AMD GPU), `PyTorch, ROCm and the rest of the suite on the
+  pantheonsim.com runner`, `ASan + UBSan` and `ThreadSanitizer`. They run on
+  every pull request too and their results are shown on it, but they are not
+  required: they can fail because a runner ran out of memory or went away,
+  not because of the change. The maintainer reads every failure before
+  merging. A failure that comes from the change blocks the merge like a
+  required check would, and a failure that points to a real bug gets an
+  issue. A job is never deleted or skipped to make CI green.
 - Bigger changes (a new vendor, a new library, anything that changes how the
   simulator behaves for existing programs) start as an issue or a Discussion, so
   the design can be agreed before the code is written.
@@ -26,7 +47,13 @@ what, how changes get in, and how that will change as more people contribute.
   - Programs run unmodified. A test that passes on a real GPU should pass on the
     simulator without being edited.
   - Anything the simulator does not support fails with an error that names what
-    is missing. It never silently does the wrong thing.
+    is missing. It never silently does the wrong thing. Known violations:
+    `shfl.sync` returned 0 without an error for a lane still in a long loop
+    ([#488](https://github.com/pantheongpu/pantheonsim/issues/488); fixed on
+    `main` by #527, still in the v0.2.0 release), and `cudaDeviceCanAccessPeer`
+    reports peer access that a kernel then cannot use
+    ([#598](https://github.com/pantheongpu/pantheonsim/issues/598)). Each one
+    is listed in [docs/status.md](docs/status.md) until it is fixed in a release.
   - Runs are reproducible: with `VGPU_THREADS=1`, the same program and inputs
     give bit-identical results (see ARCHITECTURE.md).
   - Vendor interfaces are written from public documentation. Vendor code comes
