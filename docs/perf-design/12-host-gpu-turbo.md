@@ -318,7 +318,15 @@ What it reads is the value the compare will read, so a loop whose bound is data,
 followed, and its launch is not sampled. The error it can make is in the cost of a turn: the measured warp's turns stand for every warp's, and a loop
 whose later turns cost more than its first (a triangular nest whose inner loop grows) is estimated low, one whose later turns cost less, high.
 COVAR on server3: 66,560 turns left read in 64 warps (exactly the sum of 2048 - j1 over the threads' first lanes), 14,000 steps a turn, 41 ns a step:
-9.61 s estimated against 9.53 s taken, for a sample of 5 ms. Everything sp60b kept is kept: the fork, the copy's no-cache rule, the age and cost
+9.61 s estimated against 9.53 s taken, for a sample of 5 ms. A loop that nvcc unrolls and counts through a register it adds to the counter (`IADD3 R7,
+R8, UR4` compared with 0, R8 the bound's complement) is not followed: its remainder loop is, but the warps are not in it while the unrolled part runs, so
+such a launch gets no estimate and stays in the simulator (the stand-in test's kernel had this shape and was given `#pragma unroll 1`).
+
+**What the card said** (one A10G, [Round sp61](rounds/11-rounds-sp36-sp41.md#round-sp61-host-gpu-mode-progress-inside-a-block); medians of 3 runs, against
+`VGPU_HOST_GPU_SAMPLE=whole`, the rule of sp60b): COVAR 64.7 s to 41.8 s in exact mode and 64.4 s to 41.9 s in turbo, CORR 64.8 s to 42.0 s and 64.8 s to
+42.1 s (1.54x in both modes; what is left is the programs' CPU reference). Each long kernel's one launch, 24.5 s in the simulator, took 1.67 s on the card
+path, driver start and copies included; the sample cost 10 ms (COVAR) and 14 ms (CORR). In exact mode both kernels are admitted, and the outputs are the
+simulator's in every form. Everything sp60b kept is kept: the fork, the copy's no-cache rule, the age and cost
 limits, no sample once the driver's start has begun, the wait for copies at exit; a grid the whole-block sample takes is sampled as before.
 
 **What was tried first and removed** (Round sp60b has the numbers): moving a launch while the simulator runs it (a watcher thread, a copy of the

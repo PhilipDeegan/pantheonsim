@@ -1980,3 +1980,93 @@ Read from `src/sass/jit.cpp` and tried with `scripts/failure_modes.sh` (hotspot,
 * g++-12, clang, a build without the mutation hooks, a sanitizer build, AVX-512: not built. The `e2e_sass_jit` shards: not run (no nvcc on server3).
 * Which regions the shorter profile selects against the full count (the objects' keys before and after were not compared), and `VGPU_JIT_LINK=1` / `VGPU_JIT_FUSE=1` on the changed build (their cold and warm numbers above are the base build's).
 * Rule deviations: medians of 3 runs from one second up (asked: four); c and d only where b compiled; the ctest of all 24 legs held the machine lock for eleven minutes in one piece.
+
+## Round sp61 (host-GPU mode: progress inside a block)
+
+Branch `sp61-inblock-progress`, on `hostgpu-relaxed` (pantheonsim #587). Round sp60b could not reach PolyBench COVAR and CORR: their long kernel
+runs on 8 blocks of 256 threads, so no block ends within a sample and a grid under 256 blocks was not sampled at all. This round samples such a
+launch *inside* its blocks: the forked copy runs each block until its warps stand in the kernel's top-level counted loop, reads per lane how far the
+loop's induction register is from the bound its compare reads, and times one turn of the loop on one warp. Design and soundness:
+[12, section 8](../12-host-gpu-turbo.md). Data, scripts and commands: [`data/sp61/`](../data/sp61/README.md). Before the card everything ran on server3
+(no driver); the card part is one A10G (g5.xlarge, 4 vCPU, driver 595.112.07, nvcc 13.0), about 2.5 hours.
+
+### Headline (one A10G; `exactw` and `turbow` are the same build with `VGPU_HOST_GPU_SAMPLE=whole`, the rule of sp60b; medians of 3 runs)
+
+| program | mode | sp60b's rule s | now s | | what happened |
+|---|---|---:|---:|---:|---|
+| PolyBench COVAR | exact | 64.65 | 41.82 | 1.55x | `covar_kernel` sampled inside its 8 blocks (10 ms) and sent: 1.67 s on the card path against 24.5 s in the simulator |
+| | turbo | 64.39 | 41.95 | 1.53x | |
+| PolyBench CORR | exact | 64.84 | 42.01 | 1.54x | `corr_kernel` sampled (14 ms) and sent: 1.67 s against 24.8 s |
+| | turbo | 64.77 | 42.07 | 1.54x | |
+
+* What is left of the 42 s is the programs' CPU reference. Both kernels are admitted in exact mode (the brief expected CORR's to be refused: its
+  module's other kernels are, for `MUFU`, but `corr_kernel` is in the exact set), so the gain is the same in both modes.
+* Outputs: the simulator's in every form of every program (`particlefilter_float` excepted, which does not repeat itself in the simulator).
+* No other program's decisions changed: in the A/B of the nine other programs with a launch that could be sampled inside its blocks, nothing was
+  sent on a sample (one sampled launch of `bh` in turbo mode stayed in the simulator; the others are under the floor), and the 20 other PolyBench and Rodinia programs have no launch that is a candidate inside its blocks (see C for the
+  five that read more than 3 % apart in one run).
+
+### A. What the 8-block kernels look like, and what can be read
+
+`covar_kernel` (sm_86 SASS, `VGPU_HOST_GPU_LOG=2`): a guard, then a top-level loop [0x3a0, 0x780] over `j2` with counter R9 (`IADD3 R9, R9, 0x1`)
+compared with the parameter `m` (`ISETP.GE.AND P1, PT, R9, c[0x0][0x160]`, `@!P1 BRA 0x3a0`); inside it the loop over `i`, unrolled by 4 and counted
+through `IMAD.IADD R16, R10, 0x1, R15` against 0; two small loops for `n <= 0`. `corr_kernel` has the same shape. A thread of `covar_kernel` makes
+`m - j1` turns of the outer loop, so the grid is triangular: block 0's warps have about 2,000 turns left, block 7's about 250. What a pause shows: per
+lane the counter, which stays live through the loop (a pause between the add and the compare is one turn off), and the bound (a parameter); per
+warp its step count. What it does not show: how many steps the turns still to come take, which the copy measures on one warp.
+
+### B. What was built
+
+* The loop finder (`find_probe_loops`, `include/vgpu/host_gpu.hpp`), and the arithmetic of a reading (`include/vgpu/exec/block_progress.hpp`), pure.
+* The copy's run (`Runner::probe_block`, `src/sass/exec.cpp`, used only when `LaunchPart::probe` is set): rounds of 256-instruction turns until every
+  warp is in a followed loop (1 ms at most), the reading, and in the first block the warp with the most turns left alone for 4 ms; 12 ms in all.
+* The rule: a grid under 256 blocks with a followed loop is sampled inside its blocks; the floor is asked of the static count times the loop's bound
+  as the launch's arguments give it (`covar_kernel`: 87 us counted, which no floor admits; bounded by `m` = 2048, 0.18 s). The estimate goes by
+  `sampled_offload`, the rule of sampled launches. `VGPU_HOST_GPU_SAMPLE=whole` keeps sp60b's rule; the harness has forms `exactw` and `turbow`.
+* A bug found before the card: the decision first pointed at a stack copy of the kernel's verdict (its loops read as garbage in the copy: every
+  warp "in no loop"); it now points into the table of verdicts.
+
+### C. Before the card, and on it
+
+Offline (server3, `VGPU_HOST_GPU_SAMPLE=log`, every candidate sampled, nothing sent; `data/sp61/offline-*.md`): the launches that are candidates inside
+their blocks are COVAR's and CORR's long kernels, ATAX (2), BICG (2), GEMVER (2), GESUMMV, MVT (2), Rodinia `sc_gpu` and HeCBench `aop` and `bh` (4).
+Estimate over what the simulator took: COVAR 1.02 to 1.15, CORR 1.30 to 1.62; the others 0.67 to 1.78 on launches of 0.03 to 0.22 s, and 8 to 14
+on four launches of about 1 ms. Only COVAR and CORR pass the floor. The launches the whole-block sample would send are sp60b's (SYRK, SYR2K, binomial,
+black-scholes, shmembench).
+
+On the rig the estimate was 18.4 s for `covar_kernel` (24.5 s taken: 0.75; the engine's step is 79 ns there against 41 ns on server3, and the measured
+warp's turn cost does not see four threads sharing the caches) and 29.8 to 31.1 s for `corr_kernel` (24.8 s: 1.2 to 1.25; on the rig a first block
+took the whole 12 ms, so only block 0, the heaviest of the triangle, was read). Both are far above the bar (twice a card path of 0.25 s plus the
+copies and an assumed card time of 1/8 of the estimate); the card took 1.656 s for the kernel, 1.671 s with 32 MiB pushed.
+
+The A/B against sp60b's rule (`data/sp61/ab-*.md`): the nine other candidates, 3 runs: none more than 3 % slower, nothing sent on a sample. The rest of PolyBench and Rodinia, one run a form: five read more than 3 % apart in one run none of them with a candidate inside its blocks
+(3MM turbo +5.6 %, gaussian exact +6.0 %, srad_v2 exact +3.6 %, particlefilter_float turbo +3.0 %, bfs exact +4.4 %); ten more runs of each
+(`data/sp61/repeat.md`): exact over exactw 3MM 1.81 s against 1.86, gaussian 0.92 and 0.92, srad_v2 0.06 and 0.06, particlefilter_float 2.96
+against 3.31, bfs 0.01 and 0.01; turbo over turbow 1.80 against 1.84, 0.92 and 0.92, 0.06 and 0.06, 3.07 against 2.99 (2.7 %, a program whose
+simulator runs do not repeat), 0.01 and 0.01. None is more than 3 % slower; the single runs were noise. After everything the rig had no zombie and no
+process of the corpus.
+
+### D. Tests and mutants
+
+* `test_host_gpu_logic`: 89 cases, 13 of them new (turns left, turns between two pauses, the measure, which blocks, the launch, the floor with the
+  bound, the loop finder on about 25 code shapes). Passed on server3 and on the rig.
+* Mutants (`data/sp61/mutants.py`, one header copied outside the tree per mutant): 79 in a first pass, 69 killed. Of the ten survivors, two were
+  redundant code (removed), four were covered by new checks and then killed, four are equivalent (argued in `data/sp61/mutants-pass1.txt`). The
+  final list: 77, 73 killed, 4 equivalent.
+* `e2e_host_gpu_stub` steps 21 to 23 (a kernel on 8 blocks with a long loop is sampled inside its blocks and sent; on a stand-in card that computes
+  nothing the program reads the memory as it was; a short one stays and the driver is never touched). The first run on the rig failed at step 22:
+  nvcc unrolls the test kernel's loop by four and counts the unrolled part through a register added to the counter, which is not followed, so the
+  launch had no estimate. The test kernel now has its loop under `#pragma unroll 1`; all three tests of the card stage pass.
+* The stand-in driver on server3: COVAR, CORR and SYRK are sent and refused with the simulator's output, and sent to a card that computes nothing
+  with the output changed (`data/sp61/stub.txt`).
+
+### E. Caveats and what was not run
+
+* One rig, one card, one toolkit; 3 runs a form for the candidates, one for the rest of PolyBench and Rodinia; GRAMSCHM, 2MM, LU and FDTD-2D and
+  HeCBench outside the candidates were not run on the card (their launches are on grids the whole-block sample takes, so their decisions are sp60b's).
+* The estimate's error is in the cost of a turn: one warp's turns stand for every warp's. A loop whose later turns cost more than its first ones is
+  estimated low, one whose later turns cost less, high; and a block that takes the whole budget leaves one block read (CORR on the rig).
+* A loop counted the way nvcc counts an unrolled loop (`IADD3 R7, R8, UR4` against 0) is not followed (A, D); COVAR's and CORR's outer loops are not
+  unrolled, their inner ones are, and only the outer ones are needed.
+* The floor's bound assumes the loop starts at 0; it decides whether a sample is paid for, not whether a launch goes.
+* Not compiled with g++-12, the sanitizers or the CUDA 12 headers: the hosted CI jobs are their first run.

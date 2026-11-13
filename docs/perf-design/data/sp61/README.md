@@ -27,3 +27,18 @@ What the offline pass says:
 * Launches sampled by whole blocks are sp60b's path: the ones that would be sent are SYRK, SYR2K, binomial, black-scholes and shmembench,
   as in sp60b.
 * In exact mode `corr_kernel` is admitted (exact set) on this build: CORR's long kernel is sampled and would be sent in both modes.
+
+## On the card (AWS g5.xlarge, us-east-1b, instance i-0d6ab20cf7cabbd11: A10G, driver 595.112.07, 4 vCPU, nvcc 13.0; 2026-11-13)
+
+Simulator: `RelWithDebInfo`, no LTO (`tools/card-ci/run-card-ci.sh`), profile `nvidia/a10g`; the same corpus binaries.
+
+| file | what |
+|---|---|
+| `card-ci.txt` | the card CI's lines of verdict, first build: everything passed but `e2e_host_gpu_stub` (step 22: the test kernel's unrolled loop, see the round's D) |
+| `card-stub.txt` | the `ci` stage after the test kernel's fix: `e2e_host_gpu_stub`, `test_host_gpu_logic`, `hostgpu_bench_selftest` pass |
+| `target.md` | COVAR and CORR, 3 runs of sim, exact, exactw, turbo, turbow (the harness's table) |
+| `ab-inside.md` | the nine other programs with a candidate inside its blocks, and COVAR and CORR again (1 run), 3 runs a form |
+| `ab-rest.md` | the rest of PolyBench and Rodinia, 1 run a form |
+| `repeat.md` | ten runs a form of the five programs `ab-rest` read more than 3 % apart |
+| `ab.md`, `ab.json` | `summary.py` over the four: per program the medians, the ratio to the form that samples whole blocks only, what was sampled and sent, the outputs; compact records |
+| `sample-log.txt` | one `VGPU_HOST_GPU_LOG=1` run of COVAR and CORR in each mode: the sample's line and what the card took |

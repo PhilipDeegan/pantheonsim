@@ -38,7 +38,7 @@ ab|all)
   # (their decisions are sp60b's by construction: no launch of theirs is a candidate inside its blocks)
   $H --programs "$INSIDE" --runs 3 --long-secs 30 --long-runs 1 --forms sim,exact,exactw,turbo,turbow --timeout 600 \
      --json "$out/ab-inside.json" --md "$out/ab-inside.md" 2>&1 | tee "$out/ab-inside.txt" | tail -30
-  $H --corpora polybench,rodinia --skip "GRAMSCHM,2MM,LU,FDTD-2D,COVAR,CORR,ATAX,BICG,GEMVER,GESUMMV,MVT,sc_gpu" --runs 1 --forms exact,exactw,turbo,turbow --timeout 300 \
+  $H --corpora polybench,rodinia --skip "GRAMSCHM,2MM,LU,FDTD-2D,COVAR,CORR,ATAX,BICG,GEMVER,GESUMMV,MVT,sc_gpu" --runs 1 --forms sim,exact,exactw,turbo,turbow --timeout 300 \
      --json "$out/ab-rest.json" --md "$out/ab-rest.md" 2>&1 | tee "$out/ab-rest.txt" | tail -30
   ;;&
 log|all)

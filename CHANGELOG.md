@@ -10,9 +10,9 @@ release says what runs and what it produces, never how fast a real GPU would run
 - Host-GPU mode (experimental, opt-in), both `exact` and `turbo`: a launch on fewer than 256 blocks, which the sample of whole blocks could not
   judge, is now sampled *inside* its blocks when its kernel has a counted loop: the forked copy runs each block until its warps stand in the
   loop, reads how far each lane's induction register is from the bound its compare reads, and times one turn of the loop on one warp; the
-  launch's simulator time is the turns left at that cost. PolyBench COVAR's `covar_kernel` (8 blocks of 256 threads) is estimated at 9.61 s
-  against 9.53 s in the simulator on a host with no card, for a sample of 5 ms. Grids of 256 blocks or more are sampled as before
-  ([design](docs/perf-design/12-host-gpu-turbo.md), section 8; Round sp61; card measurements pending).
+  launch's simulator time is the turns left at that cost. Measured on one A10G (Round sp61): PolyBench COVAR 64.7 s to 41.8 s and CORR 64.8 s to
+  42.0 s in both modes (their long kernel, 24.5 s in the simulator, takes 1.67 s on the card path), outputs identical. Grids of 256 blocks or more
+  are sampled as before; `VGPU_HOST_GPU_SAMPLE=whole` keeps the rule of Round sp60b ([design](docs/perf-design/12-host-gpu-turbo.md), section 8).
 - Host-GPU mode (experimental, opt-in), both `exact` and `turbo`: a launch of a kernel with a loop that the mode knows nothing of yet is now *sampled*
   before the simulator is left to run it. The process is forked, the copy runs a few of the launch's blocks (up to 32, a few milliseconds), reports
   their times and ends; if they say that the launch repays the card path and the start of the real driver, the card runs the launch, otherwise
