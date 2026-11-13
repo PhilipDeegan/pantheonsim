@@ -953,13 +953,30 @@ void announce_module_profiled(RegisteredModule& m, int dev) {
 // calls work alongside runtime ones (vgpu_driver_bind_primary_v1 in
 // driver_api.cpp). Once per thread, and again when it changes device; nothing
 // to do when the driver shim is not loaded.
+//
+// The driver shim can be loaded after the runtime started: cudaGetDriverEntryPoint loads it for a program that does not
+// link libcuda (driver_entry_point, below; #604). The lookup is made again after that (g_driver_loads), and a thread
+// the runtime used while there was no driver to tell keeps its device in t_unbound_device, which the driver shim asks
+// for when the thread first calls it (adopt_runtime_context in driver_api.cpp), so its driver calls find the primary
+// context as they do on the card.
+std::atomic<unsigned> g_driver_loads{0};
+thread_local int t_unbound_device = -1;
 void bind_driver_context() {
   thread_local int bound = -1;
-  if (bound == t_current_device) return;
+  thread_local unsigned bound_loads = 0;
+  const unsigned loads = g_driver_loads.load(std::memory_order_acquire);
+  if (bound == t_current_device && bound_loads == loads) return;
   using Bind = int (*)(int);
-  static const Bind fn = reinterpret_cast<Bind>(dlsym(RTLD_DEFAULT, "vgpu_driver_bind_primary_v1"));
+  static Bind fn = nullptr;   // (callers hold the API lock)
+  static unsigned fn_loads = ~0u;
+  if (fn_loads != loads) {
+    fn = reinterpret_cast<Bind>(dlsym(RTLD_DEFAULT, "vgpu_driver_bind_primary_v1"));
+    fn_loads = loads;
+  }
   if (fn) fn(t_current_device);
+  t_unbound_device = fn ? -1 : t_current_device;
   bound = t_current_device;
+  bound_loads = loads;
 }
 
 // The body of every API call: the lock, initialisation, the dead-context
@@ -5836,10 +5853,13 @@ VGPU_EXPORT cudaError_t cudaCreateTextureObject(cudaTextureObject_t* out, const 
 
 static cudaError_t cudaDestroyTextureObject_traced(cudaTextureObject_t obj) {
   if (const cudaError_t unsafe_ = capture_unsafe_gate("cudaDestroyTextureObject")) return unsafe_;
+  // An RTX 3060 (CUDA 13.0 runtime) answers cudaSuccess, and leaves the last error alone, for a handle that is no
+  // object too: 0 (the value a program's handle member starts at, which MaCh3 destroys unconditionally: #618), one
+  // never made, and one already destroyed. Inside a global-mode capture it is still refused, as above.
   return guard("cudaDestroyTextureObject", [&](State& s) -> cudaError_t {
     g_object_descs.erase(static_cast<uint64_t>(obj));
-    return current(s).textures().erase(static_cast<uint64_t>(obj)) ? cudaSuccess
-                                                                   : cudaErrorInvalidValue;
+    current(s).textures().erase(static_cast<uint64_t>(obj));
+    return cudaSuccess;
   });
 }
 
@@ -5873,8 +5893,8 @@ static cudaError_t cudaDestroySurfaceObject_traced(cudaSurfaceObject_t obj) {
   if (const cudaError_t unsafe_ = capture_unsafe_gate("cudaDestroySurfaceObject")) return unsafe_;
   return guard("cudaDestroySurfaceObject", [&](State& s) -> cudaError_t {
     g_object_descs.erase(static_cast<uint64_t>(obj));
-    return current(s).textures().erase(static_cast<uint64_t>(obj)) ? cudaSuccess
-                                                                   : cudaErrorInvalidValue;
+    current(s).textures().erase(static_cast<uint64_t>(obj));
+    return cudaSuccess;   // (whether there was one: see cudaDestroyTextureObject)
   });
 }
 
@@ -7276,8 +7296,20 @@ GetProcAddressFn simulator_get_proc_address() {
       return nullptr;
     std::string dir = self.dli_fname;
     dir = dir.substr(0, dir.find_last_of('/') + 1);
+    // Whether the runtime already sees the driver (the program links libcuda, or preloads it): then it has been
+    // initialised and handed the runtime's contexts as usual, and there is nothing more to do here.
+    const bool seen = dlsym(RTLD_DEFAULT, "vgpu_driver_bind_primary_v1") != nullptr;
     void* h = dlopen((dir + "libcuda.so.1").c_str(), RTLD_NOW | RTLD_GLOBAL);
-    return h ? reinterpret_cast<GetProcAddressFn>(dlsym(h, "cuGetProcAddress_v2")) : nullptr;
+    if (!h) return nullptr;
+    if (seen) return reinterpret_cast<GetProcAddressFn>(dlsym(h, "cuGetProcAddress_v2"));
+    // The driver as the runtime leaves it (#604). An RTX 3060's cudaGetDriverEntryPoint initialises the driver,
+    // before any other runtime call too: the functions it gives work without a cuInit of the program's own. The
+    // primary context is the runtime's to hand over: the threads it has used take it at their first driver call
+    // (bind_driver_context), and the others start with none, as on the card.
+    using CuInit = int (*)(unsigned int);
+    if (auto init = reinterpret_cast<CuInit>(dlsym(h, "cuInit"))) init(0);
+    g_driver_loads.fetch_add(1, std::memory_order_release);
+    return reinterpret_cast<GetProcAddressFn>(dlsym(h, "cuGetProcAddress_v2"));
   }();
   return fn;
 }
@@ -7317,6 +7349,10 @@ cudaError_t driver_entry_point(const char* symbol, void** funcPtr, int version,
 static cudaError_t cudaGetDriverEntryPoint_traced(const char* symbol, void** funcPtr, unsigned long long flags, cudaDriverEntryPointQueryResult* driverStatus) {
   return driver_entry_point(symbol, funcPtr, CUDART_VERSION, flags, driverStatus);
 }
+
+// For the driver shim (adopt_runtime_context in driver_api.cpp): the device whose primary context this thread would
+// have current had the driver been loaded when the runtime used it, or -1.
+VGPU_EXPORT int vgpu_runtime_thread_device_v1() { return t_unbound_device; }
 
 VGPU_EXPORT cudaError_t cudaGetDriverEntryPoint(const char* symbol, void** funcPtr, unsigned long long flags, cudaDriverEntryPointQueryResult* driverStatus) {
   return traced_call("cudaGetDriverEntryPoint", cudaGetDriverEntryPoint_traced, symbol, funcPtr, flags, driverStatus);

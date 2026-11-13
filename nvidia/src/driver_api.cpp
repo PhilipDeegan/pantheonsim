@@ -298,6 +298,20 @@ static void drop_ctx_stack(void* p) {
   delete static_cast<std::vector<uintptr_t>*>(p);
   t_ctx_stack = nullptr;   // the next call from this thread, if any, starts a fresh stack
 }
+}  // namespace
+extern "C" int vgpu_driver_bind_primary_v1(int dev);
+namespace {
+// A thread the runtime has used before this library was loaded (cudaGetDriverEntryPoint loads it on first use, for a
+// program that does not link libcuda: #604) has the runtime's primary context current on the card, as every thread the
+// runtime has used does. The runtime could not hand it over then (bind_driver_context in runtime_api.cpp finds no
+// driver), so the thread's first driver call takes it: the device the runtime made current for it, -1 for a thread
+// the runtime has not used, which starts with no context as before.
+void adopt_runtime_context() {
+  using Fn = int (*)();
+  static const Fn device_of = reinterpret_cast<Fn>(dlsym(RTLD_DEFAULT, "vgpu_runtime_thread_device_v1"));
+  if (!device_of) return;
+  if (const int dev = device_of(); dev >= 0) vgpu_driver_bind_primary_v1(dev);
+}
 std::vector<uintptr_t>& ctx_stack() {
   if (!t_ctx_stack) {
     static const pthread_key_t key = [] {
@@ -307,6 +321,7 @@ std::vector<uintptr_t>& ctx_stack() {
     }();
     t_ctx_stack = new std::vector<uintptr_t>;
     pthread_setspecific(key, t_ctx_stack);
+    adopt_runtime_context();
   }
   return *t_ctx_stack;
 }

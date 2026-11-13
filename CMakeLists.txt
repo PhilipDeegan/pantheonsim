@@ -1605,6 +1605,8 @@ vgpu_unit_test(test_lockstep_look)
 vgpu_unit_test(test_sass_lea)
 # ULDC c[bank][URa + offset]: the offset is signed and the address wraps in the 64 KiB bank (pantheonsim #499).
 vgpu_unit_test(test_sass_uldc_indexed)
+# Kernels launched while the host has floating-point traps enabled (#605): no SIGFPE, the host environment as it was.
+vgpu_unit_test(test_launch_fp_traps)
 # The SIMD lane kernels, bit for bit against scalar code at every level the CPU has.
 vgpu_unit_test(test_simd)
 # An RTX 3060's tensor-core sum (include/vgpu/exec/tc_ampere.hpp): card-measured vectors, an independent form, special values.
@@ -2031,6 +2033,13 @@ target_compile_definitions(test_amd_gcn_threads PRIVATE VGPU_SOURCE_DIR="${CMAKE
 foreach(_t gfx1100 gfx1030)
   add_test(NAME test_amd_gcn_threads_${_t} COMMAND test_amd_gcn_threads)
   set_tests_properties(test_amd_gcn_threads_${_t} PROPERTIES ENVIRONMENT "VGPU_TEST_TARGET=${_t}")
+endforeach()
+# A dispatch while the host has floating-point traps enabled (#605): no SIGFPE, the host environment as it was.
+vgpu_unit_test(test_amd_gcn_fp_traps amd/tests/unit/test_gcn_fp_traps.cpp)
+target_compile_definitions(test_amd_gcn_fp_traps PRIVATE VGPU_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+foreach(_t gfx1100 gfx1030)
+  add_test(NAME test_amd_gcn_fp_traps_${_t} COMMAND test_amd_gcn_fp_traps)
+  set_tests_properties(test_amd_gcn_fp_traps_${_t} PROPERTIES ENVIRONMENT "VGPU_TEST_TARGET=${_t}")
 endforeach()
 # A stream's queue (amd/src/hip_queue.hpp): order, the numbering of items, and a waited-for item run on the calling thread
 # when the stream is idle.
@@ -3071,7 +3080,7 @@ if(TARGET vgpucublas)
                           "blas_lt_together:cublas:cublasLt" "blas_ex_paths:cublas" "blas_rot_paths:cublas"
                           "blas_level23_paths:cublas" "blas_host_sums:cublas" "blas_grouped:cublas" "blas_packed_paths:cublas"
                           "blas_batched_paths:cublas" "blas_64_paths:cublas" "blas_legacy_paths:cublas"
-                          "rand_paths:curand" "rand_host_fill:curand" "npp_host_ops:nppc:nppial:nppif:nppig:nppim:nppitc" "managed_paths:cuda" "array_paths:cuda" "complex_paths:cublas:cusolver"
+                          "rand_paths:curand" "rand_host_fill:curand" "driver_entry_late:cudart" "npp_stream_context:nppc:nppidei:nppial" "npp_host_ops:nppc:nppial:nppif:nppig:nppim:nppitc" "managed_paths:cuda" "array_paths:cuda" "complex_paths:cublas:cusolver"
                           "nvrtc_paths:nvrtc:cuda" "statevec_paths:custatevec" "cudss_kkt:cudss" "cudss1_kkt:cudss1" "cudss_paths:cudss"
                           "cufile_paths:cufile" "nvcomp_paths:nvcomp" "nvcomp_manager:nvcomp" "nvcomp_streaming:nvcomp" "nvcomp_cpu:nvcomp_cpu:nvcomp"
                           "nvshmem_host:nvshmem_host" "solver_dense_paths:cusolver" "solver_rf_paths:cusolver"

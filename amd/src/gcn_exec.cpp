@@ -31,6 +31,7 @@
 #include <vector>
 #include <type_traits>
 
+#include "vgpu/exec/host_fp.hpp"
 #include "vgpu/amd_debug.hpp"
 #include "vgpu/amd_decode_cache.hpp"
 #include "vgpu/amd_gcn.hpp"
@@ -13579,6 +13580,7 @@ DispatchStats execute(const Dispatch& d, MemoryManager& mem) {
     InFlight() { g_dispatches_in_flight.fetch_add(1, std::memory_order_relaxed); }
     ~InFlight() { g_dispatches_in_flight.fetch_sub(1, std::memory_order_relaxed); }
   } in_flight;
+  const exec::DeviceFpScope fp;   // host FP traps do not reach the kernel, nor its flags the host (vgpu/exec/host_fp.hpp, #605)
   if (g_abandoned.load(std::memory_order_relaxed)) abandon();
   if (!d.object || !d.kernel) throw Error::make(Err::InvalidValue, "a dispatch needs a kernel");
   const Kernel& k = *d.kernel;
