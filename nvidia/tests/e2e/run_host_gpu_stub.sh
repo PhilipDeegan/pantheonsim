@@ -38,6 +38,10 @@
 #      (STUB_CARD_OK=1 STUB_KEEP_MEMORY=1) the program prints what the program that launches nothing prints;
 #  19. a launch its first blocks say is short stays in the simulator and the driver is never touched;
 #  20. a process too young to afford a sample is not sampled (the default), and VGPU_HOST_GPU_SAMPLE=log sends nothing.
+#  21. progress inside the blocks (Round sp61): a launch on 8 blocks whose threads loop long is sampled inside its blocks (its line says inside=1) and
+#      sent; the stand-in refuses it and the output is the mode-off output;
+#  22. ... against a stand-in that keeps memory and computes nothing, the program prints what the program that launches nothing prints;
+#  23. the same kernel with a short loop is sampled inside its blocks and stays, and the driver is never touched.
 set -uo pipefail
 root="$(cd "$(dirname "$0")/../../.." && pwd)"
 . "$root/tests/shim_guard.sh"
@@ -288,5 +292,24 @@ run smp_log acct VGPU_HOST_GPU=exact VGPU_HOST_GPU_SAMPLE=log VGPU_HOST_GPU_NO_F
 grep -q '^host_gpu_sample: ' "$work/smp_log.err" || { echo "FAIL: VGPU_HOST_GPU_SAMPLE=log printed no host_gpu_sample line"; fails=1; }
 [[ ! -s "$work/smp_log.log" ]] || { echo "FAIL: a log run reached the driver: $(calls smp_log)"; fails=1; }
 diff -q "$work/off_acct.out" "$work/smp_log.out" > /dev/null || { echo "FAIL: the log run changes the output of acct"; fails=1; }
+# 21 to 23. progress inside the blocks (include/vgpu/host_gpu.hpp "progress inside a block"): `few` is 8 blocks of 256 threads, each looping 32,768 times.
+inside_of() { grep '^host_gpu_sample: ' "$work/$1.err" | grep -c ' inside=1 '; }
+for arg in few fewshort fewnone; do
+  env VGPU_GPU="$profile" VGPU_THREADS=4 LD_LIBRARY_PATH="$shim" "$work/prog" "$arg" > "$work/off_$arg.out" 2> "$work/off_$arg.err" || { echo "FAIL: the $arg run with the mode off failed"; exit 1; }
+done
+run in_few few "${smp[@]}" VGPU_HOST_GPU_START_COST=0 || { echo "FAIL: the sampled run of few failed"; tail -5 "$work/in_few.err"; fails=1; }
+read -r smp_n smp_sent <<< "$(sampled_of in_few)"
+(( ${smp_n:-0} >= 1 && $(inside_of in_few) >= 1 )) || { echo "FAIL: no launch of few was sampled inside its blocks: $(grep -E 'host_gpu_sampled|host_gpu_sample:' "$work/in_few.err" | head -3)"; fails=1; }
+grep -q '^cuModuleLoadData$' "$work/in_few.log" || { echo "FAIL: the launch of few sampled inside its blocks did not reach the card path: $(calls in_few)"; fails=1; }
+diff -q "$work/off_few.out" "$work/in_few.out" > /dev/null || { echo "FAIL: a launch sampled inside its blocks that the card refused changes the output of few"; fails=1; }
+run in_nop few "${smp[@]}" VGPU_HOST_GPU_START_COST=0 STUB_CARD_OK=1 STUB_KEEP_MEMORY=1 || { echo "FAIL: the run of few on a card that computes nothing failed"; tail -5 "$work/in_nop.err"; fails=1; }
+read -r smp_n smp_sent <<< "$(sampled_of in_nop)"
+(( ${smp_sent:-0} >= 1 )) || { echo "FAIL: the launch of few sampled inside its blocks was not sent: $(grep host_gpu_sampled "$work/in_nop.err")"; fails=1; }
+diff -q "$work/off_fewnone.out" "$work/in_nop.out" > /dev/null || { echo "FAIL: a launch sampled inside its blocks and sent to a card that computes nothing does not leave the memory as it was"; fails=1; }
+run in_short fewshort "${smp[@]}" || { echo "FAIL: the sampled run of fewshort failed"; tail -5 "$work/in_short.err"; fails=1; }
+read -r smp_n smp_sent <<< "$(sampled_of in_short)"
+(( ${smp_n:-0} >= 1 && ${smp_sent:-1} == 0 && $(inside_of in_short) >= 1 )) || { echo "FAIL: fewshort: expected a launch sampled inside its blocks and none sent: $(grep -E 'host_gpu_sampled|host_gpu_sample:' "$work/in_short.err" | head -3)"; fails=1; }
+[[ ! -s "$work/in_short.log" ]] || { echo "FAIL: a short launch sampled inside its blocks reached the driver: $(calls in_short)"; fails=1; }
+diff -q "$work/off_fewshort.out" "$work/in_short.out" > /dev/null || { echo "FAIL: sampling inside the blocks changes the output of fewshort"; fails=1; }
 (( fails == 0 )) && { echo "PASS: first launch $first ms against a driver start of $init_ms ms; driver calls in the big run: $(calls on_big)"; exit 0; }
 exit 1

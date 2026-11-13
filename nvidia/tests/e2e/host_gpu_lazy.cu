@@ -7,6 +7,8 @@
 // does not depend on the order the threads run in, so these print the same lines wherever they run. `hist` is an integer reduction onto 64 words (the
 // exact set), for the verify run of step 16: its sums are the same in any order, unless an update is lost. `none` is `acct` with no launch at all: what a
 // card that computes nothing leaves (step 18: a sampled launch sent to such a card must print exactly this).
+// `few` is `big` on 8 blocks with a long loop in every thread (Round sp61: a grid too small to sample by whole blocks, sampled inside its blocks),
+// `fewshort` the same with a short loop, and `fewnone` `few` with no launch (steps 21 to 23).
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -83,10 +85,12 @@ int main(int argc, char** argv) {
   const bool div = !std::strcmp(mode, "div"), rcp = !std::strcmp(mode, "rcp"), divexp_mode = !std::strcmp(mode, "divexp");
   const bool hist = !std::strcmp(mode, "hist");
   const bool iatom = !std::strcmp(mode, "iatom"), fatom = !std::strcmp(mode, "fatom"), cas = !std::strcmp(mode, "cas");
-  const bool none = !std::strcmp(mode, "none");
-  const int rounds = !std::strcmp(mode, "acct") ? 2048 : 64;   // `acct`: `big` with 32 times the work per thread, a launch of a fraction of a second (run_host_gpu_stub.sh step 8)
+  const bool fewnone = !std::strcmp(mode, "fewnone");
+  const bool none = !std::strcmp(mode, "none") || fewnone;
+  const bool few = !std::strcmp(mode, "few") || !std::strcmp(mode, "fewshort") || fewnone;
+  const int rounds = !std::strcmp(mode, "acct") ? 2048 : !std::strcmp(mode, "few") ? 1 << 15 : 64;   // `acct`: `big` with 32 times the work per thread, a launch of a fraction of a second (run_host_gpu_stub.sh step 8)
   const bool heap = !std::strcmp(mode, "heap");   // `big`, after a kernel left a block of the device heap in use: no launch may go to the card
-  const int n = small ? 64 : 1 << 18;
+  const int n = small ? 64 : few ? 8 * 256 : 1 << 18;
   void* d = nullptr;
   if (heap) leak_heap();
   cudaMalloc(&d, n * 4);

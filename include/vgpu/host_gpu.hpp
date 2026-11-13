@@ -11,6 +11,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <initializer_list>
 #include <map>
@@ -18,6 +19,8 @@
 #include <utility>
 #include <string>
 #include <vector>
+
+#include "vgpu/exec/block_progress.hpp"
 
 namespace vgpu::hostgpu {
 
@@ -773,10 +776,10 @@ inline std::optional<double> sampled_launch_seconds(const Sample& s) {
 
 // The card path of a sampled launch: the live memory the card does not hold goes, and all of it is charged for coming back, as the first-launch
 // rule charges it.
-inline Estimate sample_estimate(const Sample& s, uint64_t push_bytes, uint64_t live_bytes, const Costs& c, bool driver_started,
-                                std::optional<double> card_kernel_s = std::nullopt) {
+inline Estimate sampled_estimate(double sim_s, uint64_t push_bytes, uint64_t live_bytes, const Costs& c, bool driver_started,
+                                 std::optional<double> card_kernel_s = std::nullopt) {
   Estimate e;
-  e.sim_s = sampled_launch_seconds(s).value_or(0);
+  e.sim_s = sim_s;
   e.push_bytes = push_bytes;
   e.pull_bytes = live_bytes;
   e.card_kernel_s = card_kernel_s ? *card_kernel_s : std::max(c.kernel_s_default, e.sim_s / kSampleCardSpeedup);
@@ -784,11 +787,224 @@ inline Estimate sample_estimate(const Sample& s, uint64_t push_bytes, uint64_t l
   return e;
 }
 
+inline Estimate sample_estimate(const Sample& s, uint64_t push_bytes, uint64_t live_bytes, const Costs& c, bool driver_started,
+                                std::optional<double> card_kernel_s = std::nullopt) {
+  return sampled_estimate(sampled_launch_seconds(s).value_or(0), push_bytes, live_bytes, c, driver_started, card_kernel_s);
+}
+
 // Whether a sampled launch goes to the card: the simulator's time must repay the card path, with the driver start if it is not up, by the usual margin.
+// The same rule for a launch sampled inside its blocks (inblock_launch_seconds gives its simulator time).
+inline bool sampled_offload(double sim_s, uint64_t push_bytes, uint64_t live_bytes, const Costs& c, bool driver_started,
+                            std::optional<double> card_kernel_s = std::nullopt) {
+  // (a sample with no estimate has a simulator time of 0, which no card path is under)
+  return should_offload(sampled_estimate(sim_s, push_bytes, live_bytes, c, driver_started, card_kernel_s), c);
+}
 inline bool sample_offload(const Sample& s, uint64_t push_bytes, uint64_t live_bytes, const Costs& c, bool driver_started,
                            std::optional<double> card_kernel_s = std::nullopt) {
-  // (a sample with no estimate has a simulator time of 0, which no card path is under)
-  return should_offload(sample_estimate(s, push_bytes, live_bytes, c, driver_started, card_kernel_s), c);
+  return sampled_offload(sampled_launch_seconds(s).value_or(0), push_bytes, live_bytes, c, driver_started, card_kernel_s);
+}
+
+// ---- progress inside a block (docs/perf-design/12-host-gpu-turbo.md section 8, "Progress inside a block"; Round sp61) ---------------------
+// A grid of fewer than kSampleMinBlocks blocks gives no sample above: its blocks are few and each may run for seconds (PolyBench COVAR's
+// covar_kernel: 8 blocks of 256 threads, every thread looping over the matrix). Such a launch is sampled INSIDE its blocks: the copy runs each
+// block it takes until its warps stand in the kernel's top-level loop and reads, per lane, how far the loop's induction register is from the
+// bound its compare reads (vgpu/exec/block_progress.hpp); in the first block it then runs the warp with the most turns left alone for a few
+// milliseconds, which gives the steps of one turn and the engine's time per step. The launch is the steps taken plus the turns left at that
+// cost, over the blocks and the host threads. Nothing about the loop is guessed from its shape: the bound is the value the compare will read.
+//
+// The loops are found in the code (find_probe_loops). A loop is followed when ALL of these hold, and a kernel with no such loop is not sampled:
+//  * it is a top-level loop: a back edge reachable from the entry whose range [target, branch] lies in no other loop's range;
+//  * a conditional branch in it (the back edge, or a branch out of the range) is guarded by a predicate that the last instruction writing it
+//    before the branch, inside the loop, sets by an integer compare (ISETP / UISETP, not the .EX half of a 64-bit one);
+//  * one side of the compare is the induction register, or a register the loop computes once from it by adding a constant: a register the loop
+//    writes exactly once, by adding a constant to itself (IADD3 / VIADD / IADD / UIADD3 with one register source);
+//  * the other side is an immediate, a constant-bank word (a kernel parameter) or a register the loop never writes.
+
+// What the loop finder needs of an instruction: its flow (as code_has_loop takes it), and the few kinds of instruction a counted loop is made of.
+// Registers are numbered R0..R254 as 0..254 and UR0..UR254 as 256..510; predicates P0..P6 as 0..6 and UP0..UP6 as 8..14 (PT and UPT are not
+// numbered: an instruction guarded by one is unconditional).
+struct LoopCodeInsn {
+  FlowInsn flow;
+  int branch_pred = -1;          // a conditional BRA: the predicate that guards it
+  enum class Kind : uint8_t { Other, AddImm, Compare } kind = Kind::Other;
+  int add_dst = -1, add_src = -1;   // AddImm: add_dst = add_src + add_imm
+  int64_t add_imm = 0;
+  int cmp_pred = -1, cmp_pred2 = -1;   // Compare: the predicates it writes
+  exec::ProbeOperand cmp_a, cmp_b;     // Compare: its two values (Reg and UReg operands hold the register's number, unshifted)
+  bool cmp_unsigned = false;
+  std::vector<int> writes;       // every register it writes (an AddImm's add_dst included)
+  std::vector<int> pred_writes;  // every predicate it writes (a Compare's included)
+};
+
+// A followed loop, by instruction index: what the runtime turns into an exec::ProbeLoop (code addresses) for the copy.
+struct FoundLoop {
+  size_t lo = 0, hi = 0;
+  exec::ProbeLoop loop;   // lo and hi are left 0 here
+};
+
+inline int probe_reg_number(const exec::ProbeOperand& o) {
+  if (o.kind == exec::ProbeOperand::Reg) return static_cast<int>(o.reg);
+  if (o.kind == exec::ProbeOperand::UReg) return 256 + static_cast<int>(o.reg);
+  return -1;
+}
+inline exec::ProbeOperand probe_reg_operand(int n) {
+  exec::ProbeOperand o;
+  o.kind = n >= 256 ? exec::ProbeOperand::UReg : exec::ProbeOperand::Reg;
+  o.reg = static_cast<uint32_t>(n >= 256 ? n - 256 : n);
+  return o;
+}
+
+inline std::vector<FoundLoop> find_probe_loops(const std::vector<LoopCodeInsn>& code) {
+  std::vector<FoundLoop> out;
+  const size_t n = code.size();
+  for (const LoopCodeInsn& c : code)
+    if (c.flow.indirect) return out;   // a jump through a register or a call: the flow is not all in view
+  // What the entry reaches.
+  std::vector<uint8_t> reach(n, 0);
+  std::vector<size_t> todo;
+  if (n) {
+    reach[0] = 1;
+    todo.push_back(0);
+  }
+  while (!todo.empty()) {
+    const size_t i = todo.back();
+    todo.pop_back();
+    const auto go = [&](int64_t j) {
+      if (j >= 0 && static_cast<size_t>(j) < n && !reach[static_cast<size_t>(j)]) {
+        reach[static_cast<size_t>(j)] = 1;
+        todo.push_back(static_cast<size_t>(j));
+      }
+    };
+    if (code[i].flow.falls_through) go(static_cast<int64_t>(i) + 1);
+    go(code[i].flow.target);
+  }
+  // Back edges, one range per loop head.
+  std::map<size_t, size_t> range;   // head -> last back edge to it
+  for (size_t i = 0; i < n; ++i) {
+    const int64_t t = code[i].flow.target;
+    if (!reach[i] || t < 0 || static_cast<size_t>(t) > i || !reach[static_cast<size_t>(t)]) continue;
+    size_t& hi = range[static_cast<size_t>(t)];
+    hi = std::max(hi, i);
+  }
+  // The top-level ones: in no other range. Two ranges that overlap without one holding the other are both left out.
+  std::vector<std::pair<size_t, size_t>> top;
+  for (const auto& [lo, hi] : range) {
+    bool inner = false, crossed = false;
+    for (const auto& [lo2, hi2] : range) {
+      if (lo2 == lo && hi2 == hi) continue;
+      if (lo2 <= lo && hi <= hi2) inner = true;
+      else if ((lo2 < lo && lo <= hi2 && hi2 < hi) || (lo < lo2 && lo2 <= hi && hi < hi2)) crossed = true;
+    }
+    if (!inner && !crossed) top.emplace_back(lo, hi);
+  }
+  for (const auto& [lo, hi] : top) {
+    if (out.size() >= exec::kProbeLoops) break;
+    const auto writes_in_loop = [&](int reg, size_t* where) {
+      unsigned k = 0;
+      for (size_t j = lo; j <= hi; ++j)
+        for (int w : code[j].writes)
+          if (w == reg) {
+            ++k;
+            if (where) *where = j;
+          }
+      return k;
+    };
+    bool found = false;
+    // The branches that decide: the back edges first (from the last), then the branches out of the range.
+    std::vector<size_t> branches;
+    for (size_t i = hi + 1; i-- > lo;)
+      if (code[i].branch_pred >= 0 && code[i].flow.target >= static_cast<int64_t>(lo) && static_cast<size_t>(code[i].flow.target) <= i) branches.push_back(i);
+    for (size_t i = hi + 1; i-- > lo;)
+      if (code[i].branch_pred >= 0 && code[i].flow.target >= 0 &&
+          (static_cast<size_t>(code[i].flow.target) < lo || static_cast<size_t>(code[i].flow.target) > hi))
+        branches.push_back(i);
+    for (size_t b : branches) {
+      if (found) break;
+      const int p = code[b].branch_pred;
+      // The last write of the predicate before the branch, inside the loop.
+      size_t j = b;
+      bool have = false;
+      while (j-- > lo) {
+        bool writes = false;
+        for (int w : code[j].pred_writes) writes = writes || w == p;
+        if (writes) {
+          have = true;
+          break;
+        }
+      }
+      if (!have || code[j].kind != LoopCodeInsn::Kind::Compare) continue;
+      const LoopCodeInsn& cmp = code[j];
+      if (cmp.cmp_pred != p && cmp.cmp_pred2 != p) continue;
+      for (int side = 0; side < 2 && !found; ++side) {
+        const exec::ProbeOperand& x = side ? cmp.cmp_b : cmp.cmp_a;
+        const exec::ProbeOperand& y = side ? cmp.cmp_a : cmp.cmp_b;
+        const int xr = probe_reg_number(x);
+        if (xr < 0) continue;
+        size_t at = 0;
+        if (writes_in_loop(xr, &at) != 1 || code[at].kind != LoopCodeInsn::Kind::AddImm || code[at].add_dst != xr) continue;
+        int iv = xr;
+        int64_t offset = 0, step = code[at].add_imm;
+        if (code[at].add_src != xr) {   // x = iv + offset, iv = iv + step
+          iv = code[at].add_src;
+          offset = code[at].add_imm;
+          size_t at2 = 0;
+          if (iv < 0 || writes_in_loop(iv, &at2) != 1 || code[at2].kind != LoopCodeInsn::Kind::AddImm || code[at2].add_dst != iv || code[at2].add_src != iv) continue;
+          step = code[at2].add_imm;
+        }
+        if (step == 0) continue;
+        // The bound: an immediate, a constant-bank word, or a register the loop does not write.
+        if (y.kind == exec::ProbeOperand::None) continue;
+        const int yr = probe_reg_number(y);
+        if (yr >= 0 && writes_in_loop(yr, nullptr) != 0) continue;
+        FoundLoop f;
+        f.lo = lo;
+        f.hi = hi;
+        f.loop.iv = probe_reg_operand(iv);
+        f.loop.iv_offset = offset;
+        f.loop.step = step;
+        f.loop.bound = y;
+        f.loop.is_unsigned = cmp.cmp_unsigned;
+        out.push_back(f);
+        found = true;
+      }
+    }
+  }
+  return out;
+}
+
+// Which blocks the copy reads: up to kSampleMaxBlocks, spread over the grid, for a grid too small for the sample of whole blocks (and at least two blocks: a
+// launch of one block has its own rules nowhere, and its one block is the whole launch).
+inline uint64_t inblock_blocks(uint64_t blocks) {
+  if (blocks >= kSampleMinBlocks || blocks < 1) return 0;
+  return std::min<uint64_t>(blocks, kSampleMaxBlocks);
+}
+inline uint64_t inblock_stride(uint64_t blocks) {
+  const uint64_t n = inblock_blocks(blocks);
+  return n ? blocks / n : 1;
+}
+// Per block, the most its warps are run to reach the loop (their prologue is a few dozen instructions; this bounds a kernel whose warps never get there),
+// and how long one warp of the first block is run alone to measure a turn of the loop. The copy takes no further block once the blocks read have taken
+// kInBlockBudgetSeconds.
+inline constexpr double kInBlockEnterSeconds = 0.001;
+inline constexpr double kInBlockMeasureSeconds = 0.004;
+inline constexpr double kInBlockBudgetSeconds = 0.012;
+
+// The seconds the simulator needs for the launch, from the blocks read: the mean block's steps over the grid, shared among the host threads as if they
+// scaled perfectly, and never less than the longest block read (a block is not shared among threads), at the engine's measured time per step. None when no
+// block was read or the measure took no step.
+inline std::optional<double> inblock_launch_seconds(const std::vector<exec::BlockReading>& blocks, const exec::TurnMeasure& m, uint64_t total, unsigned threads) {
+  const double per_step = exec::seconds_per_step(m);
+  const double per_turn = exec::steps_per_turn(m);
+  if (blocks.empty() || total == 0 || !(per_step > 0) || !(per_turn > 0)) return std::nullopt;
+  double sum = 0, most = 0;
+  for (const exec::BlockReading& b : blocks) {
+    const double s = exec::block_steps(b, per_turn);
+    sum += s;
+    most = std::max(most, s);
+  }
+  const double lanes = static_cast<double>(std::min<uint64_t>(std::max<unsigned>(threads, 1), total));
+  const double steps = std::max(sum / static_cast<double>(blocks.size()) * static_cast<double>(total) / lanes, most);
+  return steps * per_step;
 }
 
 // Whether a launch with no estimate is sampled at all:
@@ -806,11 +1022,29 @@ struct SampleCandidate {
   double age_s = 0;         // how long the process has run
   double spent_s = 0;       // what its samples have cost so far
   double expected_s = kSampleCostGuessSeconds;
+  bool followed = false;    // the kernel has a loop a sample inside its blocks can follow (find_probe_loops; Round sp61)
+  double bound_turns = 1;   // ... and the most turns one of them has if it runs from 0 to its bound (bound_turns), when the launch gives the bound
 };
+// Whether the launch is sampled inside its blocks (Round sp61) rather than by whole blocks: a grid too small for the latter, of a kernel with a followed loop.
+inline bool sample_inside(const SampleCandidate& w) { return sample_blocks(w.blocks) == 0 && w.followed && inblock_blocks(w.blocks) != 0; }
+// The static estimate the floor is asked about. For a launch sampled inside its blocks it is the static count times the turns of the followed loop as
+// the launch's own arguments bound it (bound_turns): the plain count sees a loop's body once, and the kernels this sample is for are the ones whose
+// threads loop for seconds (COVAR's covar_kernel: 87 us counted, 9.5 s taken on server3; its loop is bounded by the parameter m = 2048, which makes 0.18 s).
+// It assumes the loop starts at 0, so it can be high (the prologue is counted every turn, a loop may start near its bound) or low (the loops inside it
+// are not counted): it decides whether a sample is worth its cost, never whether the launch goes.
+inline double sample_static_estimate(const SampleCandidate& w) {
+  return sample_inside(w) ? w.static_s * std::max(w.bound_turns, 1.0) : w.static_s;
+}
+// The turns a followed loop has at most when it counts from 0 to `bound` by `step` (0 for no step); the floor's use of it is above.
+inline double bound_turns(int64_t bound, int64_t step) {
+  if (step == 0) return 0;
+  const double b = static_cast<double>(bound < 0 ? -bound : bound), s = static_cast<double>(step < 0 ? -step : step);
+  return std::floor(b / s);
+}
 inline bool worth_sampling(const SampleCandidate& w, const Costs& c, double card_path_s) {
-  if (!w.loop || sample_blocks(w.blocks) == 0) return false;
+  if (!w.loop || (sample_blocks(w.blocks) == 0 && !sample_inside(w))) return false;
   if (w.whole_s && *w.whole_s <= c.margin * card_path_s) return false;
-  return w.static_s >= sample_static_floor(w.live_bytes) || sample_affordable(w.age_s, w.spent_s, w.expected_s);
+  return sample_static_estimate(w) >= sample_static_floor(w.live_bytes) || sample_affordable(w.age_s, w.spent_s, w.expected_s);
 }
 
 // A safety net for any estimate that turns out wrong: an offloaded launch that took longer on the card path (copies, launch, copy back)

@@ -292,10 +292,34 @@ turbo. Geometric mean over 61 programs, against the simulator: 1.12x to 1.18x in
 simulator's. No program with a sampled launch was more than 1% slower; the estimate was 1.5 to 1.6 times under the simulator's real time, and
 the card's kernel time 270 to 770 times under the estimate, not 8.
 
-**What it does not reach.** A grid of fewer than 256 blocks has too few blocks to time: a copy would have to run one of them to its end, and
-on such a grid a block is a large share of the launch. PolyBench COVAR and CORR spend their time in a kernel launched on 8 blocks of 256
-threads (each thread loops over the whole matrix), so they are not sampled and stay in the simulator, as before. Reaching them needs progress
-inside a block (a loop's trip count), which nothing here measures.
+**What it did not reach, and progress inside a block (Round sp61).** A grid of fewer than 256 blocks has too few blocks to time: a copy would
+have to run one of them to its end, and on such a grid a block is a large share of the launch. PolyBench COVAR and CORR spend their time in a
+kernel launched on 8 blocks of 256 threads (each thread loops over the whole matrix: 9.5 s and 10.2 s in the simulator on server3). Such a launch is
+now sampled *inside* its blocks, when its kernel has a loop the copy can follow:
+
+1. *The loops followed* are found in the code once per kernel (`find_probe_loops`, vgpu/host_gpu.hpp): top-level loops (a back edge the entry
+   reaches, in no other loop's range) that are decided by a conditional branch whose predicate the loop last sets with an integer compare, one side
+   of it the loop's induction register (the one register the loop writes exactly once, by adding a constant to itself, or a register it computes
+   once from that one by adding a constant) and the other an immediate, a kernel parameter or a register the loop never writes. In COVAR's
+   `covar_kernel` that is the loop over `j2`: `IADD3 R9, R9, 0x1` and `ISETP.GE.AND P1, PT, R9, c[0x0][0x160]` before `@!P1 BRA` back.
+2. *The copy* runs each block it takes (all of them up to 32, spread over the grid) round by round until every warp stands in a followed loop
+   (or has ended, or 1 ms has passed), and reads per lane how far the compared value is from the bound, in steps: the turns the lane has left.
+   A warp has the most of its lanes; a warp in no followed loop adds none. In the first block it then runs the warp with the most turns left alone
+   for 4 ms: the turns its induction register moves and the steps it takes give the steps of one turn and the engine's time per step. It takes no
+   further block once 12 ms have gone on blocks.
+3. *The estimate* is, per block read, the steps taken plus the turns left at the measured cost of a turn; the mean block over the grid, shared among
+   the host threads, and never less than the longest block read, at the measured time per step. The same rule as for whole blocks then decides
+   (over twice the card path with the driver start and the copies, a card kernel time of 1/8 of the estimate).
+4. *The floor* is asked of the static count times the turns the followed loop has if it runs from 0 to the bound that the launch's own arguments give
+   (an immediate, or the parameter's value): `covar_kernel` is counted at 87 us, which no floor admits, and its loop is bounded by the parameter
+   `m` = 2048, which makes 0.18 s. This only decides whether the sample is worth its cost; the launch goes on the sample.
+
+What it reads is the value the compare will read, so a loop whose bound is data, or whose counter the loop changes in more than one place, is not
+followed, and its launch is not sampled. The error it can make is in the cost of a turn: the measured warp's turns stand for every warp's, and a loop
+whose later turns cost more than its first (a triangular nest whose inner loop grows) is estimated low, one whose later turns cost less, high.
+COVAR on server3: 66,560 turns left read in 64 warps (exactly the sum of 2048 - j1 over the threads' first lanes), 14,000 steps a turn, 41 ns a step:
+9.61 s estimated against 9.53 s taken, for a sample of 5 ms. Everything sp60b kept is kept: the fork, the copy's no-cache rule, the age and cost
+limits, no sample once the driver's start has begun, the wait for copies at exit; a grid the whole-block sample takes is sampled as before.
 
 **What was tried first and removed** (Round sp60b has the numbers): moving a launch while the simulator runs it (a watcher thread, a copy of the
 whole live memory before the launch, the simulator stopped between two blocks) worked against the stand-in driver, and the copy cost too much

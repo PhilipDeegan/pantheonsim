@@ -136,6 +136,9 @@ struct SampleHint {
   unsigned samples = 0;
   double age_s = 0;
   bool affordable = true;    // whether the kernel's loop and the static floor or the process's age allow the sample (log and always sample without asking)
+  bool inside = false;       // sampled inside its blocks (Round sp61): `probe` is what the copy follows
+  double bound_turns = 1;    // SampleCandidate::bound_turns
+  exec::BlockProbe probe;
 };
 thread_local SampleHint t_sample_hint;
 // The sample of the launch this thread's simulator is about to run whole, for the log line note_simulated prints (what it said, what the launch took).
@@ -146,8 +149,25 @@ struct LastSample {
   uint64_t ran = 0;
   double first_block_s = 0, wall_s = 0, fork_s = 0, estimate_s = 0;
   bool answered = false, would_send = false;
+  exec::LaunchPart part;     // what the copy reported (the readings of a sample inside the blocks)
 };
 thread_local LastSample t_last_sample;
+// The fields a sample inside the blocks adds to its host_gpu_sample line (Round sp61): the blocks read, the warps followed and not, the steps and turns
+// left they read, the measured warp's steps and turns, and what that makes of a turn and a step. All 0 for a sample of whole blocks.
+std::string inside_fields(const SampleHint& h, const exec::LaunchPart& p) {
+  double steps = 0, turns = 0;
+  const uint64_t n = std::min<uint64_t>(p.next, exec::LaunchPart::kReadings);
+  for (uint64_t i = 0; i < n && h.inside; ++i) {
+    steps += p.readings[i].steps;
+    turns += p.readings[i].turns;
+  }
+  char b[480];
+  std::snprintf(b, sizeof b, " inside=%d bound_turns=%.0f followed=%llu unfollowed=%llu read_steps=%.0f read_turns=%.0f measure_steps=%llu measure_turns=%.0f measure_s=%.6f left=%d per_turn=%.1f step_ns=%.3f",
+                h.inside ? 1 : 0, h.inside ? h.bound_turns : 0.0, static_cast<unsigned long long>(h.inside ? p.warps_followed : 0), static_cast<unsigned long long>(h.inside ? p.warps_unfollowed : 0), steps, turns,
+                static_cast<unsigned long long>(h.inside ? p.measure.steps : 0), h.inside ? p.measure.turns : 0.0, h.inside ? p.measure.seconds : 0.0, h.inside && p.measure.left ? 1 : 0,
+                h.inside ? exec::steps_per_turn(p.measure) : 0.0, h.inside ? 1e9 * exec::seconds_per_step(p.measure) : 0.0);
+  return b;
+}
 const std::chrono::steady_clock::time_point g_loaded = std::chrono::steady_clock::now();   // (the library's load: the process's age is counted from it)
 
 bool quiet() {
@@ -187,6 +207,7 @@ struct Runtime::Impl : CardGate {
     bool runnable = false;   // everything but the instruction scan passed: the card could run it
     bool back_edge = false;  // the code has a loop (a branch to itself or an earlier instruction)
     bool loop = false;       // ... a real one: a cycle in its flow (code_has_loop)
+    exec::BlockProbe probe;  // its top-level counted loops, for a sample inside its blocks (find_probe_loops); count 0: none
     Refused kind = Refused::No;
     TurboRefusal rr = TurboRefusal::None;   // Code: which class of instruction (in exact mode: what turbo mode would say with its defaults)
     const char* why = "";                       // the reason given on a later launch of the same kernel
@@ -282,13 +303,14 @@ struct Runtime::Impl : CardGate {
   // host_gpu_sample line a sampled launch (what was measured, what would have been done, what the launch then took): a model of the rule with no card.
   // `always` samples whatever the process's age (sample_affordable is not asked), for tests and experiments; `log` does not ask it either and
   // prints what it would have said.
-  enum class SampleMode : uint8_t { On, Off, Log, Always } sample_mode = SampleMode::On;
+  // `whole` samples by whole blocks only, never inside them (the rule of Round sp60b, for A/B runs of Round sp61).
+  enum class SampleMode : uint8_t { On, Off, Log, Always, Whole } sample_mode = SampleMode::On;
   size_t copies_running_at_exit = 0;   // sampled copies that had answered and not yet ended when the process came to its end (they were waited for)
   double sample_spent_s = 0;      // what the samples of this process have cost
   double sample_dearest_s = 0;    // the dearest of them
   struct Decision;
   bool launch(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, const std::vector<std::vector<uint8_t>>& args, MemoryManager& mem, const double* forced_sim_s);
-  void consider_sample(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, const Decision& dec, uint64_t blocks, MemoryManager& mem);
+  void consider_sample(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, const std::vector<std::vector<uint8_t>>& args, const Decision& dec, uint64_t blocks, MemoryManager& mem);
 
   struct Pending {
     bool active = false, in_exact_set = false;
@@ -529,6 +551,7 @@ struct Runtime::Impl : CardGate {
     TurboRefusal rr = TurboRefusal::None;
     uint64_t instrs = 0;
     bool runnable = false, back_edge = false, loop = false;
+    const exec::BlockProbe* probe = nullptr;   // the kernel's followed loops (Verdict::probe; the table of verdicts keeps it), or null
   };
 
   Decision kernel_eligible(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, const std::vector<std::vector<uint8_t>>& args, MemoryManager& mem) {
@@ -563,6 +586,7 @@ struct Runtime::Impl : CardGate {
       d.runnable = v.runnable;
       d.back_edge = v.back_edge;
       d.loop = v.loop;
+      d.probe = v.probe.count ? &v.probe : nullptr;
       return d;
     };
     if (const auto it = eligible.find(key); it != eligible.end()) return decision_of(it->second);
@@ -701,9 +725,112 @@ struct Runtime::Impl : CardGate {
         }
       }
       v.loop = code_has_loop(flow);
+      // The counted loops a sample inside the blocks follows (vgpu/host_gpu.hpp find_probe_loops).
+      std::vector<LoopCodeInsn> lc(code.count);
+      const unsigned urz = code.sm >= 100 ? 255u : 63u;
+      const auto reg_of = [urz](const sass::Operand& o) { return o.kind == sass::Kind::Reg ? (o.reg == sass::kRZ ? -1 : static_cast<int>(o.reg))
+                                                            : o.kind == sass::Kind::UReg ? (o.reg >= urz ? -1 : 256 + static_cast<int>(o.reg)) : -1; };
+      const auto pred_of = [](const sass::Operand& o) { return o.kind == sass::Kind::Pred ? (o.reg >= 7 ? -1 : static_cast<int>(o.reg))
+                                                          : o.kind == sass::Kind::UPred ? (o.reg >= 7 ? -1 : 8 + static_cast<int>(o.reg)) : -1; };
+      const auto probe_of = [](const sass::Operand& o) {
+        exec::ProbeOperand q;
+        if (o.neg || o.abs || o.bnot) return q;
+        if (o.kind == sass::Kind::Reg) {
+          q.kind = exec::ProbeOperand::Reg;
+          q.reg = o.reg;
+        } else if (o.kind == sass::Kind::UReg) {
+          q.kind = exec::ProbeOperand::UReg;
+          q.reg = o.reg;
+        } else if (o.kind == sass::Kind::Imm) {
+          q.kind = exec::ProbeOperand::Imm;
+          q.imm = o.imm;
+        } else if (o.kind == sass::Kind::CBank) {
+          q.kind = exec::ProbeOperand::CBank;
+          q.reg = o.reg;
+          q.imm = o.imm;
+        }
+        return q;
+      };
+      for (size_t i = 0; i < code.count; ++i) {
+        const sass::Instr& ins = code.instr(i);
+        LoopCodeInsn& c = lc[i];
+        c.flow = flow[i];
+        // (a branch on !P is decided by P as much: the distance to the bound is the same whichever way the branch reads it)
+        if (ins.op == sass::Op::BRA && ins.guard < sass::kPT) c.branch_pred = (ins.guard_uniform ? 8 : 0) + ins.guard;
+        for (const sass::Operand& o : ins.dst) {
+          if (const int r = reg_of(o); r >= 0)
+            for (unsigned k = 0; k < std::max<unsigned>(o.width, 1); ++k) c.writes.push_back(r + static_cast<int>(k));
+          if (const int q = pred_of(o); q >= 0) c.pred_writes.push_back(q);
+        }
+        const bool add = ins.op == sass::Op::IADD3 || ins.op == sass::Op::VIADD || ins.op == sass::Op::IADD || ins.op == sass::Op::UIADD3;
+        if (add && ins.guard == sass::kPT && !ins.dst.empty() && reg_of(ins.dst[0]) >= 0 && ins.dst[0].width <= 1) {
+          int src = -1;
+          unsigned regs = 0;
+          int64_t imm = 0;
+          bool plain = true;
+          for (const sass::Operand& o : ins.src) {
+            if (o.kind == sass::Kind::Pred || o.kind == sass::Kind::UPred) continue;   // (carry-in PT)
+            if ((o.kind == sass::Kind::Reg || o.kind == sass::Kind::UReg) && reg_of(o) < 0) continue;   // RZ, URZ
+            if (o.kind == sass::Kind::Imm) {
+              imm += o.neg ? -o.imm : o.imm;
+              continue;
+            }
+            if (reg_of(o) >= 0 && !o.neg && !o.bnot && !o.abs) {
+              src = reg_of(o);
+              ++regs;
+              continue;
+            }
+            plain = false;
+          }
+          if (plain && regs == 1 && imm != 0 && ins.mods.empty()) {
+            c.kind = LoopCodeInsn::Kind::AddImm;
+            c.add_dst = reg_of(ins.dst[0]);
+            c.add_src = src;
+            c.add_imm = static_cast<int32_t>(static_cast<uint32_t>(imm));   // (the 32-bit constant the add adds, signed)
+          }
+        }
+        if ((ins.op == sass::Op::ISETP || ins.op == sass::Op::UISETP) && ins.guard == sass::kPT && !mods_have(ins.mods, "EX")) {
+          std::vector<const sass::Operand*> vals;
+          for (const sass::Operand& o : ins.src)
+            if (o.kind != sass::Kind::Pred && o.kind != sass::Kind::UPred) vals.push_back(&o);
+          // (the predicate it combines with must be PT: a compare ANDed with another condition is not a counter alone)
+          bool combine_pt = true;
+          for (const sass::Operand& o : ins.src)
+            if ((o.kind == sass::Kind::Pred || o.kind == sass::Kind::UPred) && (o.reg != sass::kPT || o.neg)) combine_pt = false;
+          if (vals.size() == 2 && combine_pt) {
+            c.kind = LoopCodeInsn::Kind::Compare;
+            c.cmp_a = probe_of(*vals[0]);
+            c.cmp_b = probe_of(*vals[1]);
+            c.cmp_unsigned = mods_have(ins.mods, "U32");
+            int k = 0;
+            for (const sass::Operand& o : ins.dst)
+              if (const int q = pred_of(o); q >= 0) (k++ == 0 ? c.cmp_pred : c.cmp_pred2) = q;
+          }
+        }
+      }
+      const std::vector<FoundLoop> found = find_probe_loops(lc);
+      for (const FoundLoop& f : found) {
+        if (v.probe.count >= exec::kProbeLoops) break;
+        exec::ProbeLoop l = f.loop;
+        l.lo = code.base + 16 * f.lo;
+        l.hi = code.base + 16 * f.hi;
+        v.probe.loops[v.probe.count++] = l;
+      }
+      v.probe.enter_s = kInBlockEnterSeconds;
+      v.probe.measure_s = kInBlockMeasureSeconds;
+      if (logging_code()) {   // what the probe would follow, and the code it reads it from
+        for (unsigned k = 0; k < v.probe.count; ++k) {
+          const exec::ProbeLoop& l = v.probe.loops[k];
+          std::fprintf(stderr, "host_gpu: %s: followed loop [0x%llx, 0x%llx]: iv %c%u%+lld step %lld bound kind %u reg %u imm 0x%llx%s\n", fn.name.c_str(),
+                       static_cast<unsigned long long>(l.lo - code.base), static_cast<unsigned long long>(l.hi - code.base), l.iv.kind == exec::ProbeOperand::UReg ? 'U' : 'R', l.iv.reg,
+                       static_cast<long long>(l.iv_offset), static_cast<long long>(l.step), l.bound.kind, l.bound.reg, static_cast<unsigned long long>(l.bound.imm), l.is_unsigned ? " unsigned" : "");
+        }
+        if (v.loop)
+          for (size_t i = 0; i < code.count; ++i) std::fprintf(stderr, "host_gpu:   %s: %04llx %s\n", fn.name.c_str(), static_cast<unsigned long long>(16 * i), sass::to_text(code.instr(i)).c_str());
+      }
     }
     eligible[key] = v;
-    decision_of(v);
+    decision_of(eligible[key]);   // (the table's copy: Decision::probe points into it)
     d.why = why;   // the first launch says the reason in full
     return d;
   }
@@ -833,7 +960,7 @@ Runtime* Runtime::for_device(const DeviceProfile& profile, int ordinal) {
     if (const char* v = std::getenv("VGPU_HOST_GPU_DIV"); v && *v && *v != '0') r->impl_->div_idiom = true;
     if (const char* v = std::getenv("VGPU_HOST_GPU_SAMPLE"); v && *v)   // 0: no launch is sampled (the rule before sp60b); log: see SampleMode
       r->impl_->sample_mode = std::string(v) == "0" ? Impl::SampleMode::Off : std::string(v) == "log" ? Impl::SampleMode::Log :
-                              std::string(v) == "always" ? Impl::SampleMode::Always : Impl::SampleMode::On;
+                              std::string(v) == "always" ? Impl::SampleMode::Always : std::string(v) == "whole" ? Impl::SampleMode::Whole : Impl::SampleMode::On;
     if (const char* v = std::getenv("VGPU_HOST_GPU_STATIC"); v && *v && *v != '0') r->impl_->static_estimate = true;
     if (const char* v = std::getenv("VGPU_HOST_GPU_START_COST"); v && *v) {   // seconds; 0: do not charge the driver start (the rule before sp43)
       char* end = nullptr;
@@ -948,11 +1075,11 @@ void Runtime::note_simulated(const ptx::EntryFn& fn, const exec::LaunchConfig& c
     const LastSample& l = t_last_sample;
     if (logging() || impl_->sample_mode == Impl::SampleMode::Log)
       std::fprintf(stderr,
-                   "host_gpu_sample: kernel=%s blocks=%llu threads_per_block=%u instrs=%llu back_edge=%d loop=%d whole_samples=%u live_bytes=%llu static_s=%.6f age_s=%.6f affordable=%d answered=%d ran=%llu first_block_s=%.6f timed_s=%.6f cost_s=%.6f fork_s=%.6f threads=%u estimate_s=%.6f would_send=%d launch_s=%.6f\n",
+                   "host_gpu_sample: kernel=%s blocks=%llu threads_per_block=%u instrs=%llu back_edge=%d loop=%d whole_samples=%u live_bytes=%llu static_s=%.6f age_s=%.6f affordable=%d answered=%d ran=%llu first_block_s=%.6f timed_s=%.6f cost_s=%.6f fork_s=%.6f threads=%u estimate_s=%.6f would_send=%d launch_s=%.6f%s\n",
                    fn.name.c_str(), static_cast<unsigned long long>(l.hint.blocks), l.hint.threads_per_block, static_cast<unsigned long long>(l.hint.instrs),
                    l.hint.back_edge ? 1 : 0, l.hint.loop ? 1 : 0, l.hint.samples, static_cast<unsigned long long>(l.hint.live), l.hint.static_s, l.hint.age_s, l.hint.affordable ? 1 : 0, l.answered ? 1 : 0,
                    static_cast<unsigned long long>(l.ran), l.first_block_s, l.sample.seconds, l.wall_s, l.fork_s, l.sample.threads, l.estimate_s, l.would_send ? 1 : 0,
-                   sim_seconds);
+                   sim_seconds, inside_fields(l.hint, l.part).c_str());
     t_last_sample = {};
   }
   impl_->sim_times.record(fn.name, uint64_t{cfg.grid[0]} * cfg.grid[1] * cfg.grid[2], sim_seconds);
@@ -1020,7 +1147,7 @@ bool Runtime::Impl::launch(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg
     }
   }
   if (!sim_s) {   // the first launches of a kernel are the simulator's: they teach the estimate (VGPU_HOST_GPU_STATIC=1 is the exception, and is not sound)
-    im.consider_sample(fn, cfg, dec, blocks, mem);   // ... unless the time of its first blocks sends this one to the card (sample_plan, sample_decide)
+    im.consider_sample(fn, cfg, args, dec, blocks, mem);   // ... unless the time of its first blocks sends this one to the card (sample_plan, sample_decide)
     ++im.stats.simulated;
     return false;
   }
@@ -1226,7 +1353,8 @@ bool Runtime::Impl::launch(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg
 // Called by launch() for a launch that goes to the simulator because nothing is known of its kernel (mu held): leaves a hint for sample_plan.
 // Not once the driver has been started: the process is forked for a sample, and a process that holds the real driver's context is not forked
 // (the first-launch and history rules, which then find the start paid, are what is left).
-void Runtime::Impl::consider_sample(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, const Decision& dec, uint64_t blocks, MemoryManager& mem) {
+void Runtime::Impl::consider_sample(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, const std::vector<std::vector<uint8_t>>& args, const Decision& dec,
+                                     uint64_t blocks, MemoryManager& mem) {
   if (sample_mode == SampleMode::Off || verify || !dec.ok || start_sh || start_failed || banned.count(fn.name)) return;
   uint64_t live = 0;
   for (const auto& r : mem.live_ranges()) live += r.second;
@@ -1243,8 +1371,31 @@ void Runtime::Impl::consider_sample(const ptx::EntryFn& fn, const exec::LaunchCo
   c.spent_s = sample_spent_s;
   c.expected_s = std::max(sample_dearest_s, kSampleCostGuessSeconds + kSampleSecondsPerLiveByte * static_cast<double>(live));
   c.static_s = static_sim_seconds(blocks, cfg.block[0] * cfg.block[1] * cfg.block[2], dec.instrs, costs);
-  const bool affordable = c.loop && (c.static_s >= sample_static_floor(live) || sample_affordable(c.age_s, c.spent_s, c.expected_s));
-  if (sample_mode != SampleMode::On) {   // (log, always: neither the loop, nor the floor, nor the process's age is asked)
+  c.followed = dec.probe != nullptr && sample_mode != SampleMode::Whole;
+  if (c.followed) {   // the turns of the followed loops as the launch's arguments bound them (an immediate bound, or a parameter's word)
+    const sass::CubinKernel* k = nullptr;
+    if (fn.sass)
+      if (const auto kit = fn.sass->kernel_index.find(fn.name); kit != fn.sass->kernel_index.end() && kit->second < fn.sass->cubin.kernels.size())
+        k = &fn.sass->cubin.kernels[kit->second];
+    for (unsigned i = 0; i < dec.probe->count; ++i) {
+      const exec::ProbeLoop& l = dec.probe->loops[i];
+      std::optional<int64_t> b;
+      if (l.bound.kind == exec::ProbeOperand::Imm) b = static_cast<int64_t>(static_cast<int32_t>(static_cast<uint32_t>(l.bound.imm)));
+      if (l.bound.kind == exec::ProbeOperand::CBank && l.bound.reg == 0 && k && k->params.size() == args.size())
+        for (size_t p = 0; p < k->params.size(); ++p) {
+          const uint64_t at = k->param_base + k->params[p].offset;
+          const uint64_t off = static_cast<uint64_t>(l.bound.imm);
+          if (off < at || off + 4 > at + args[p].size()) continue;
+          uint32_t v = 0;
+          std::memcpy(&v, args[p].data() + (off - at), 4);
+          b = l.is_unsigned ? static_cast<int64_t>(v) : static_cast<int64_t>(static_cast<int32_t>(v));
+          break;
+        }
+      if (b) c.bound_turns = std::max(c.bound_turns, bound_turns(*b, l.step));
+    }
+  }
+  const bool affordable = c.loop && (sample_static_estimate(c) >= sample_static_floor(live) || sample_affordable(c.age_s, c.spent_s, c.expected_s));
+  if (sample_mode != SampleMode::On && sample_mode != SampleMode::Whole) {   // (log, always: neither the loop, nor the floor, nor the process's age is asked)
     c.age_s = 1e18;
     c.loop = true;
   }
@@ -1261,6 +1412,9 @@ void Runtime::Impl::consider_sample(const ptx::EntryFn& fn, const exec::LaunchCo
   h.static_s = c.static_s;
   h.samples = sim_times.samples(fn.name);
   h.age_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_loaded).count();
+  h.inside = sample_inside(c);
+  h.bound_turns = c.bound_turns;
+  if (h.inside) h.probe = *dec.probe;
   t_sample_hint = h;
 }
 
@@ -1274,10 +1428,12 @@ bool Runtime::sample_plan(const ptx::EntryFn&, SamplePlan* plan) {
       return false;
     }
   }
-  plan->limit = sample_blocks(t_sample_hint.blocks);
-  plan->stride = sample_stride(t_sample_hint.blocks);
-  plan->budget_s = kSampleBudgetSeconds;
+  const bool inside = t_sample_hint.inside;
+  plan->limit = inside ? inblock_blocks(t_sample_hint.blocks) : sample_blocks(t_sample_hint.blocks);
+  plan->stride = inside ? inblock_stride(t_sample_hint.blocks) : sample_stride(t_sample_hint.blocks);
+  plan->budget_s = inside ? kInBlockBudgetSeconds : kSampleBudgetSeconds;
   plan->timeout_s = sample_timeout_seconds(t_sample_hint.live);
+  plan->probe = inside ? &t_sample_hint.probe : nullptr;
   return plan->limit != 0;
 }
 
@@ -1305,7 +1461,13 @@ bool Runtime::sample_decide(const ptx::EntryFn& fn, const exec::LaunchConfig& cf
   smp.total = hint.blocks;
   smp.threads = std::max(1u, run.part.threads);
   smp.seconds = smp.timed ? std::max(run.part.timed_s, 1e-9) : 0;
-  const auto whole = sampled_launch_seconds(smp);
+  std::optional<double> whole;
+  if (!hint.inside) {
+    whole = sampled_launch_seconds(smp);
+  } else if (run.answered) {   // progress inside the blocks: the blocks read, the measured turn (Round sp61)
+    std::vector<exec::BlockReading> read(run.part.readings, run.part.readings + std::min<uint64_t>(run.part.next, exec::LaunchPart::kReadings));
+    whole = inblock_launch_seconds(read, run.part.measure, hint.blocks, smp.threads);
+  }
   // What the card would have to be sent: the chunks it does not hold (all of the live memory before its first launch).
   uint64_t live = 0, push = 0;
   const auto ranges = mem.live_ranges();
@@ -1319,7 +1481,7 @@ bool Runtime::sample_decide(const ptx::EntryFn& fn, const exec::LaunchConfig& cf
   }
   std::optional<double> card_kernel;
   if (const auto it = im.card_kernel_s.find(fn.name); it != im.card_kernel_s.end()) card_kernel = it->second;
-  const bool want = whole && sample_offload(smp, push, live, im.costs, im.start_sh != nullptr, card_kernel);
+  const bool want = whole && sampled_offload(*whole, push, live, im.costs, im.start_sh != nullptr, card_kernel);
   LastSample& l = t_last_sample;
   l = {};
   l.set = true;
@@ -1332,6 +1494,7 @@ bool Runtime::sample_decide(const ptx::EntryFn& fn, const exec::LaunchConfig& cf
   l.estimate_s = whole.value_or(0);
   l.answered = run.answered;
   l.would_send = want;
+  l.part = run.part;
   if (im.sample_mode == Impl::SampleMode::Log || !want || im.dead) return false;
   const double sim_s = *whole;
   if (!im.launch(fn, cfg, args, mem, &sim_s)) return false;   // the card could not (said by launch()): the simulator runs the launch
@@ -1340,10 +1503,10 @@ bool Runtime::sample_decide(const ptx::EntryFn& fn, const exec::LaunchConfig& cf
   im.sim_times.record_extrapolated(fn.name, hint.blocks, sim_s);
   if (logging())
     std::fprintf(stderr,
-                 "host_gpu_sample: kernel=%s blocks=%llu threads_per_block=%u instrs=%llu back_edge=%d loop=%d whole_samples=%u live_bytes=%llu static_s=%.6f age_s=%.6f affordable=%d answered=1 ran=%llu first_block_s=%.6f timed_s=%.6f cost_s=%.6f fork_s=%.6f threads=%u estimate_s=%.6f would_send=1 launch_s=-1\n",
+                 "host_gpu_sample: kernel=%s blocks=%llu threads_per_block=%u instrs=%llu back_edge=%d loop=%d whole_samples=%u live_bytes=%llu static_s=%.6f age_s=%.6f affordable=%d answered=1 ran=%llu first_block_s=%.6f timed_s=%.6f cost_s=%.6f fork_s=%.6f threads=%u estimate_s=%.6f would_send=1 launch_s=-1%s\n",
                  fn.name.c_str(), static_cast<unsigned long long>(hint.blocks), hint.threads_per_block, static_cast<unsigned long long>(hint.instrs), hint.back_edge ? 1 : 0, hint.loop ? 1 : 0,
                  hint.samples, static_cast<unsigned long long>(hint.live), hint.static_s, hint.age_s, hint.affordable ? 1 : 0, static_cast<unsigned long long>(run.part.next),
-                 run.part.first_block_s, smp.seconds, run.wall_s, run.fork_s, smp.threads, sim_s);
+                 run.part.first_block_s, smp.seconds, run.wall_s, run.fork_s, smp.threads, sim_s, inside_fields(hint, run.part).c_str());
   t_last_sample = {};
   return true;
 }

@@ -11,6 +11,7 @@
 #include <mutex>
 #include <unordered_map>
 
+#include "vgpu/exec/block_progress.hpp"
 #include "vgpu/exec/scheduler.hpp"
 #include "vgpu/exec/texture.hpp"
 #include "vgpu/memory.hpp"
@@ -81,6 +82,16 @@ struct LaunchPart {
   unsigned threads = 0;             // the host threads the whole launch would run on
   double first_block_s = -1;        // when the first run of the first block ended, in seconds from the run's start
   double run_s = 0;                 // when the last block ended, on the same clock
+  // Progress inside a block (Round sp61; vgpu/exec/block_progress.hpp): not null, the blocks are not run whole. Each block taken is run until its
+  // warps stand in one of the probe's loops (or have ended, or BlockProbe::enter_s has passed) and is read there; in the first, the warp with the most
+  // turns left then runs alone for BlockProbe::measure_s. `next` counts the blocks read, `timed_s` the time they took (the budget applies to it), and
+  // `first_block_s` and `run_s` are kept as above.
+  const BlockProbe* probe = nullptr;
+  static constexpr unsigned kReadings = 32;
+  BlockReading readings[kReadings];   // the blocks read, in order (the first `next`, kReadings at most)
+  TurnMeasure measure;
+  uint64_t warps_followed = 0;        // warps read in a followed loop
+  uint64_t warps_unfollowed = 0;      // warps read neither in one nor ended (they add no turns)
 };
 
 struct LaunchConfig {

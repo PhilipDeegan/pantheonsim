@@ -60,6 +60,7 @@ class Runtime {
   struct SamplePlan {
     uint64_t limit = 0, stride = 1;
     double budget_s = 0, timeout_s = 0;
+    const exec::BlockProbe* probe = nullptr;   // not null: progress inside the blocks (Round sp61), good until sample_decide
   };
   bool sample_plan(const ptx::EntryFn& fn, SamplePlan* plan);
   bool driver_start_begun() const;

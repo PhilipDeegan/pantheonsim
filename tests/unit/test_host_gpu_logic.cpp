@@ -645,6 +645,7 @@ static CodeInsn ci(K kind, uint64_t pc, int64_t target = -1, int src0 = -1, int 
 // main line: ... MUFU.RCP R8, R3 ; FCHK P0, R0, R3 ; FFMA x5 ; @!P0 BRA ; MOV ; CALL -> slow ; ... EXIT ; slow: ALU..., MUFU.RCP R8, R3, ALU..., RET
 static std::vector<CodeInsn> division_kernel() {
   std::vector<CodeInsn> c;
+  c.reserve(64);   // (GCC 13 at -O3 warns of a write past the end in the growth path of push_back here, a false positive under -Werror)
   uint64_t pc = 0;
   const auto add = [&](K k, int64_t target = -1, int s0 = -1, int s1 = -1) { c.push_back(ci(k, pc, target, s0, s1)); pc += 16; };
   add(K::Other);                    // LDG is Memory only inside a subroutine: here it is the kernel's own load
@@ -1307,6 +1308,436 @@ VTEST(sim_time_table_peeks_at_one_sample_and_takes_an_extrapolation_as_history) 
   SimTimeTable q;
   q.record_extrapolated("quick", 100, 0.1);
   VCHECK(q.predict("quick", 100).has_value());
+}
+
+// ---- progress inside a block (vgpu/exec/block_progress.hpp, find_probe_loops; Round sp61) ----
+
+static vgpu::exec::ProbeLoop counted(int64_t step, int64_t offset = 0, bool is_unsigned = false) {
+  vgpu::exec::ProbeLoop l;
+  l.step = step;
+  l.iv_offset = offset;
+  l.is_unsigned = is_unsigned;
+  return l;
+}
+
+VTEST(turns_left_are_the_distance_to_the_bound_in_steps) {
+  using vgpu::exec::lane_turns_left;
+  VCHECK(lane_turns_left(1, 2049, counted(1)) == 2048);          // COVAR: j2 from 1 to M + 1 = 2049
+  VCHECK(lane_turns_left(2048, 2049, counted(1)) == 1);
+  VCHECK(lane_turns_left(2049, 2049, counted(1)) == 0);          // at the bound: none
+  VCHECK(lane_turns_left(3000, 2049, counted(1)) == 0);          // past it: none
+  VCHECK(lane_turns_left(0, 10, counted(4)) == 3);               // unrolled by 4: a part turn is a turn
+  VCHECK(lane_turns_left(0, 12, counted(4)) == 3);
+  VCHECK(lane_turns_left(0, 13, counted(4)) == 4);
+  VCHECK(lane_turns_left(100, 0, counted(-1)) == 100);           // counting down to 0
+  VCHECK(lane_turns_left(100, 0, counted(-3)) == 34);
+  VCHECK(lane_turns_left(0, 100, counted(-1)) == 0);             // moving away from the bound: none
+  VCHECK(lane_turns_left(5, 10, counted(0)) == 0);               // no step: none
+  VCHECK(lane_turns_left(10, 5, counted(0)) == 0);               // ... on either side of the bound
+  VCHECK(lane_turns_left(4, 10, counted(1, 1)) == 5);            // the compare reads iv + 1
+  VCHECK(lane_turns_left(4, 10, counted(1, -2)) == 8);
+  // signed by default: -1 is below any positive bound; unsigned, 0xffffffff is above it
+  VCHECK(lane_turns_left(0xffffffffu, 3, counted(1)) == 4);
+  VCHECK(lane_turns_left(0xffffffffu, 3, counted(1, 0, true)) == 0);
+  VCHECK(lane_turns_left(0x80000000u, 0x80000010u, counted(1, 0, true)) == 16);
+  VCHECK(lane_turns_left(0x7ffffff0u, 0x7fffffffu, counted(1)) == 15);
+  VCHECK(lane_turns_left(0xfffffff0u, 0xfffffff8u, counted(1)) == 8);     // -16 to -8, signed
+  VCHECK(lane_turns_left(0xfffffff8u, 0xfffffff0u, counted(-2)) == 4);
+}
+
+VTEST(turns_between_two_pauses_are_what_the_register_moved) {
+  using vgpu::exec::turns_between;
+  VCHECK(turns_between(10, 13, counted(1)) == 3);
+  VCHECK(turns_between(10, 10, counted(1)) == 0);
+  VCHECK(turns_between(13, 10, counted(1)) == 0);                // backwards against the step: none
+  VCHECK(turns_between(0, 9, counted(4)) == 2);                  // whole turns only
+  VCHECK(turns_between(20, 8, counted(-4)) == 3);
+  VCHECK(turns_between(8, 20, counted(-4)) == 0);
+  VCHECK(turns_between(1, 5, counted(0)) == 0);
+  VCHECK(turns_between(5, 1, counted(0)) == 0);
+  VCHECK(turns_between(0xfffffffeu, 1, counted(1)) == 3);        // signed: -2 to 1
+  VCHECK(turns_between(0xfffffffeu, 1, counted(1, 0, true)) == 0);
+}
+
+VTEST(a_measured_turn_gives_steps_and_seconds) {
+  using vgpu::exec::TurnMeasure;
+  TurnMeasure m;
+  VCHECK(vgpu::exec::steps_per_turn(m) == 0 && vgpu::exec::seconds_per_step(m) == 0);   // nothing measured
+  m.steps = 40000;
+  m.turns = 4;
+  m.seconds = 0.004;
+  VCHECK(vgpu::exec::steps_per_turn(m) == 10000);
+  VCHECK(vgpu::exec::seconds_per_step(m) > 0.99e-7 && vgpu::exec::seconds_per_step(m) < 1.01e-7);
+  m.turns = 0;                                       // no turn completed: the run is the least a turn takes
+  VCHECK(vgpu::exec::steps_per_turn(m) == 40000);
+  m.turns = 0.5;
+  VCHECK(vgpu::exec::steps_per_turn(m) == 40000);
+  m.turns = 1;
+  VCHECK(vgpu::exec::steps_per_turn(m) == 40000);
+  m.seconds = 0;
+  VCHECK(vgpu::exec::seconds_per_step(m) == 0);
+  vgpu::exec::BlockReading b;
+  b.steps = 1000;
+  b.turns = 50;
+  VCHECK(vgpu::exec::block_steps(b, 200) == 11000);
+  VCHECK(vgpu::exec::block_steps(b, -5) == 1000);  // (no negative cost)
+}
+
+VTEST(blocks_read_inside_a_small_grid) {
+  VCHECK(inblock_blocks(8) == 8 && inblock_stride(8) == 1);       // COVAR: every block
+  VCHECK(inblock_blocks(1) == 1 && inblock_stride(1) == 1);
+  VCHECK(inblock_blocks(0) == 0);
+  VCHECK(inblock_blocks(kSampleMaxBlocks) == kSampleMaxBlocks);
+  VCHECK(inblock_blocks(kSampleMaxBlocks + 1) == kSampleMaxBlocks);
+  VCHECK(inblock_blocks(255) == kSampleMaxBlocks && inblock_stride(255) == 255 / kSampleMaxBlocks);
+  VCHECK(inblock_blocks(kSampleMinBlocks) == 0);                 // the whole-block sample's grids are not read inside
+  VCHECK(inblock_blocks(4096) == 0 && inblock_stride(4096) == 1);
+  VCHECK(kInBlockEnterSeconds == 0.001 && kInBlockMeasureSeconds == 0.004 && kInBlockBudgetSeconds == 0.012);   // what section 8 quotes
+}
+
+static vgpu::exec::BlockReading reading(double steps, double turns) {
+  vgpu::exec::BlockReading b;
+  b.steps = steps;
+  b.turns = turns;
+  return b;
+}
+
+VTEST(a_launch_from_the_blocks_read) {
+  vgpu::exec::TurnMeasure m;
+  m.steps = 30000;
+  m.turns = 3;
+  m.seconds = 0.003;                                 // 10,000 steps a turn, 0.1 us a step
+  // no block, no measure, no grid: no estimate
+  VCHECK(!inblock_launch_seconds({}, m, 8, 4).has_value());
+  VCHECK(!inblock_launch_seconds({reading(0, 10)}, vgpu::exec::TurnMeasure{}, 8, 4).has_value());
+  VCHECK(!inblock_launch_seconds({reading(0, 10)}, m, 0, 4).has_value());
+  // 8 blocks read on 4 threads, 2048 turns of 10,000 steps left in each of 8 warps: 8 x 8 x 2048 x 1e4 steps / 4 x 1e-7 s
+  std::vector<vgpu::exec::BlockReading> eight(8, reading(0, 8 * 2048));
+  const auto e = inblock_launch_seconds(eight, m, 8, 4);
+  VCHECK(e.has_value() && *e > 32.7 && *e < 32.8);
+  // the steps taken count
+  const auto e2 = inblock_launch_seconds({reading(1e6, 0)}, m, 1, 1);
+  VCHECK(e2.has_value() && *e2 > 0.0999 && *e2 < 0.1001);
+  // a grid of fewer blocks than threads: the longest block, not a share of it
+  const auto one = inblock_launch_seconds({reading(0, 100), reading(0, 300)}, m, 2, 4);
+  VCHECK(one.has_value() && *one > 0.2999 && *one < 0.3001);
+  // the blocks read stand for the grid: two read of 16, on 4 threads
+  const auto many = inblock_launch_seconds({reading(0, 100), reading(0, 300)}, m, 16, 4);
+  VCHECK(many.has_value() && *many > 0.7999 && *many < 0.8001);
+  // threads 0 is taken as 1
+  const auto t0 = inblock_launch_seconds({reading(0, 100)}, m, 2, 0);
+  VCHECK(t0.has_value() && *t0 > 0.1999 && *t0 < 0.2001);
+  // no turn completed in the measure: a turn takes at least the run's 30,000 steps
+  vgpu::exec::TurnMeasure slow = m;
+  slow.turns = 0;
+  const auto low = inblock_launch_seconds(eight, slow, 8, 4);
+  VCHECK(low.has_value() && *low > 98.2 && *low < 98.4);
+}
+
+VTEST(a_small_grid_is_sampled_inside_only_with_a_followed_loop) {
+  const Costs c;
+  SampleCandidate w = old_enough(8);
+  VCHECK(!sample_inside(w) && !worth_sampling(w, c, 0.26));
+  w.followed = true;
+  VCHECK(sample_inside(w) && worth_sampling(w, c, 0.26));
+  w.loop = false;                                    // the loop test still holds
+  VCHECK(!worth_sampling(w, c, 0.26));
+  w.loop = true;
+  w.whole_s = 0.003;                                 // so does a short whole launch
+  VCHECK(!worth_sampling(w, c, 0.26));
+  w.whole_s.reset();
+  w.age_s = 0.015;                                   // and the floor or the process's age
+  w.static_s = 0.001;
+  VCHECK(!worth_sampling(w, c, 0.26));
+  w.static_s = kSampleStaticFloorSeconds;
+  VCHECK(worth_sampling(w, c, 0.26));
+  SampleCandidate g = old_enough(4096);              // a grid the whole-block sample takes is not read inside
+  g.followed = true;
+  VCHECK(!sample_inside(g) && worth_sampling(g, c, 0.26));
+  g.blocks = 0;
+  VCHECK(!sample_inside(g) && !worth_sampling(g, c, 0.26));
+}
+
+VTEST(a_launch_sampled_inside_goes_by_the_rule_of_sampled_launches) {
+  const Costs c;
+  VCHECK(!sampled_offload(0, 0, 0, c, true));
+  VCHECK(sampled_offload(1.0, 0, 0, c, true, 0.4));
+  VCHECK(!sampled_offload(1.0, 0, 0, c, true, 0.6));
+  // COVAR: 23 s in the simulator, 64 MiB live, driver not started: the card kernel is guessed at 1/8 of it
+  VCHECK(sampled_offload(23.0, 64ull << 20, 64ull << 20, c, false));
+  const Estimate e = sampled_estimate(23.0, 64ull << 20, 64ull << 20, c, false);
+  VCHECK(e.card_kernel_s && *e.card_kernel_s > 2.87 && *e.card_kernel_s < 2.88 && e.start_s == c.start_cost_s);
+  // a launch of 50 ms does not repay the start
+  VCHECK(!sampled_offload(0.05, 64ull << 20, 64ull << 20, c, false));
+  // the old entry point is the same rule
+  Sample s;
+  s.seconds = 1.0;
+  s.timed = 1;
+  s.total = 1;
+  VCHECK(sample_offload(s, 0, 0, c, true, 0.4) == sampled_offload(1.0, 0, 0, c, true, 0.4));
+}
+
+// The shapes of nvcc's counted loops, as find_probe_loops is given them: registers 0..254, uniform ones 256 + n; predicates 0..6, uniform 8 + n.
+static LoopCodeInsn op_other(std::vector<int> writes = {}) {
+  LoopCodeInsn c;
+  c.flow = flow(-1);
+  c.writes = std::move(writes);
+  return c;
+}
+static LoopCodeInsn op_add(int dst, int src, int64_t imm) {
+  LoopCodeInsn c = op_other({dst});
+  c.kind = LoopCodeInsn::Kind::AddImm;
+  c.add_dst = dst;
+  c.add_src = src;
+  c.add_imm = imm;
+  return c;
+}
+static vgpu::exec::ProbeOperand opnd_reg(int n) { return probe_reg_operand(n); }
+static vgpu::exec::ProbeOperand opnd_imm(int64_t v) {
+  vgpu::exec::ProbeOperand o;
+  o.kind = vgpu::exec::ProbeOperand::Imm;
+  o.imm = v;
+  return o;
+}
+static vgpu::exec::ProbeOperand opnd_param(int64_t off) {
+  vgpu::exec::ProbeOperand o;
+  o.kind = vgpu::exec::ProbeOperand::CBank;
+  o.reg = 0;
+  o.imm = off;
+  return o;
+}
+static LoopCodeInsn op_cmp(int pred, vgpu::exec::ProbeOperand a, vgpu::exec::ProbeOperand b, bool is_unsigned = false) {
+  LoopCodeInsn c = op_other();
+  c.kind = LoopCodeInsn::Kind::Compare;
+  c.cmp_pred = pred;
+  c.cmp_a = a;
+  c.cmp_b = b;
+  c.cmp_unsigned = is_unsigned;
+  c.pred_writes = {pred};
+  return c;
+}
+static LoopCodeInsn op_bra(int64_t target, int pred = -1) {
+  LoopCodeInsn c = op_other();
+  c.flow = flow(target, pred >= 0);
+  c.branch_pred = pred;
+  return c;
+}
+static LoopCodeInsn op_exit(bool conditional = false) {
+  LoopCodeInsn c = op_other();
+  c.flow = flow(-1, conditional);
+  return c;
+}
+
+// COVAR's covar_kernel, in the shape nvcc gives it: a guard, the outer loop over j2 (R5, bound the parameter M + 1 at c[0x0][0x160]) and inside it
+// the loop over i (R7).
+static std::vector<LoopCodeInsn> covar_shape() {
+  return {
+      op_other({0}),                                   // 0: S2R / IMAD: j1
+      op_cmp(0, opnd_reg(0), opnd_param(0x160)),       // 1
+      op_exit(true),                                   // 2: @P0 EXIT
+      op_other({5}),                                   // 3: MOV R5, R0
+      op_other({7}),                                   // 4: the outer head: MOV R7, 0x1
+      op_other({8}),                                   // 5: the inner head: DFMA
+      op_add(7, 7, 1),                                 // 6
+      op_cmp(1, opnd_reg(7), opnd_param(0x164)),       // 7
+      op_bra(5, 1),                                    // 8: @P1 BRA 5
+      op_add(5, 5, 1),                                 // 9
+      op_cmp(0, opnd_reg(5), opnd_param(0x160)),       // 10
+      op_bra(4, 0),                                    // 11: @!P0 BRA 4
+      op_exit(),                                       // 12
+      op_bra(13),                                      // 13: BRA 13, never reached
+  };
+}
+
+VTEST(the_top_level_counted_loop_is_found) {
+  const auto f = find_probe_loops(covar_shape());
+  VCHECK(f.size() == 1);
+  VCHECK(f[0].lo == 4 && f[0].hi == 11);
+  VCHECK(f[0].loop.iv.kind == vgpu::exec::ProbeOperand::Reg && f[0].loop.iv.reg == 5 && f[0].loop.step == 1 && f[0].loop.iv_offset == 0);
+  VCHECK(f[0].loop.bound.kind == vgpu::exec::ProbeOperand::CBank && f[0].loop.bound.reg == 0 && f[0].loop.bound.imm == 0x160);
+  VCHECK(!f[0].loop.is_unsigned);
+  // an unsigned compare says so
+  auto u = covar_shape();
+  u[10] = op_cmp(0, opnd_reg(5), opnd_param(0x160), true);
+  VCHECK(find_probe_loops(u).size() == 1 && find_probe_loops(u)[0].loop.is_unsigned);
+  // the bound on the left
+  auto sw = covar_shape();
+  sw[10] = op_cmp(0, opnd_param(0x160), opnd_reg(5));
+  VCHECK(find_probe_loops(sw).size() == 1 && find_probe_loops(sw)[0].loop.iv.reg == 5);
+  // an immediate bound, or a register the loop does not write
+  auto im = covar_shape();
+  im[10] = op_cmp(0, opnd_reg(5), opnd_imm(2049));
+  VCHECK(find_probe_loops(im).size() == 1 && find_probe_loops(im)[0].loop.bound.kind == vgpu::exec::ProbeOperand::Imm);
+  auto rb = covar_shape();
+  rb[10] = op_cmp(0, opnd_reg(5), opnd_reg(9));
+  VCHECK(find_probe_loops(rb).size() == 1 && find_probe_loops(rb)[0].loop.bound.reg == 9);
+  // a branch on the uniform predicate of a uniform counter
+  auto ur = covar_shape();
+  ur[9] = op_add(256 + 4, 256 + 4, 2);
+  ur[10] = op_cmp(8, opnd_reg(256 + 4), opnd_param(0x160));
+  ur[11] = op_bra(4, 8);
+  const auto uf = find_probe_loops(ur);
+  VCHECK(uf.size() == 1 && uf[0].loop.iv.kind == vgpu::exec::ProbeOperand::UReg && uf[0].loop.iv.reg == 4 && uf[0].loop.step == 2);
+}
+
+VTEST(a_loop_whose_counter_or_bound_is_not_plain_is_not_followed) {
+  auto bw = covar_shape();   // the bound register is written in the loop
+  bw[10] = op_cmp(0, opnd_reg(5), opnd_reg(8));
+  VCHECK(find_probe_loops(bw).empty());
+  auto twice = covar_shape();   // the counter is written twice
+  twice[5] = op_other({5});
+  VCHECK(find_probe_loops(twice).empty());
+  auto other = covar_shape();   // the counter's one write is not an add of a constant to itself
+  other[9] = op_other({5});
+  VCHECK(find_probe_loops(other).empty());
+  auto fromb = covar_shape();   // an add from another register that is not itself a counter
+  fromb[9] = op_add(5, 8, 1);
+  VCHECK(find_probe_loops(fromb).empty());
+  auto zero = covar_shape();    // no step
+  zero[9] = op_add(5, 5, 0);
+  VCHECK(find_probe_loops(zero).empty());
+  auto between = covar_shape();   // another instruction writes the predicate after the compare
+  between[11].flow = flow(4, true);
+  between.insert(between.begin() + 11, op_other());
+  between[11].pred_writes = {0};
+  for (auto& c : between)
+    if (c.flow.target > 11) ++c.flow.target;
+  VCHECK(find_probe_loops(between).empty());
+  auto before = covar_shape();   // the predicate is set before the loop only
+  before[10] = op_other();
+  VCHECK(find_probe_loops(before).empty());
+  auto notcmp = covar_shape();   // the last write of the predicate is not a compare
+  notcmp[10] = op_other();
+  notcmp[10].pred_writes = {0};
+  VCHECK(find_probe_loops(notcmp).empty());
+  auto wrongp = covar_shape();   // the compare writes another predicate than the branch reads
+  wrongp[10].cmp_pred = 3;
+  VCHECK(find_probe_loops(wrongp).empty());
+  auto none = covar_shape();   // no register side at all
+  none[10] = op_cmp(0, opnd_imm(1), opnd_param(0x160));
+  VCHECK(find_probe_loops(none).empty());
+  auto nob = covar_shape();   // no bound operand
+  nob[10] = op_cmp(0, opnd_reg(5), vgpu::exec::ProbeOperand{});
+  VCHECK(find_probe_loops(nob).empty());
+  auto ind = covar_shape();   // a jump through a register: nothing is followed
+  ind[3].flow.indirect = true;
+  VCHECK(find_probe_loops(ind).empty());
+  auto uncond = covar_shape();   // an unconditional back edge and no exit branch: nothing decides
+  uncond[11] = op_bra(4);
+  uncond[10] = op_other();
+  VCHECK(find_probe_loops(uncond).empty());
+}
+
+VTEST(the_counter_may_be_read_through_a_register_the_loop_adds_to_it) {
+  auto t = covar_shape();
+  t[9] = op_add(5, 5, 2);       // R5 += 2
+  t[10] = op_cmp(0, opnd_reg(6), opnd_param(0x160));
+  t.insert(t.begin() + 10, op_add(6, 5, 1));   // R6 = R5 + 1, compared
+  for (auto& c : t)
+    if (c.flow.target > 10) ++c.flow.target;
+  const auto f = find_probe_loops(t);
+  VCHECK(f.size() == 1 && f[0].loop.iv.reg == 5 && f[0].loop.iv_offset == 1 && f[0].loop.step == 2 && f[0].hi == 12);
+  auto t2 = t;   // ... but R5 must be a counter
+  t2[9] = op_other({5});
+  VCHECK(find_probe_loops(t2).empty());
+}
+
+VTEST(a_loop_left_by_a_branch_out_of_it_is_followed) {
+  // while (true) { if (i >= n) break; ...; i += 1 }
+  std::vector<LoopCodeInsn> c = {
+      op_other({5}),                                   // 0: MOV R5, RZ
+      op_cmp(2, opnd_reg(5), opnd_param(0x168)),       // 1: the head
+      op_bra(6, 2),                                    // 2: @P2 BRA 6 (out)
+      op_other({8}),                                   // 3
+      op_add(5, 5, 1),                                 // 4
+      op_bra(1),                                       // 5: BRA 1
+      op_exit(),                                       // 6
+  };
+  const auto f = find_probe_loops(c);
+  VCHECK(f.size() == 1 && f[0].lo == 1 && f[0].hi == 5 && f[0].loop.bound.imm == 0x168);
+}
+
+VTEST(loops_one_after_another_and_inside_one_another) {
+  // two top-level loops in a row: both; the inner loop of the first is not top-level
+  std::vector<LoopCodeInsn> c = {
+      op_other({5, 6}),                                // 0
+      op_add(5, 5, 1),                                 // 1: loop A head
+      op_cmp(0, opnd_reg(5), opnd_imm(100)),           // 2
+      op_bra(1, 0),                                    // 3
+      op_add(6, 6, -1),                                // 4: loop B head
+      op_cmp(1, opnd_reg(6), opnd_imm(0)),             // 5
+      op_bra(4, 1),                                    // 6
+      op_exit(),                                       // 7
+  };
+  const auto f = find_probe_loops(c);
+  VCHECK(f.size() == 2 && f[0].lo == 1 && f[0].hi == 3 && f[1].lo == 4 && f[1].hi == 6 && f[1].loop.step == -1);
+  // ranges that cross without one holding the other: neither
+  std::vector<LoopCodeInsn> x = {
+      op_other({5, 6}),                                // 0
+      op_add(5, 5, 1),                                 // 1: head of A
+      op_add(6, 6, 1),                                 // 2: head of B
+      op_cmp(0, opnd_reg(5), opnd_imm(100)),           // 3
+      op_bra(1, 0),                                    // 4: A = [1, 4]
+      op_cmp(1, opnd_reg(6), opnd_imm(100)),           // 5
+      op_bra(2, 1),                                    // 6: B = [2, 6]
+      op_exit(),                                       // 7
+  };
+  VCHECK(find_probe_loops(x).empty());
+  // two back edges to one head make one loop, to the last of them
+  std::vector<LoopCodeInsn> two = {
+      op_other({5}),                                   // 0
+      op_add(5, 5, 1),                                 // 1: head
+      op_cmp(0, opnd_reg(5), opnd_imm(100)),           // 2
+      op_bra(1, 0),                                    // 3: continue
+      op_other(),                                      // 4
+      op_cmp(0, opnd_reg(5), opnd_imm(100)),           // 5
+      op_bra(1, 0),                                    // 6: continue again
+      op_exit(),                                       // 7
+  };
+  const auto t = find_probe_loops(two);
+  VCHECK(t.size() == 1 && t[0].lo == 1 && t[0].hi == 6);
+  // no more than kProbeLoops (each loop's counter is written once in its own range, which is all a loop is asked about)
+  std::vector<LoopCodeInsn> many = {op_other({5})};
+  for (int k = 0; k < 6; ++k) {
+    const int64_t h = static_cast<int64_t>(many.size());
+    many.push_back(op_add(5, 5, 1));
+    many.push_back(op_cmp(0, opnd_reg(5), opnd_imm(100)));
+    many.push_back(op_bra(h, 0));
+  }
+  many.push_back(op_exit());
+  const auto m = find_probe_loops(many);
+  VCHECK(m.size() == vgpu::exec::kProbeLoops && m[0].lo == 1 && m[3].lo == 10);
+  // an unreachable back edge is no loop (nvcc's BRA to itself after the EXIT), nor is a branch to a later instruction
+  VCHECK(find_probe_loops({op_exit(), op_bra(1)}).empty());
+  VCHECK(find_probe_loops({op_cmp(0, opnd_reg(5), opnd_imm(1)), op_bra(3, 0), op_other(), op_exit()}).empty());
+  VCHECK(find_probe_loops({}).empty());
+}
+
+VTEST(a_small_grid_s_floor_counts_the_followed_loop_s_bound) {
+  VCHECK(bound_turns(2048, 1) == 2048 && bound_turns(2048, 4) == 512 && bound_turns(2049, 4) == 512);
+  VCHECK(bound_turns(-100, -1) == 100 && bound_turns(100, -3) == 33 && bound_turns(5, 0) == 0 && bound_turns(0, 1) == 0);
+  const Costs c;
+  // COVAR's covar_kernel, as server3's log has it: 8 blocks, 87 us counted, 32 MiB live, 39 ms into the process, its loop bounded by m = 2048
+  SampleCandidate w;
+  w.blocks = 8;
+  w.loop = true;
+  w.followed = true;
+  w.static_s = 0.000087;
+  w.live_bytes = 33562624;
+  w.age_s = 0.039;
+  VCHECK(!worth_sampling(w, c, 0.26));               // the count alone: under the floor, and too young
+  w.bound_turns = 2048;
+  VCHECK(sample_static_estimate(w) > 0.178 && sample_static_estimate(w) < 0.179);
+  VCHECK(worth_sampling(w, c, 0.26));
+  w.bound_turns = 100;                                 // a short bound: 9 ms, under the 60 ms that 32 MiB ask
+  VCHECK(!worth_sampling(w, c, 0.26));
+  w.bound_turns = 0;                                   // (no bound known: the count alone)
+  VCHECK(sample_static_estimate(w) == w.static_s);
+  // a grid the whole-block sample takes is not scaled by the bound
+  SampleCandidate g = w;
+  g.blocks = 4096;
+  g.bound_turns = 2048;
+  VCHECK(sample_static_estimate(g) == g.static_s && !worth_sampling(g, c, 0.26));
 }
 
 VTEST_MAIN

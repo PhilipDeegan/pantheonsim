@@ -166,8 +166,8 @@ class Device {
   void install_fault_hook();
   // Host-GPU mode's sample (runtime.cpp): the launch's first blocks in a forked copy of the process. False: the copy did not answer.
   bool sample_in_copy(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg, const std::vector<std::vector<uint8_t>>& args,
-                      const exec::SymbolTable* syms, uint64_t limit, uint64_t stride, double budget_s, double timeout_s, exec::LaunchPart* part, double* wall_s,
-                      double* fork_s);
+                      const exec::SymbolTable* syms, uint64_t limit, uint64_t stride, double budget_s, double timeout_s, const exec::BlockProbe* probe,
+                      exec::LaunchPart* part, double* wall_s, double* fork_s);
   void run_kernel(const ptx::EntryFn& fn, const exec::LaunchConfig& cfg,
                   const std::vector<std::vector<uint8_t>>& args, const exec::SymbolTable* syms, exec::LaunchStats* stats_out = nullptr);
   struct LoadedModule;
