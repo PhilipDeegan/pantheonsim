@@ -1458,6 +1458,8 @@ vgpu_unit_test(test_ptx_block_reuse)
 vgpu_unit_test(test_worker_pool)
 # VGPU_HOST_STATS: the host-kernel counters line for a run that is slower on one kernel than another (#551).
 vgpu_unit_test(test_host_stats)
+# Device memory is madvised for huge pages, and making a device fixes glibc's heap thresholds (#551).
+vgpu_unit_test(test_host_heap)
 vgpu_unit_test(test_sched)
 # The SASS executor's atomics (vgpu/exec/sass_atomics.hpp), and its lane-state helpers and shuffle shapes (vgpu/exec/sass_lanes.hpp,
 # src/sass/tier.hpp), against the lane-by-lane code they replaced.
@@ -2950,6 +2952,12 @@ if(TARGET vgpucublas)
   target_include_directories(test_cublas_complex_heap PRIVATE tests/framework ${CUDA_ABI_INCLUDE})
   add_test(NAME test_cublas_complex_heap COMMAND test_cublas_complex_heap)
   set_tests_properties(test_cublas_complex_heap PROPERTIES ENVIRONMENT "VGPU_GPU=nvidia/rtx3060;VGPU_QUIET=1;VGPU_THREADS=2" TIMEOUT 600)
+  # The band and packed matrix-vector routines hold the band, not a full n x n copy, and give the full loops' bits (#551).
+  add_executable(test_cublas_band_heap nvidia/tests/unit/test_cublas_band_heap.cpp)
+  target_link_libraries(test_cublas_band_heap PRIVATE vgpucublas vgpucudart)
+  target_include_directories(test_cublas_band_heap PRIVATE tests/framework ${CUDA_ABI_INCLUDE})
+  add_test(NAME test_cublas_band_heap COMMAND test_cublas_band_heap)
+  set_tests_properties(test_cublas_band_heap PROPERTIES ENVIRONMENT "VGPU_GPU=nvidia/rtx3060;VGPU_QUIET=1" TIMEOUT 600)
 endif()
 # cublasGemmEx with half, bfloat16 and int8 operands, likewise.
 if(TARGET vgpucublas)
@@ -3496,6 +3504,16 @@ if(TARGET vgpucublas)
     DEPENDS vgpucudart
     ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
     TIMEOUT 300)
+
+  # Sub-warp groups at different copies of a group-masked ballot, then a full-mask shuffle and __syncthreads (#574):
+  # a cell-list neighbour build, PTX and SASS, checked against the host.
+  add_test(NAME e2e_group_ballot_barrier
+           COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_group_ballot_barrier.sh)
+  set_tests_properties(e2e_group_ballot_barrier PROPERTIES
+    DEPENDS vgpucudart
+    ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
+    SKIP_REGULAR_EXPRESSION "^SKIP:"
+    TIMEOUT 600)
 
   add_test(NAME e2e_host_atomics
            COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_host_atomics.sh)
@@ -4332,6 +4350,11 @@ add_test(NAME lint_ci_reservation
 # every hosted-runner apt-get update runs it first.
 add_test(NAME lint_apt_mirror_fallback COMMAND ${CMAKE_SOURCE_DIR}/tests/lint/check_apt_mirror_fallback.sh)
 set_tests_properties(lint_apt_mirror_fallback PROPERTIES TIMEOUT 60)
+
+# scripts/thp-always.sh sets transparent huge pages to always on a GitHub-hosted runner shipped with madvise, when it can,
+# and never fails the action's step (#551).
+add_test(NAME lint_thp_always COMMAND ${CMAKE_SOURCE_DIR}/tests/lint/check_thp_always.sh)
+set_tests_properties(lint_thp_always PROPERTIES TIMEOUT 60)
 
 # The merge-conflict guards (ci/pr-guard.sh at the start of a heavy job,
 # ci/cancel-conflicting-prs.sh after main moves) against a fake gh and curl.
