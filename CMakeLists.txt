@@ -1537,6 +1537,12 @@ set_tests_properties(test_exact_threads_fastpath0 PROPERTIES ENVIRONMENT "VGPU_F
 # ... and with every page noted by word from its first touch (VGPU_EXACT_PAGES=0: the note of round sp47, which the note by page must agree with).
 add_test(NAME test_exact_threads_pages0 COMMAND test_exact_threads)
 set_tests_properties(test_exact_threads_pages0 PROPERTIES ENVIRONMENT "VGPU_EXACT_PAGES=0")
+# The windows of a line's record held open (docs/exact-threads.md, "By line"): the test compiles the shadow's source itself with its
+# test hooks (VGPU_SPEC_TEST_HOOKS), which park one thread inside a window while others come to the line; its definitions take the
+# place of the library's.
+vgpu_unit_test(test_exact_lines_race)
+target_sources(test_exact_lines_race PRIVATE src/core/memory_spec.cpp)
+target_compile_definitions(test_exact_lines_race PRIVATE VGPU_SPEC_TEST_HOOKS=1)
 vgpu_unit_test(test_sass_alu_runs)
 # The same kernels with the interpreter's fast path alone (no tier) and with the baseline SIMD kernels.
 add_test(NAME test_sass_alu_runs_tier0 COMMAND test_sass_alu_runs)

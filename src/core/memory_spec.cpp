@@ -66,6 +66,21 @@
 
 namespace vgpu {
 
+// The windows of a line's record, for the race test only (tests/unit/test_exact_lines_race.cpp, which compiles this file with
+// VGPU_SPEC_TEST_HOOKS): `spec_test::hook` is called at each (a block about to write another's record out, and having taken it;
+// a block about to keep its line's bytes, having taken it; a block about to note more in its own record; a block waiting at a
+// busy line), so that the test can hold one thread inside a window while another comes to the line. Without the definition
+// nothing is compiled in.
+#ifdef VGPU_SPEC_TEST_HOOKS
+namespace spec_test {
+enum : int { kOutBefore = 1, kOutBusy = 2, kKeepBusy = 3, kWaitBusy = 4, kOwnBefore = 5 };
+void (*hook)(int at) = nullptr;
+}  // namespace spec_test
+#define VGPU_SPEC_HOOK(at) (spec_test::hook ? spec_test::hook(spec_test::at) : void())
+#else
+#define VGPU_SPEC_HOOK(at) ((void)0)
+#endif
+
 class MemoryManager::Spec {
  public:
   // A mark of the shadow: 32 bits, read and moved only by the atomic builtins.
@@ -97,6 +112,7 @@ class MemoryManager::Spec {
   // (After a few looks the thread gives its CPU up: the block that holds the line may have lost its own.)
   void wait_busy(Worker& w) {
     if (stopped.load(std::memory_order_relaxed)) throw SpecStop{};
+    VGPU_SPEC_HOOK(kWaitBusy);
     if (++w.waits % 64 == 0) {
       std::this_thread::yield();
       return;
@@ -345,7 +361,9 @@ class MemoryManager::Spec {
   // and nobody but the block that put kLineBusy there writes them before that. On return `v` is the record as it is now.
   [[gnu::noinline]] void to_words(Worker& w, Page* page, uint64_t l, uint64_t& v) {
     Line& line = page->lines[l];
+    VGPU_SPEC_HOOK(kOutBefore);
     if (!line.take(v, kLineBusy)) return;   // (the record moved: its owner noted more, or another block is writing it out)
+    VGPU_SPEC_HOOK(kOutBusy);
     const uint32_t b = owner(v), r = read_bits(v), wr = written_bits(v);
     Word* words = page->words + l * kLineWords;
     for (uint64_t i = 0; i < kLineWords; ++i)
@@ -408,6 +426,7 @@ class MemoryManager::Spec {
       if (owner(v) == tag) [[likely]] {
         const uint32_t fresh = m & ~(read_bits(v) | written_bits(v));
         if (!fresh) return;
+        VGPU_SPEC_HOOK(kOwnBefore);
         if (!line.take(v, v | as_read(fresh))) continue;   // (it moves under its owner only when another block writes it out)
         w.st.words_read_first += static_cast<uint64_t>(__builtin_popcount(fresh));
         return;
@@ -789,6 +808,7 @@ void MemoryManager::spec_keep(uint64_t addr, uint64_t len) const {
       if (o == w.tag && Spec::written_bits(v)) [[likely]] {
         // A line the block has written in before, alone: its 64 bytes are kept already.
         const uint32_t fresh = m & ~Spec::written_bits(v);
+        if (fresh) VGPU_SPEC_HOOK(kOwnBefore);
         if (fresh && !line.take(v, v | Spec::as_written(fresh))) continue;   // (it moves under its block only when another writes it out)
         w.st.words_written_first += static_cast<uint64_t>(__builtin_popcount(fresh));
         break;
@@ -799,6 +819,7 @@ void MemoryManager::spec_keep(uint64_t addr, uint64_t len) const {
         // block wrote, and read.
         // (A stop from the log, its limit, leaves the record busy: the trial is over, and a block that waits at the line sees that.)
         if (!line.take(v, Spec::kLineBusy)) continue;
+        VGPU_SPEC_HOOK(kKeepBusy);
         keep();
         spec_keep(s.base + line0 * Spec::kGranule, Spec::kLineWords * Spec::kGranule);
         line.store((v ? v : uint64_t{w.tag}) | Spec::as_written(m));
