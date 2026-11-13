@@ -1,0 +1,72 @@
+# controls and the groups of lines (first run of mutants.py, stopped when the second run had done the rest)
+(no mutant: src/core/memory_spec.cpp)    passes in every form
+(no mutant: src/sass/exec.cpp)           passes in every form
+(no mutant: src/exec/worker_pool.cpp)    passes in every form
+line_read_of_written_ignored             SURVIVED
+line_write_of_written_ignored            SURVIVED
+line_write_of_read_ignored               SURVIVED
+line_coarse_stop_not_said                killed by default
+line_read_by_any_block                   killed by default
+line_written_by_any_block                killed by default
+untouched_line_s_first_writer_any_block  killed by default
+written_out_as_read                      killed by default
+read_marks_not_written_out               killed by default
+written_out_without_taking_the_record    SURVIVED
+busy_line_read_as_by_word                SURVIVED
+busy_line_written_as_by_word             SURVIVED
+first_write_forgets_the_block_s_reads    killed by default
+line_not_kept                            killed by default
+half_a_line_kept                         killed by default
+line_kept_again                          killed by default
+later_words_of_a_line_not_marked         killed by default
+first_write_without_taking_the_record    killed by default (run 2)
+words_of_a_shared_line_not_kept          killed by default
+pieces_joined_across_the_scout_s         killed by default
+pieces_joined_that_do_not_touch          killed by default
+kept_runs_joined_across_a_gap            killed by default
+bits_of_a_line_not_placed                killed by default
+own_reads_forgotten_on_write             killed by default
+records_not_cleared                      killed by default
+written_out_words_not_cleared            killed by default
+word_read_of_written_ignored             killed by default
+word_readers_not_merged                  killed by default
+word_write_conflict_ignored              killed by default
+word_write_of_read_ignored               killed by default
+no_write_back                            killed by default
+stopped_scout_learns                     killed by default
+# the scout and the width rule (second run)
+scout_page_states_not_forgotten          killed by default
+scout_lines_not_forgotten                killed by default
+scout_memory_not_forgotten               killed by default
+scout_bytes_not_put_back                 killed by default
+scout_bytes_put_back_first               killed by default
+scout_learns_nothing                     killed by default
+scout_learns_what_it_only_wrote          killed by default
+scout_learned_not_noted_by_word          killed by default
+stopped_scout_learns                     killed by default
+scout_counters_not_added                 killed by default
+scout_block_run_again                    killed by default
+scout_on_any_grid                        killed by default
+scout_every_launch                       killed by default
+scout_switch_ignored                     killed by default
+scout_learned_not_kept                   SURVIVED
+proved_verdict_by_the_best_launch        killed by default
+proved_sum_ignored                       killed by default
+proved_wins_ignored                      killed by default
+proved_win_at_the_threshold              killed by default
+proved_worst_launch_not_capped           killed by default
+proved_first_launch_counted              killed by default
+proved_counts_not_reset                  killed by default
+pool_figure_not_halved                   killed by default
+pool_figure_replaces_one_thread_s        killed by default
+too_high_a_figure_kept                   killed by default
+one_thread_s_figure_not_marked           killed by default
+pool_figure_marked_as_one_thread_s       killed by default
+unmeasured_goes_wide_on_trial            killed by default
+proved_judged_as_unproved                killed by default
+# again after the race test was changed to look at the word a lost mark is likeliest at, and the test of what the scout learned was added
+written_out_without_taking_the_record    SURVIVED
+busy_line_read_as_by_word                SURVIVED
+busy_line_written_as_by_word             killed by default (run 3)
+first_write_without_taking_the_record    killed by default
+scout_learned_not_kept                   killed by default

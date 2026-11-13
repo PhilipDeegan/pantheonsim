@@ -2335,6 +2335,185 @@ Read from `src/sass/jit.cpp` and tried with `scripts/failure_modes.sh` (hotspot,
 * Which regions the shorter profile selects against the full count (the objects' keys before and after were not compared), and `VGPU_JIT_LINK=1` / `VGPU_JIT_FUSE=1` on the changed build (their cold and warm numbers above are the base build's).
 * Rule deviations: medians of 3 runs from one second up (asked: four); c and d only where b compiled; the ctest of all 24 legs held the machine lock for eleven minutes in one piece.
 
+## Round sp58 (exact parallel launches, kernels that update in place: a 64-byte line kept as one record while one block alone holds it, the first block run alone, a stricter width rule for trials: built, measured, LU and backprop 14 to 23 % faster, gaussian 4 to 6 % slower, none of the three over the round's bar, not kept; branch `sp58-exact-inplace`, base `speed-round-sp46-sp51` 1a5e209b)
+
+Question: Round sp55 made the proof of `VGPU_EXACT_THREADS` cheap for pages that blocks only read, and left three things: kernels that read and write the same pages still paid for every word (LU, GEMVER, sc_gpu, backprop, ADI, s3d); a coarse stop threw a whole trial away once per in-place allocation; and JACOBI1D was slower at 8 exact threads than at one. Is there a cheaper sound note for written pages, does running the first block alone pay, and is there a width rule under which a small launch is not made slower than in order?
+
+Host: server3 only (Ryzen 7 PRO 8840U, 8 cores / 16 threads, g++ 13.3), shared with two other sessions through `flock /tmp/pantheonsim-builder.lock`; every build, test and timed run under that lock in holds of at most 280 s, `nice -n 19`, builds at `-j3`. Release builds without LTO, `-g1`, `VGPU_GPU=nvidia/rtx3060`. The base build is the branch point 1a5e209b (round sp55's shadow); the measured build is e0958739 (this round's code before the merge of `speed-round-sp46-sp51` b1380186, which changes four lines of `src/sass/exec.cpp` outside this round's code). Scripts and data: [data/sp58](../data/sp58).
+
+### 1. Measured before building: who touches a written page, and a written line
+
+The first idea of the task was a page owned by one block for writing. `census.patch` (on the base; `census.py`, one run at 2 exact threads) counts, at the end of every kept trial, the 4 KiB pages noted by word and their 64-byte lines by how many blocks had a mark in them:
+
+| program | trials kept | pages by word | ... one block's | pages written in | ... one block's | lines touched | ... one block's | lines written in | ... one block's |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| ADI | 873 | 12496 | 8192 (65.6 %) | 5792 | 4096 (70.7 %) | 670720 | 670720 (100.0 %) | 306176 | 306176 (100.0 %) |
+| GEMVER | 3 | 16392 | 0 (0.0 %) | 16392 | 0 (0.0 %) | 1049088 | 1049088 (100.0 %) | 1049088 | 1049088 (100.0 %) |
+| JACOBI2D | 40 | 39040 | 20 (0.1 %) | 39040 | 20 (0.1 %) | 2495040 | 1856360 (74.4 %) | 2495040 | 1856360 (74.4 %) |
+| LU | 2269 | 2104954 | 1168 (0.1 %) | 2102908 | 1168 (0.1 %) | 91245270 | 90126872 (98.8 %) | 91113795 | 90126872 (98.9 %) |
+| backprop | 2 | 13315 | 0 (0.0 %) | 13315 | 0 (0.0 %) | 851978 | 802826 (94.2 %) | 851973 | 802824 (94.2 %) |
+| gaussian | 511 | 66302 | 9 (0.0 %) | 66047 | 8 (0.0 %) | 2873726 | 31943 (1.1 %) | 2865248 | 31940 (1.1 %) |
+| sc_gpu | 1432 | 183166 | 68736 (37.5 %) | 45444 | 33813 (74.4 %) | 11224258 | 11193059 (99.7 %) | 2630013 | 2630013 (100.0 %) |
+| lavaMD | 1 | 170 | 0 (0.0 %) | 170 | 0 (0.0 %) | 10838 | 10800 (99.6 %) | 10800 | 10800 (100.0 %) |
+
+(s3d-cuda was not on the host when the census ran.) Reading: a written page belongs to one block almost nowhere (0 to 0.1 % of the written pages of GEMVER, JACOBI2D, LU, backprop, gaussian and lavaMD: 256 threads of 4 bytes are a quarter of a page), so a page owned by a writer would fall back on nearly every page, as round sp55 expected. A written **line** of 64 bytes belongs to one block in 94 to 100 % of the cases on seven of the eight programs (a warp's 32 lanes are two lines; a lane's structure of 32 bytes is half a line), 74 % on JACOBI2D and 1 % on gaussian (whose blocks interleave within a row). So the grain that was built is the line, with an exact fall-back to words where two blocks do meet in one, so that the line never stops a trial by itself.
+
+### 2. What was built (commit `ce540d04`; taken out again at the end of the round, section 5)
+
+**A line is one record while one block alone holds it** (`docs/exact-threads.md` of commit `ce540d04`, "By line", with the argument for it; `src/core/memory_spec.cpp`). In a page noted by word, the sixteen word marks of 64 bytes are kept as one 64-bit record (the block's mark, a bit per word read, a bit per word written) for as long as one block alone has touched the line. The block notes a read or a write of several words by one compare-and-swap of the record. A second block that comes to the line reads from the record exactly which words the first read and wrote: it stops the trial where a word mark would have stopped it, and otherwise writes the sixteen marks out to the line's words (the record is "busy" for the sixteen stores) and both go by the words from then on. The record is the same information as the sixteen marks, so nothing is noted more coarsely than before and there is no new kind of stop. This replaces round sp55's pairs of words (one compare-and-swap for two).
+
+**The line is kept whole, once.** At a block's first write in a line it alone holds, the line's 64 bytes go to the undo log (the record is busy during the copy, so nobody can be writing them), and the block's later writes in that line keep nothing. A kernel that fills a line a word at a time (ADI: each lane walks along a row of its own) kept sixteen pieces of four bytes per line; it keeps one of 64.
+
+**The scout.** The first trial of a kernel on a grid of at least 32 blocks per thread runs block 0 alone first, on the launching thread, then forgets block 0's notes and starts the others; the allocations block 0 read by page and wrote in are noted by word from then on. Block 0 is the first block of the run in order, so its work is not thrown away, and what it left is what the others find in order; its kept bytes go back last if the trial is stopped. `VGPU_EXACT_SCOUT=0` switches it off.
+
+**The width rule for a trial** (`LaunchWidth` with `proved`, `src/exec/worker_pool.cpp`). Two faults were found in the rule as a trial used it. The cost of a block was taken from the time the trial's threads spent in blocks, which holds the proof's cost: a small launch looked large enough for the pool, went there, and was measured there again. And a small kernel that goes wide on trial was kept wide if the best of eight launches took under 70 % of one thread's time, against that same inflated figure. Now a figure that no launch on one thread gave counts for half, a launch it does not carry to the full width runs in order (which measures it), a figure one thread gave is not replaced by a pool's unless the pool's is under three quarters of it, and a small kernel stays wide only if four of seven launches took under 85 % of one thread's time and the seven together no longer than one thread would have. Launches without a proof are judged as before (the argument is new and off by default).
+
+Also: a store finds the page of lines in the worker's memory of 64 pages before it asks the shadow (a warp whose lanes are each in a page of their own), and `VGPU_EXACT_LOG` has the microseconds of each trial.
+
+### 3. A/B
+
+`sp58_ab.py` (round sp55's driver, with the order of the ten variants drawn anew for every round, so that no variant always follows the same one): the base build and this round's, medians of the wall seconds of the whole program, cpus 0,2,...,14. "Bits": in every run of every exact variant of both builds, and of the new build at `VGPU_THREADS=1`, the normalised output and the files written, the exit code, `VGPU_COUNTERS_FILE` and `VGPU_MEMO_FINAL_HASH` are those of the base at `VGPU_THREADS=1`. "Base twice" is the A/A control, "default" the new build at `VGPU_THREADS=1` without the variable over the base.
+
+**What this table is not.** The task asked for medians of 5 runs (3 for programs of 4 s or more) of the 52 programs of round sp55. The machine lock had eight waiters for most of the round and a turn came every 15 to 25 minutes, so the table has **3 runs (2 for the programs of 4 s or more: LU, SYR2K, SYRK, whose figure is the mean of two)** and **34 programs**: the corpus copy on the host had six HeCBench programs, not twenty-five (perplexity-cuda and s3d-cuda were brought over for their two rows, with the arguments `1000 50 1` and `-q -n 1 -s 1`); black-scholes-cuda was not reached; and the other programs of round sp55's table (adam, aobench, asmooth, asyncAllocation, atan2, the four atomic programs, attention, axpby, background-subtract, backprop-cuda, blockAccess, radixsort2, shmembench, sortKV, zerocopy) have no rows. A difference under about 3 % between the builds is inside what three runs give.
+
+| corpus | program | `VGPU_THREADS=1` s (base) | base exact 2 / 4 / 8 | this round exact 2 / 4 / 8 | `VGPU_THREADS=8` | base twice | default, new / base | trials at 8: kept / stopped / again | bits |
+|---|---|---:|---|---|---:|---:|---:|---|---|
+| polybench | 2DCONV | 0.72 | 0.99x / 1.16x / 1.19x | 1.00x / 1.16x / 1.22x | 1.53x | 1.004 | 0.999 | 1 / 0 / 0 | same |
+| polybench | 3DCONV | 0.68 | 1.25x / 1.67x / 1.89x | 1.28x / 1.69x / 1.92x | 2.02x | 0.991 | 0.993 | 254 / 0 / 0 | same |
+| polybench | 3MM | 2.10 | 1.27x / 1.53x / 1.68x | 1.27x / 1.52x / 1.67x | 1.75x | 1.004 | 0.993 | 3 / 0 / 0 | same |
+| polybench | ADI | 0.23 | 0.76x / 0.96x / 0.96x | 0.83x / 0.97x / 0.99x | 1.57x | 1.006 | 0.997 | 54 / 0 / 0 | same |
+| polybench | ATAX | 1.45 | 1.44x / 2.33x / 3.28x | 1.41x / 2.27x / 3.27x | 4.03x | 0.998 | 0.992 | 2 / 0 / 0 | same |
+| polybench | BICG | 0.28 | 1.20x / 1.53x / 1.74x | 1.21x / 1.52x / 1.74x | 1.87x | 1.005 | 1.008 | 2 / 0 / 0 | same |
+| polybench | GEMM | 0.75 | 1.27x / 1.55x / 1.66x | 1.25x / 1.51x / 1.65x | 1.73x | 1.006 | 0.990 | 1 / 0 / 0 | same |
+| polybench | GEMVER | 0.63 | 1.00x / 1.32x / 1.55x | 1.05x / 1.37x / 1.56x | 2.05x | 1.011 | 1.011 | 3 / 0 / 2 | same |
+| polybench | GESUMMV | 0.40 | 1.15x / 1.40x / 1.53x | 1.16x / 1.41x / 1.48x | 1.76x | 1.002 | 1.013 | 1 / 0 / 2 | same |
+| polybench | JACOBI1D | 1.07 | 1.03x / 1.25x / 0.87x | 0.99x / 1.12x / 1.10x | 1.61x | 0.993 | 1.006 | 315 / 0 / 0 | same |
+| polybench | JACOBI2D | 0.56 | 1.20x / 1.78x / 2.31x | 1.25x / 1.84x / 2.31x | 3.32x | 1.012 | 0.997 | 40 / 0 / 0 | same |
+| polybench | LU | 30.23 | 1.24x / 1.90x / 2.52x | 1.46x / 2.22x / 2.93x | 3.90x | 0.972 | 0.963 | 2053 / 0 / 1 | same |
+| polybench | MVT | 1.56 | 1.40x / 2.09x / 2.78x | 1.37x / 2.06x / 2.73x | 3.21x | 0.996 | 0.988 | 2 / 0 / 2 | same |
+| polybench | SYR2K | 10.49 | 1.16x / 1.69x / 2.19x | 1.14x / 1.65x / 2.14x | 2.78x | 0.991 | 0.986 | 1 / 0 / 0 | same |
+| polybench | SYRK | 5.50 | 1.17x / 1.71x / 2.27x | 1.15x / 1.61x / 2.20x | 2.88x | 0.978 | 0.984 | 1 / 0 / 0 | same |
+| rodinia | backprop | 0.53 | 0.73x / 1.02x / 1.34x | 0.89x / 1.25x / 1.54x | 2.31x | 0.998 | 1.016 | 2 / 0 / 0 | same |
+| rodinia | gaussian | 3.72 | 1.24x / 1.95x / 2.77x | 1.18x / 1.88x / 2.61x | 3.72x | 0.999 | 0.999 | 511 / 0 / 0 | same |
+| rodinia | lud | 2.95 | 1.04x / 1.20x / 1.29x | 1.04x / 1.21x / 1.30x | 1.42x | 1.008 | 1.002 | 121 / 0 / 1 | same |
+| rodinia | needle | 0.33 | 1.20x / 1.69x / 1.92x | 1.23x / 1.74x / 2.00x | 2.60x | 1.012 | 1.003 | 250 / 0 / 2 | same |
+| rodinia | pathfinder | 0.56 | 1.10x / 1.23x / 1.34x | 1.18x / 1.29x / 1.35x | 1.34x | 1.005 | 0.986 | 5 / 0 / 0 | same |
+| rodinia | srad_v2 | 0.03 | 0.93x / 0.93x / 0.92x | 0.95x / 0.89x / 0.91x | 0.91x | 0.993 | 0.993 | 0 / 1 / 0 | same |
+| rodinia | particlefilter_float | 1.38 | 1.23x / 1.95x / 2.34x | 1.27x / 1.98x / 2.45x | 1.24x | 1.008 | 1.013 | 25 / 3 / 5 | not comparable (`VGPU_THREADS=1` differs from run to run) |
+| rodinia | sc_gpu | 0.70 | 0.92x / 1.24x / 1.20x | 0.95x / 1.34x / 1.26x | 1.90x | 0.989 | 0.986 | 1431 / 0 / 33 | same |
+| rodinia | hotspot | 0.97 | 1.40x / 2.22x / 2.87x | 1.43x / 2.23x / 2.90x | 3.19x | 0.994 | 0.994 | 999 / 0 / 0 | same |
+| rodinia | bfs | 0.01 | 0.83x / 0.81x / 0.76x | 0.85x / 0.83x / 0.81x | 1.18x | 1.011 | 1.055 | 4 / 6 / 5 | same |
+| rodinia | nn | 0.01 | 0.88x / 0.97x / 0.95x | 0.88x / 0.96x / 0.95x | 0.96x | 0.993 | 1.000 | 1 / 0 / 0 | same |
+| rodinia | lavaMD | 1.53 | 1.57x / 2.49x / 3.45x | 1.52x / 2.50x / 3.42x | 4.47x | 0.992 | 0.999 | 1 / 0 / 1 | same |
+| hecbench | aop-cuda | 1.80 | 1.56x / 2.36x / 3.12x | 1.55x / 2.36x / 3.14x | 3.42x | 0.998 | 1.013 | 201 / 0 / 2 | same |
+| hecbench | bh-cuda | 0.73 | 1.20x / 2.01x / 2.32x | 1.35x / 1.95x / 2.49x | 3.57x | 1.003 | 1.022 | 6 / 2 / 4 | same; `VGPU_THREADS=8` differs |
+| hecbench | bilateral-cuda | 1.11 | 1.66x / 2.56x / 3.40x | 1.65x / 2.51x / 3.47x | 3.65x | 0.989 | 0.986 | 3 / 0 / 0 | same |
+| hecbench | bitonic-sort-cuda | 0.26 | 1.26x / 1.87x / 2.73x | 1.28x / 1.92x / 2.50x | 2.94x | 1.003 | 1.000 | 136 / 0 / 0 | same |
+| hecbench | silu-cuda | 0.46 | 1.48x / 2.15x / 2.91x | 1.51x / 2.24x / 2.88x | 3.03x | 1.001 | 0.994 | 50 / 0 / 0 | same |
+| hecbench | perplexity-cuda | 0.37 | 1.21x / 1.82x / 1.81x | 1.17x / 1.73x / 1.75x | 2.46x | 0.997 | 1.016 | 1 / 0 / 0 | same |
+| hecbench | s3d-cuda | 0.38 | 0.95x / 1.27x / 1.53x | 1.07x / 1.36x / 1.61x | 2.22x | 0.993 | 0.990 | 54 / 0 / 20 | same |
+
+| geometric mean of the speed-ups | base exact 2 | 4 | 8 | this round exact 2 | 4 | 8 | `VGPU_THREADS=8` | base twice | default, new / base |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| all (34) | 1.15x | 1.56x | 1.82x | 1.18x | 1.58x | 1.86x | 2.23x | 0.999 | 1.000 |
+| hecbench (7) | 1.31x | 1.96x | 2.46x | 1.35x | 1.98x | 2.46x | 3.00x | 0.998 | 1.003 |
+| polybench (15) | 1.16x | 1.55x | 1.78x | 1.18x | 1.55x | 1.82x | 2.27x | 0.998 | 0.995 |
+| rodinia (12) | 1.06x | 1.38x | 1.57x | 1.09x | 1.42x | 1.61x | 1.84x | 1.000 | 1.004 |
+
+Summed wall seconds: `VGPU_THREADS=1` 74.5; base exact 61.4 / 42.3 / 33.9; this round exact 57.8 / 40.3 / 32.2; `VGPU_THREADS=8` 26.0.
+base: 7 of 34 programs more than 3 % slower at 2 exact threads than at one: ADI, backprop, srad_v2, sc_gpu, bfs, nn, s3d-cuda
+this round: 6 of 34 programs more than 3 % slower at 2 exact threads than at one: ADI, backprop, srad_v2, sc_gpu, bfs, nn
+Programs of at least 0.2 s whose trials were all kept (29): 8 exact threads take 1.26x the time of 8 plain ones on the base, 1.24x this round.
+Programs of at least 0.2 s (31): base twice 0.999 (geometric mean; 0.972 to 1.012); default mode, new / base 0.998 (0.963 to 1.022).
+base, programs of at least 0.2 s: geometric mean 1.18x / 1.65x / 1.96x at 2 / 4 / 8 exact threads; `VGPU_THREADS=8` 2.41x
+this round, programs of at least 0.2 s: geometric mean 1.21x / 1.67x / 1.99x at 2 / 4 / 8 exact threads; `VGPU_THREADS=8` 2.41x
+Slower than the base by more than 3 % (programs of at least 0.2 s): GESUMMV x8 0.97, JACOBI1D x2 0.95, JACOBI1D x4 0.89, SYRK x4 0.94, SYRK x8 0.97, gaussian x2 0.95, gaussian x4 0.96, gaussian x8 0.94, lavaMD x2 0.97, bh-cuda x4 0.97, bitonic-sort-cuda x8 0.92, perplexity-cuda x4 0.95, perplexity-cuda x8 0.97
+Faster than the base by more than 3 %: 26 of 93 program-thread counts; slower: 13.
+
+Seconds in trials that a coarse stop threw away (first run, this round's build; programs with any):
+
+| program | wall s at 2 / 4 / 8 exact threads | thrown away s at 2 / 4 / 8 | trials thrown away at 2 / 4 / 8 |
+|---|---|---|---|
+| GEMVER | 0.60 / 0.46 / 0.41 | 0.0006 / 0.0005 / 0.0005 | 2 / 2 / 2 |
+| GESUMMV | 0.34 / 0.28 / 0.27 | 0.0009 / 0.0011 / 0.0013 | 2 / 2 / 2 |
+| LU | 20.76 / 13.63 / 10.33 | 0.0006 / 0.0008 / 0.0012 | 1 / 1 / 1 |
+| MVT | 1.14 / 0.76 / 0.57 | 0.0000 / 0.0000 / 0.0015 | 0 / 0 / 2 |
+| lud | 2.82 / 2.43 / 2.27 | 0.0009 / 0.0011 / 0.0013 | 1 / 1 / 1 |
+| needle | 0.27 / 0.19 / 0.16 | 0.0001 / 0.0003 / 0.0005 | 1 / 2 / 2 |
+| particlefilter_float | 1.09 / 0.70 / 0.56 | 0.0933 / 0.0489 / 0.0385 | 5 / 5 / 5 |
+| sc_gpu | 0.74 / 0.52 / 0.55 | 0.0039 / 0.0039 / 0.0048 | 33 / 33 / 33 |
+| bfs | 0.01 / 0.01 / 0.01 | 0.0003 / 0.0003 / 0.0005 | 5 / 5 / 5 |
+| lavaMD | 1.01 / 0.61 / 0.45 | 0.0000 / 0.0000 / 0.0019 | 0 / 0 / 1 |
+| aop-cuda | 1.16 / 0.76 / 0.57 | 0.0000 / 0.0000 / 0.0008 | 0 / 0 / 2 |
+| bh-cuda | 0.54 / 0.37 / 0.29 | 0.0314 / 0.0337 / 0.0394 | 4 / 4 / 4 |
+| s3d-cuda | 0.36 / 0.28 / 0.24 | 0.0058 / 0.0201 / 0.0168 | 5 / 15 / 20 |
+
+Programs of at least 0.2 s slower at 2 exact threads than at one, this round: ADI 0.83x, JACOBI1D 0.99x, backprop 0.89x, sc_gpu 0.95x
+... on the base: 2DCONV 0.99x, ADI 0.76x, backprop 0.73x, sc_gpu 0.92x, s3d-cuda 0.95x
+Programs of at least 0.2 s slower at 4 exact threads than at one, this round: ADI 0.97x
+... on the base: ADI 0.96x
+Programs of at least 0.2 s slower at 8 exact threads than at one, this round: ADI 0.99x
+... on the base: ADI 0.96x, JACOBI1D 0.87x
+8 exact threads over plain `VGPU_THREADS=8`, time, geometric mean: all 34 programs 1.20x (base 1.22x); the 31 of at least 0.2 s 1.21x (base 1.23x); the 29 of those whose trials were all kept 1.24x (base 1.26x).
+Faster than the base by 5 % or more: 2 threads: 6 (ADI, LU, backprop, pathfinder, bh-cuda, s3d-cuda); 4 threads: 4 (LU, backprop, sc_gpu, s3d-cuda); 8 threads: 6 (JACOBI1D, LU, backprop, sc_gpu, bh-cuda, s3d-cuda)
+
+Reading:
+
+* **Bits.** The same in every run of every exact variant of both builds and of the new build without the variable, on every program measured; `particlefilter_float` cannot be compared (its runs at `VGPU_THREADS=1` differ from one another).
+* **Kernels that update in place gain where a block's lines are its own.** LU 1.24x / 1.90x / 2.52x to 1.46x / 2.22x / 2.93x at 2 / 4 / 8 exact threads (24.5 s to 20.8 s at 2 threads: 18 %, 17 % and 16 % less time), backprop 0.73x / 1.02x / 1.34x to 0.89x / 1.25x / 1.54x (22 %, 23 %, 14 %), s3d-cuda 0.95x / 1.27x / 1.53x to 1.07x / 1.36x / 1.61x, sc_gpu 0.92x / 1.24x / 1.20x to 0.95x / 1.34x / 1.26x, ADI 0.76x to 0.83x at 2 threads, GEMVER 1.00x to 1.05x, pathfinder 1.10x to 1.18x, bh-cuda 1.20x to 1.35x at 2 threads. Of those in the census, these are the programs with 94 to 100 % of their written lines in one block's hands. Faster than the base by 5 % or more: six programs at 2 threads, four at 4, six at 8 (the last lines under the tables).
+* **Where blocks share lines the record costs.** gaussian (1 % of its written lines are one block's) is 5 %, 4 % and 6 % slower than the base at 2, 4 and 8 threads: every line is taken as a record by its first block, written out to words by the second, and then noted by word one word at a time, without round sp55's pairs. SYRK is 6 % slower at 4 threads and 3 % at 8 on two runs (not explained: its trial notes one allocation by word and its lines are a warp's own; its 2-thread figure is within 1 %). bitonic-sort is 8 % slower at 8 threads (0.10 s runs) and perplexity-cuda 5 % and 3 % at 4 and 8.
+* **The width rule moves JACOBI1D from 0.87x to 1.10x at 8 exact threads and costs it at 4 and 2**: 1.25x to 1.12x at 4 threads, 1.03x to 0.99x at 2. On the base nearly all of its 20,000 launches were tried at 8 threads (and lost); now 315 are, the rest run in order. At 4 threads the trials did pay (1.25x), about 20 % faster than in order, and a verdict that asks for four launches of seven under 85 % of one thread's time turns that down too often. ADI's trials fall from 2049 to 54 by the same rule (its launches are near the size the rule judges), which is part of its gain at 2 threads.
+* **A coarse stop throws away little.** The trials that a coarse stop ended took 0.0005 to 0.005 s in all in ten of the thirteen programs that have any (the table above: the launches are of hundreds of blocks and the first store of a block comes early), against runs of 0.2 to 20 s. The three others: s3d-cuda 0.006 to 0.02 s (2 to 7 % of its run; 5 trials thrown away at 2 threads where the scout runs, 15 and 20 at 4 and 8 where its grids are too small for one, 20 on the base), bh-cuda 0.03 to 0.04 s in four trials (6 to 13 %), particlefilter_float 0.04 to 0.09 s in five (7 to 9 %). These are times with the scout on; a run with `VGPU_EXACT_SCOUT=0` beside it was not made, so what the scout itself saved is known only as this bound: there is little left to save, and nothing on the programs of the first goal.
+* **The round's targets are not reached.** Programs of at least 0.2 s slower at 2 exact threads than at one: ADI (0.83x), backprop (0.89x), sc_gpu (0.95x), JACOBI1D (0.99x); the base has ADI (0.76x), backprop (0.73x), sc_gpu (0.92x), s3d-cuda (0.95x), 2DCONV (0.99x). 8 exact threads take 1.20x the time of plain `VGPU_THREADS=8` (geometric mean of the 34; 1.22x on the base), not under 1.15x. Geometric mean of the 34: 1.15x / 1.56x / 1.82x on the base, 1.18x / 1.58x / 1.86x with the three mechanisms.
+* **The regressions round sp55 left against its base** (the task's fourth goal) were not followed up beyond these rows: lavaMD and particlefilter_float are within 3 % of this round's base in both directions, and perplexity-cuda (one launch of four blocks, noted by word from the start) is 3 to 5 % slower with lines than without. What made them slower in round sp55 than on round sp47's shadow was not looked for.
+
+### 4. Tests, mutation evidence, sanitizers
+
+Of the code of commit `ce540d04` (the tests went with the code):
+
+* `test_exact_threads` has 32 tests (22 before), in its four forms; `test_worker_pool` 21 (18 before). New, all CMake-wired through the existing targets (their list is in `docs/exact-threads.md` of commit `ce540d04`, "Tests"): the adversary of the line (a second block at every byte of a line another block holds, and of the words beside it, six lengths, reads and writes, both workers: stopped exactly where the words stop it); the counters of a line one block and two blocks touched, and the shadow empty again; whole lines kept once; 1500 random interleavings of four blocks inside three lines across a page boundary against the model of the word states, in the three plans; two races on real threads (a line written out while its block writes in it, 3000 rounds, a third block looking at the word a lost mark is likeliest at; a writer going up a line while a reader comes down it, 800 rounds); five tests of the scout; three of the width rule. Release build of the measured tree (server3): 32 of 32 in each of the four forms, 21 of 21.
+* Mutations (`mutants.py`, `mutants.log`): one wrong change each, the mutated file compiled apart and linked ahead of the library, three runs of the test per form while it passes. 60 mutants, **55 killed**, 5 survived:
+
+  | group | mutants | result |
+  |---|---|---|
+  | a second block at another block's record | a coarse stop not said; a record read, written, first written by any block | 4 of 4 killed |
+  | | a read of a written word, a write of a written word, a write of a read word let through at the record | 3 survived, equivalent: the block then writes the record out and the word it looks at next stops it by the word rule (the check at the record only saves the writing out) |
+  | the record written out | written bits written out as read marks; read bits not written out | 2 of 2 killed |
+  | | a line found busy written in as if it were by word | killed, by the race test's third run (after the test was changed to look at the word the writer was at when the other block came) |
+  | | the record written out without taking it first; a line found busy read as if it were by word | **2 survived, not equivalent**: each needs a compare-and-swap of the line's block to fall between two instructions of the other thread, and 9000 rounds of the race test did not meet it. The argument for both is in that commit's exact-threads.md; a test that holds one thread inside the window needs a hook in the shadow, which was not added |
+  | what a block keeps | the first write forgetting the block's reads; a line not kept, half kept, kept again; later words not marked; the first write without taking the record; words of a shared line not kept; pieces joined across the scout's, or that do not touch; runs joined across a gap; a line's bits not placed; the sole reader's reads forgotten; records, and written-out words, not cleared | 14 of 14 killed |
+  | round sp47's and sp55's on rewritten lines | a word read of written, readers not merged, a word write conflict, a word write of read, no write back | 5 of 5 killed |
+  | the scout | page states, lines, the worker's memory not forgotten; its bytes not put back, or put back first; learns nothing, learns what it only wrote, what it learned not noted by word, a stopped scout learning; its counters not added; block 0 run again; on any grid; at every launch; the switch ignored | 14 of 14 killed |
+  | | what it learned not kept for the kernel | survived the first run (every launch of the test had a buffer of its own); the test of a second launch on the same buffer was added for it: killed |
+  | the width rule | the verdict by the best launch; the sum, the wins ignored; a win at the threshold; the worst launch not capped; the first launch counted; counts not reset; the pool's figure not halved, replacing one thread's, kept when too high, marked as one thread's; one thread's not marked; an unmeasured kernel going wide on trial; a proved trial judged as an unproved one | 14 of 14 killed |
+
+* ThreadSanitizer: **not run.** The build of the merged tree with the CI job's flags (Debug, `-fsanitize=thread -g -O1`) was given the machine lock in holds of 280 s, as the builds of round sp55 were; with eight waiters on the lock a hold came every 15 to 25 minutes, nine of them were used, and the build stopped at its last 14 steps, the first of which is an object that does not compile inside one hold under these flags (a hold that ends kills the compile, and the next begins it again). So the two races the new tests make on real threads, and the records read and written through the `__atomic` builtins, have not been under the sanitizer. This is the largest hole in the evidence for commit `ce540d04`, and the first thing to run before any of it is taken up again (on a host where a build may run to its end, or in CI).
+
+### 5. Verdict by the keep bar (sound, same bits, at least 5 % on at least three programs, no program losing more than 3 %)
+
+The bar of the round: a mechanism stays only if it is sound, leaves the same bits, gains at least 5 % on at least three programs and loses more than 3 % on none.
+
+| mechanism | sound, same bits | gains of 5 % or more | losses of more than 3 % | verdict |
+|---|---|---|---|---|
+| a line as one record, kept whole at its first write | yes (argued in the text kept with the code; same bits in every run; 55 of 60 mutants killed, two race mutants not met) | LU, backprop, s3d-cuda at 2, 4 and 8 threads; sc_gpu at 4 and 8; ADI, pathfinder, bh-cuda at 2 | gaussian at 2, 4 and 8 (4 to 6 %); SYRK at 4 (6 %, two runs); perplexity-cuda at 4 (5 %); bitonic-sort at 8 (8 %) | **not kept as built**: over the bar on gains, under it on gaussian |
+| the scout | yes | not measured apart; at most s3d-cuda at 2 threads (15 fewer trials thrown away, about 0.01 s of 0.36 s) | none seen | **not kept**: no three programs have 5 % to gain from it |
+| the width rule for trials | moves time only | JACOBI1D at 8 threads (0.87x to 1.10x); part of ADI's | JACOBI1D at 4 threads (11 %) and at 2 (5 %) | **not kept as built** |
+
+So, by the bar, the code of the three is taken out again: the branch ends with the sources, the tests, [exact-threads.md](../../exact-threads.md) and [cli.md](../../cli.md) of its base, and this section and [data/sp58](../data/sp58) are what the round leaves. The code as measured, with its tests and its text of the proof, is commit `ce540d04` of the branch (`e0958739` is the build of the A/B; `ce540d04` is that code merged with `speed-round-sp46-sp51` b1380186, with two tests added); `mutants.py`, `census.patch` and the scripts apply to it.
+
+What would put the line over the bar, from what was measured: a page whose lines keep being written out (gaussian: 99 % of them) should stop making records, an untouched line of such a page going straight to "by word" (one compare-and-swap; its words are zero already), and the words of a shared line should be taken two at a time again as in round sp55. Neither was built. For the width rule: the verdict at 85 % is too strict for a trial that is 20 % faster than in order (JACOBI1D at 4 threads); measuring a block on one thread before a small launch goes wide, and judging by more than the best launch, are what fixed 8 threads.
+
+### 6. Unresolved, and what was cut
+
+* **Nothing of the code is kept** (section 5); the gains on LU and backprop are real and are in commit `ce540d04`.
+* **The A/B is thinner than asked**: 3 runs (2 for the long programs) where 5 (3) were asked, and the programs named in section 3 are missing. The cause is the lock (a turn every 15 to 25 minutes, with a hold per round at first; the drivers now hold it over several rounds).
+* **Two mutants survived that are not equivalent** (the record written out without taking it; a busy line read as if by word): the race test does not meet their windows.
+* **SYRK at 4 threads** (6 % slower on two runs) is not explained.
+* **Goal 4** (lavaMD, perplexity, particlefilter against round sp55's base) was cut to the rows of the table.
+* **The scout and the width rule were not measured apart from the lines** (one build had all three; `VGPU_EXACT_SCOUT=0` runs were not made).
+* **The census has no row for s3d-cuda**, and was taken at 2 threads only.
+* As in rounds sp47 and sp55: only the SASS engine is tried; the five longest PolyBench programs have no rows.
+
 ## Round sp62 (exact parallel launches, kernels that update in place, again: round sp58's line record under ThreadSanitizer and a race test that holds its windows open, a page whose lines keep being written out sent to words, pairs of words back; sound, same bits, LU and backprop 13 to 24 % faster, gaussian, SYRK, lavaMD, bh and perplexity 3 to 6 % slower, not kept; branch `sp62-exact-lines`, base `speed-round-sp46-sp51` 651b41f5)
 
 Question: round sp58's line record (a 64-byte line held as one 64-bit record while one block alone holds it, its commit ce540d04) gained on LU and backprop and lost on gaussian, and its evidence had two holes: ThreadSanitizer was never run, and two mutants that are not equivalent survived because the race test could not hold a thread inside a window of the record. Close the holes first, then find where gaussian (and SYRK, perplexity) lose, fix it, and keep the line only if it meets the bar: sound, the same bits in every run, at least 5 % on at least three programs, no program of at least 0.2 s more than 3 % slower at any thread count.
@@ -2432,3 +2611,5 @@ What the data says about the rest: the loss is not where round sp58 put it. With
 * SYRK's loss (3 to 4 %, in every setting, with the same notes as the base) and perplexity's (with the same notes, more looks at the shadow per page, and 4 % in default mode) are measured, not explained.
 * The full 52-program A/B was not run (the reduced one fails the bar). The tuning ran at 4 and 8 threads only, on two programs.
 * As before: the SASS engine only; the race test covers the record's windows, not the page states'.
+
+
