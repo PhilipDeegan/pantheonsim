@@ -7,6 +7,18 @@ release says what runs and what it produces, never how fast a real GPU would run
 
 ## Unreleased
 
+- cuBLAS: the band and packed matrix-vector routines (`tbmv`, `tpmv`, `gbmv`, `sbmv`/`hbmv`, `spmv`/`hpmv`, every type) read the
+  band where it is stored and loop over it, instead of building the full n x n matrix on every call. SCS's diagonal scaling
+  (`cublasDtbmv` with k = 0 on a vector of 1500) mapped 34 MiB, took 8,000 page faults and summed 2.25 million products on each
+  call; with transparent huge pages at `madvise`, as GitHub's runners ship them, that was most of the run. SCS's `max_ent` solve
+  on a 7.0 kernel with `madvise`: 574 s before, 5.5 s after, the same iterations; the answers are the full loops' bits (an
+  infinity or NaN in x still runs the full loops, which make NaN of the zeros it meets). `tbsv`/`tpsv` still use the full matrix.
+  Making a device also fixes glibc's heap thresholds where its dynamic rule ends up (32 MiB mmap, 64 MiB trim), so a
+  host-computed library call that loads and frees a few MiB of operands (cuSPARSE SpMV) no longer gives the heap back to the
+  kernel and faults it in again each time (`VGPU_HOST_HEAP=0`, or a threshold set in the environment, keeps glibc's own).
+  The setup action has a `huge-pages` input (default `true`): on a GitHub-hosted runner whose transparent huge pages are
+  `madvise` it sets `always` for the job when sudo works, says what it did, and never fails the step
+  (`scripts/thp-always.sh`). New tests `test_cublas_band_heap`, `test_host_heap` and `lint_thp_always` (pantheonsim #551).
 - Setup action: a release carries the simulator prebuilt for linux-x86_64, one tarball and `.sha256` per runner and toolkit the
   action sets up (ubuntu-24.04 with CUDA 12.0, 12.6, 13.0 or none, ubuntu-22.04 with CUDA 12.6 or none), built and attached by
   `.github/workflows/release-binaries.yml` when a `v*` tag is pushed. The action, pinned at that release, downloads the tarball,
