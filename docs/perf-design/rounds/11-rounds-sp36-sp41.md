@@ -2389,6 +2389,8 @@ No setting wins: the line costs gaussian 4 to 7 % at 4 threads and 10 to 12 % at
 
 `sp62_ab.py` (round sp58's driver, the order of ten variants drawn anew each round): 17 programs, the eleven named in the task (gaussian, SYRK, perplexity, LU, backprop, s3d, sc_gpu, ADI, pathfinder, bh, bitonic-sort) and six controls that touch no line twice (3MM, ATAX, hotspot, lavaMD, aop, silu). 5 runs (3 for LU and SYRK, over 4 s), medians, cpus 0,2,...,14. "Bits": in every run of every exact variant of both builds and of the new build at `VGPU_THREADS=1`, the normalised output and files, exit code, `VGPU_COUNTERS_FILE` and `VGPU_MEMO_FINAL_HASH` are those of the base at `VGPU_THREADS=1`. "new / base speed" is the base's time over the new build's at the same thread count:
 
+| program | `VGPU_THREADS=1` s (base) | base exact 2 / 4 / 8 | this round exact 2 / 4 / 8 | new / base speed at 2 / 4 / 8 | `VGPU_THREADS=8` | base twice | default, new / base | bits |
+|---|---:|---|---|---|---:|---:|---:|---|
 | 3MM | 2.10 | 1.25x / 1.52x / 1.68x | 1.24x / 1.53x / 1.68x | 0.994 / 1.008 / 1.005 | 1.73x | 0.999 | 0.999 | same |
 | ADI | 0.24 | 0.77x / 0.99x / 0.98x | 0.84x / 1.06x / 1.06x | 1.091 / 1.071 / 1.085 | 1.61x | 1.005 | 1.006 | same |
 | ATAX | 1.46 | 1.43x / 2.28x / 3.25x | 1.40x / 2.28x / 3.19x | 0.978 / 1.002 / 0.982 | 3.97x | 0.998 | 0.993 | same |
