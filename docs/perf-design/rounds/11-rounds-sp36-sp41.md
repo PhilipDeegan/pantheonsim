@@ -2334,3 +2334,101 @@ Read from `src/sass/jit.cpp` and tried with `scripts/failure_modes.sh` (hotspot,
 * g++-12, clang, a build without the mutation hooks, a sanitizer build, AVX-512: not built. The `e2e_sass_jit` shards: not run (no nvcc on server3).
 * Which regions the shorter profile selects against the full count (the objects' keys before and after were not compared), and `VGPU_JIT_LINK=1` / `VGPU_JIT_FUSE=1` on the changed build (their cold and warm numbers above are the base build's).
 * Rule deviations: medians of 3 runs from one second up (asked: four); c and d only where b compiled; the ctest of all 24 legs held the machine lock for eleven minutes in one piece.
+
+## Round sp62 (exact parallel launches, kernels that update in place, again: round sp58's line record under ThreadSanitizer and a race test that holds its windows open, a page whose lines keep being written out sent to words, pairs of words back; sound, same bits, LU and backprop 13 to 24 % faster, gaussian, SYRK, lavaMD, bh and perplexity 3 to 6 % slower, not kept; branch `sp62-exact-lines`, base `speed-round-sp46-sp51` 651b41f5)
+
+Question: round sp58's line record (a 64-byte line held as one 64-bit record while one block alone holds it, its commit ce540d04) gained on LU and backprop and lost on gaussian, and its evidence had two holes: ThreadSanitizer was never run, and two mutants that are not equivalent survived because the race test could not hold a thread inside a window of the record. Close the holes first, then find where gaussian (and SYRK, perplexity) lose, fix it, and keep the line only if it meets the bar: sound, the same bits in every run, at least 5 % on at least three programs, no program of at least 0.2 s more than 3 % slower at any thread count.
+
+Host: server3 only (Ryzen 7 PRO 8840U, 8 cores / 16 threads, g++ 13.3), shared with two other sessions through `flock /tmp/pantheonsim-builder.lock`; every build, test and timed run under the lock, `nice -n 19`, builds at `-j3` in holds of about 200 s (`hold_build.py`: a few objects at a time, each compile run to its end, so that no hold is killed in the middle of one, which is how round sp58's ThreadSanitizer build stalled). Release builds without LTO, `-g1`; the ThreadSanitizer build Debug with `-fsanitize=thread -g -O1`, run under `setarch -R`. Scripts and data: [data/sp62](../data/sp62).
+
+### 1. What was brought in, and how
+
+The line record only, ported by hand from ce540d04 onto 651b41f5 (b3a799a4): `src/core/memory_spec.cpp` and its tests as they were in ce540d04, the scout taken out of both (`spec_scouted`, the sealed pieces of the log, the scout's four tests and its lines in the in-place tests), the width rule of trials not taken at all (`worker_pool` unchanged), and of `src/sass/exec.cpp` only the two fields `lines_by_word` and `lines_one_block` of `VGPU_EXACT_STATS`. 28 tests of `test_exact_threads` (round sp58's 32 less the scout's 4).
+
+### 2. Evidence for the line as measured (ce540d04's mechanism)
+
+* **A race test that holds the windows open** (`tests/unit/test_exact_lines_race.cpp`, e931ee3c, 5c5635ff, 260e77b6). It compiles `memory_spec.cpp` itself with `VGPU_SPEC_TEST_HOOKS`, which calls a hook at seven places (nothing is compiled in without the definition; the test's object takes the place of the library's): a block about to write another block's record out (it has read the record and not taken it); the same block holding the record busy, before its first store and half way through the sixteen; a block holding its own record busy before it keeps the line's bytes; a block about to note more in its own record; a block about to take an untouched line as its first reader; and a block waiting at a busy line. One thread is parked at a window while other blocks act on their own threads, then let go; every mark must survive (a later access is stopped exactly where the words stop it), a block that finds the line busy must wait and then neither stop where the words do not nor go on where they do, and a stopped trial is undone to the byte. Six tests, deterministic.
+* **ThreadSanitizer** (ran): `test_exact_threads` in its four forms (default, `VGPU_TIER=0`, `VGPU_FASTPATH=0`, `VGPU_EXACT_PAGES=0`) 28 of 28 each, and `test_exact_lines_race` 6 of 6, with no report. No race was found, so nothing had to be fixed before the rest.
+* **Mutants** (`mutants.py`: the file with one wrong change compiled outside the tree twice, as the library's object linked ahead of `libvgpu.a` into `test_exact_threads` and as the race test's own object; the race test first, three runs, then the four forms): 12 run on the record, **11 killed, 1 equivalent**. Both of round sp58's survivors are killed by the race test: the record written out without taking it first, and a busy line read as if it were by word. So are a busy line written as if by word, a first write that does not take the record, a busy line read without waiting, the owner's read note and its write note stored instead of taken, the first reader's record stored instead of taken, the record said to be by word before its sixteen words are stored, written bits written out as read marks, and read marks not written out. The survivor, a read of a written word let through at the record, is equivalent: the block then writes the record out, and the word it looks at next stops it with the same reason.
+
+### 3. Where gaussian's time goes
+
+`VGPU_EXACT_STATS` (`stats.py`, one run at 2, 4 and 8 exact threads; the counts are the same at each). gaussian's kernel `Fan2` (blocks of 4 by 4 threads, four blocks to a 64-byte line), base against the line record:
+
+| `Fan2`, 513 trials | base | line record |
+|---|---:|---:|
+| lines written out to words | | 2,841,784 (99 % of the lines written in) |
+| lines one block alone held at the end | | 31,951 |
+| pieces kept / bytes kept | 44.8 M / 179 MB | 40.3 M / 334 MB |
+| words read / taken by compare-and-swap for a read | 89.7 M / 45.0 M | the same |
+| words written / taken for a write | 44.9 M / 44.9 M | the same |
+| wall s at 8 exact threads (one run) | 1.36 | 1.54 |
+
+Every line was taken as a record by its first block, kept whole (64 bytes), then written out by its second block, whose words and the two others' were then kept again one by one; and the words of a by-word line were taken one at a time (round sp58 had removed round sp55's pairs). SYRK and perplexity note exactly what the base notes (SYRK: one allocation by word, its 65,536 lines all one block's, 33.5 M of its 100.7 M hooks answered by a remembered run; perplexity: 25,000 lines all one block's); their losses are not in what is noted. perplexity's worker looks at the shadow for a page 329 thousand times against the base's 224 thousand; why was not found.
+
+### 4. What was built for it (9bb9c37b)
+
+* **A page whose lines keep being written out stops making records.** A count per page of lines (`Page::outs`) of the lines written out in the trial; once it reaches four, a line of that page that no block has touched goes to "by word" at once, by one compare-and-swap of its record from 0, and every block takes its words one by one. Sound because an untouched record and a line by word whose words are all 0 are the same marks, "by word" is final, and the move is only made from 0, so no record a block holds is ever replaced; the count only chooses between two notes of the same marks.
+* **Two words at once again**, in lines noted by word: round sp55's 64-bit compare-and-swap of two neighbouring words when both are free for the block, and one load for two that already allow the access.
+* Tests: the adversary of the line at every byte also in a page with four lines written out; a test of the count (lines straight to words, words kept one by one, a line of another page still a record, three lines not enough, the count starting again at the next trial); half of the random interleavings noted by word in pages with four lines written out first. `test_exact_threads` 29 of 29 in its four forms and `test_exact_lines_race` 6 of 6, in Release and under ThreadSanitizer (no report). Mutants: 21 run (the 12 above and 9 for the new code), **20 killed, 1 equivalent** (the same one): a record of another block's taken straight to words, the count not cleared, not counted, and six of the pairs (taken when only the first word, or only the second, is free; read as readable by the first word; taken as written by the first; a written pair kept as one word).
+
+(A first run of these tests failed two checks in all four forms; the build had not recompiled `memory_spec.cpp`, whose copy on the host had an older time than its object. The tree was touched and built again; the results above are of the rebuilt code.)
+
+### 5. Tuning, then the A/B
+
+`tune.py`: gaussian and SYRK, the base and the new build at six settings of a measurement knob (`VGPU_EXACT_TUNE=<lines written out before a page sends its lines to words, 0 never>,<pairs>`, in the measured build only), interleaved, the order drawn anew each round, 5 runs, medians of the wall seconds, same bits checked in every run (all the same). Seconds, and in brackets the base's time over the setting's:
+
+| program, threads | base s | new 0,0 | new 0,1 | new 2,1 | new 4,0 | new 4,1 | new 8,1 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| SYRK x4 | 3.235 | 3.377 (0.96) | 3.296 (0.98) | 3.374 (0.96) | 3.344 (0.97) | 3.376 (0.96) | 3.280 (0.99) |
+| SYRK x8 | 2.425 | 2.519 (0.96) | 2.504 (0.97) | 2.510 (0.97) | 2.487 (0.98) | 2.491 (0.97) | 2.508 (0.97) |
+| gaussian x4 | 1.905 | 2.020 (0.94) | 2.054 (0.93) | 1.984 (0.96) | 2.019 (0.94) | 1.980 (0.96) | 2.015 (0.95) |
+| gaussian x8 | 1.288 | 1.456 (0.88) | 1.456 (0.88) | 1.433 (0.90) | 1.450 (0.89) | 1.435 (0.90) | 1.429 (0.90) |
+
+No setting wins: the line costs gaussian 4 to 7 % at 4 threads and 10 to 12 % at 8 with every setting, and the two mechanisms of this round take back at most 2 of those points (demotion after 2 or 4 lines; pairs alone nothing). SYRK is 1 to 4 % slower with every setting, including the one that turns both off, which is round sp58's record. The defaults (4, pairs on) were kept for the A/B.
+
+`sp62_ab.py` (round sp58's driver, the order of ten variants drawn anew each round): 17 programs, the eleven named in the task (gaussian, SYRK, perplexity, LU, backprop, s3d, sc_gpu, ADI, pathfinder, bh, bitonic-sort) and six controls that touch no line twice (3MM, ATAX, hotspot, lavaMD, aop, silu). 5 runs (3 for LU and SYRK, over 4 s), medians, cpus 0,2,...,14. "Bits": in every run of every exact variant of both builds and of the new build at `VGPU_THREADS=1`, the normalised output and files, exit code, `VGPU_COUNTERS_FILE` and `VGPU_MEMO_FINAL_HASH` are those of the base at `VGPU_THREADS=1`. "new / base speed" is the base's time over the new build's at the same thread count:
+
+| 3MM | 2.10 | 1.25x / 1.52x / 1.68x | 1.24x / 1.53x / 1.68x | 0.994 / 1.008 / 1.005 | 1.73x | 0.999 | 0.999 | same |
+| ADI | 0.24 | 0.77x / 0.99x / 0.98x | 0.84x / 1.06x / 1.06x | 1.091 / 1.071 / 1.085 | 1.61x | 1.005 | 1.006 | same |
+| ATAX | 1.46 | 1.43x / 2.28x / 3.25x | 1.40x / 2.28x / 3.19x | 0.978 / 1.002 / 0.982 | 3.97x | 0.998 | 0.993 | same |
+| LU | 28.68 | 1.21x / 1.85x / 2.45x | 1.38x / 2.11x / 2.77x | 1.140 / 1.137 / 1.129 | 3.76x | 0.992 | 1.001 | same |
+| SYRK | 5.51 | 1.17x / 1.69x / 2.27x | 1.14x / 1.63x / 2.19x | 0.971 / 0.961 / 0.965 | 2.88x | 1.012 | 1.001 | same |
+| backprop | 0.54 | 0.73x / 1.03x / 1.36x | 0.91x / 1.28x / 1.57x | 1.240 / 1.236 / 1.158 | 2.32x | 1.003 | 1.010 | same |
+| gaussian | 3.67 | 1.22x / 1.95x / 2.71x | 1.16x / 1.84x / 2.61x | 0.945 / 0.941 / 0.964 | 3.60x | 0.996 | 0.992 | same |
+| pathfinder | 0.54 | 1.11x / 1.21x / 1.28x | 1.09x / 1.21x / 1.28x | 0.987 / 1.001 / 0.997 | 1.36x | 0.995 | 0.990 | same |
+| sc_gpu | 0.68 | 0.89x / 1.26x / 1.16x | 0.89x / 1.26x / 1.20x | 1.001 / 0.995 / 1.028 | 1.83x | 0.992 | 1.000 | same |
+| hotspot | 0.95 | 1.38x / 2.20x / 2.84x | 1.38x / 2.16x / 2.76x | 0.999 / 0.985 / 0.972 | 3.20x | 0.994 | 1.002 | same |
+| lavaMD | 1.49 | 1.57x / 2.50x / 3.45x | 1.47x / 2.40x / 3.28x | 0.941 / 0.964 / 0.949 | 3.93x | 0.999 | 0.990 | same |
+| aop-cuda | 1.78 | 1.53x / 2.31x / 3.03x | 1.53x / 2.32x / 3.10x | 0.999 / 1.004 / 1.021 | 3.38x | 0.995 | 0.992 | same |
+| bh-cuda | 0.72 | 1.42x / 2.03x / 2.35x | 1.35x / 1.93x / 2.31x | 0.950 / 0.951 / 0.983 | 3.47x | 1.000 | 0.997 | same |
+| bitonic-sort-cuda | 0.26 | 1.27x / 1.92x / 2.49x | 1.27x / 1.95x / 2.48x | 0.999 / 1.019 / 0.996 | 2.98x | 1.002 | 1.013 | same |
+| perplexity-cuda | 0.38 | 1.22x / 1.83x / 1.82x | 1.16x / 1.73x / 1.75x | 0.951 / 0.946 / 0.961 | 2.49x | 0.999 | 0.957 | same |
+| s3d-cuda | 0.39 | 0.94x / 1.27x / 1.54x | 1.00x / 1.34x / 1.65x | 1.068 / 1.060 / 1.071 | 2.29x | 1.004 | 1.011 | same |
+| silu-cuda | 0.48 | 1.49x / 2.15x / 2.85x | 1.58x / 2.27x / 3.05x | 1.060 / 1.053 / 1.070 | 3.21x | 1.001 | 1.030 | same |
+| program, threads | base s | new 0,0 | new 0,1 | new 2,1 | new 4,0 | new 4,1 | new 8,1 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+
+Reading:
+
+* **Bits:** the same in every run of every variant of both builds, on all 17.
+* **Gains of 5 % or more:** LU 14 %, 14 %, 13 % at 2, 4, 8 threads; backprop 24 %, 24 %, 16 %; ADI 9 %, 7 %, 9 %; s3d-cuda 7 %, 6 %, 7 %; silu-cuda 6 %, 5 %, 7 % (silu notes no line twice, and its default mode, without the variable, is 3 % faster too: part of its figure is the build, not the line).
+* **Losses of more than 3 % (programs of at least 0.2 s):** gaussian 5.5 %, 5.9 % and 3.6 % at 2, 4, 8; lavaMD 5.9 %, 3.6 %, 5.1 %; bh-cuda 5.0 % and 4.9 % at 2 and 4; perplexity-cuda 4.9 %, 5.4 %, 3.9 % (and 4.3 % in default mode); SYRK 2.9 %, 3.9 %, 3.5 %. hotspot 2.8 % at 8.
+* **Controls:** base twice 0.992 to 1.012; default mode, new over base, 0.957 (perplexity) to 1.030 (silu), the rest within 1 %.
+
+### 6. Verdict by the bar
+
+| | sound, same bits | 5 % or more on three programs | no program of 0.2 s or more over 3 % slower | verdict |
+|---|---|---|---|---|
+| the line record with this round's demotion and pairs | yes (the argument of round sp58's text with demotion and pairs added; ThreadSanitizer clean; 20 of 21 mutants killed, 1 equivalent; same bits in every run) | yes: LU, backprop, ADI, s3d (and silu) | **no**: gaussian, lavaMD, bh, perplexity, SYRK | **not kept** |
+
+So the code is taken out again (7d0ef543): the branch ends with the sources and tests of its base, and the race test goes with the code it tests (it needs the record's windows). The code as measured, with its tests, is commit 9bb9c37b (with the `VGPU_EXACT_TUNE` knob, which would have been removed); ce540d04's mechanism alone with the race test is 260e77b6. The full A/B of 52 programs was not run: the reduced one already fails the bar.
+
+What the data says about the rest: the loss is not where round sp58 put it. With records no longer made on gaussian's pages and pairs back, gaussian still loses 4 to 10 %, and SYRK, which notes exactly what the base notes, loses 3 to 4 % with every setting. What remains is a cost of the record's path itself on the accesses it does not save anything on (one more load and branch per access to reach a line's words, a page of lines and words of 4.6 KiB where the base had 4 KiB of words, and a 64-byte keep where the base kept the bytes a block wrote), and it is paid by every kernel that goes through a page noted by word. A line that pays has to cost nothing where it does not apply: for instance a page that starts by word and takes up records only after its first lines show one block each (the opposite of this round's demotion), or a record chosen per allocation from the kernel's last launch. Neither was built.
+
+### 7. Unresolved, and what was cut
+
+* **Not kept**; the gains on LU (13 to 14 %), backprop (16 to 24 %), ADI, s3d are real, in 9bb9c37b.
+* SYRK's loss (3 to 4 %, in every setting, with the same notes as the base) and perplexity's (with the same notes, more looks at the shadow per page, and 4 % in default mode) are measured, not explained.
+* The full 52-program A/B was not run (the reduced one fails the bar). The tuning ran at 4 and 8 threads only, on two programs.
+* As before: the SASS engine only; the race test covers the record's windows, not the page states'.
