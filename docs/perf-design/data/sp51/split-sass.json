@@ -1,0 +1,342 @@
+{
+ "polybench/ADI": {
+  "wall_ms": 214.98213000086253,
+  "samples": 49182,
+  "share": {
+   "teardown": 0.0001219958521410272,
+   "ptx-parse": 0.0005896466186816315,
+   "sass-decode": 0.003619210280183807,
+   "tier-build": 0.00020332642023504534,
+   "module-load": 0.00020332642023504534,
+   "execute": 0.7565776096946037,
+   "device-init": 0.0015859460778333537,
+   "loader": 0.008417713797730876,
+   "sim-other": 0.01628644626082713,
+   "program-host": 0.21237444593550486,
+   "kernel-other": 2.0332642023504535e-05
+  }
+ },
+ "polybench/BICG": {
+  "wall_ms": 303.412365999975,
+  "samples": 63785,
+  "share": {
+   "teardown": 9.406600297875676e-05,
+   "ptx-parse": 4.703300148937838e-05,
+   "sass-decode": 0.0008309163596456848,
+   "tier-build": 3.135533432625225e-05,
+   "module-load": 9.406600297875676e-05,
+   "execute": 0.6229521047268166,
+   "device-init": 0.0016304773849651173,
+   "loader": 0.006490554205534216,
+   "sim-other": 0.03384808340518931,
+   "program-host": 0.33396566590891275,
+   "kernel-other": 1.5677667163126125e-05
+  }
+ },
+ "rodinia/backprop": {
+  "wall_ms": 39.437167997675715,
+  "samples": 8187,
+  "share": {
+   "teardown": 0.0008550140466593379,
+   "ptx-parse": 0.00012214486380847684,
+   "sass-decode": 0.005862953462806889,
+   "tier-build": 0.0004885794552339074,
+   "module-load": 0.0004885794552339074,
+   "execute": 0.7118602662758031,
+   "device-init": 0.00427507023329669,
+   "loader": 0.050567973616709415,
+   "sim-other": 0.03468914132160743,
+   "program-host": 0.19079027726884085,
+   "kernel-other": 0.0
+  }
+ },
+ "rodinia/gaussian": {
+  "wall_ms": 12.499050000769785,
+  "samples": 2176,
+  "share": {
+   "teardown": 0.002297794117647059,
+   "ptx-parse": 0.0013786764705882354,
+   "sass-decode": 0.011948529411764705,
+   "tier-build": 0.0009191176470588235,
+   "module-load": 0.003676470588235294,
+   "execute": 0.6576286764705882,
+   "device-init": 0.014705882352941176,
+   "loader": 0.15165441176470587,
+   "sim-other": 0.06341911764705882,
+   "program-host": 0.09237132352941177,
+   "kernel-other": 0.0
+  }
+ },
+ "rodinia/lud": {
+  "wall_ms": 33.258277999266284,
+  "samples": 6475,
+  "share": {
+   "teardown": 0.0,
+   "ptx-parse": 0.0004633204633204633,
+   "sass-decode": 0.02424710424710425,
+   "tier-build": 0.002007722007722008,
+   "module-load": 0.0004633204633204633,
+   "execute": 0.6986872586872587,
+   "device-init": 0.0027799227799227798,
+   "loader": 0.06084942084942085,
+   "sim-other": 0.042316602316602316,
+   "program-host": 0.1681853281853282,
+   "kernel-other": 0.0
+  }
+ },
+ "rodinia/srad_v2": {
+  "wall_ms": 4.458702998817898,
+  "samples": 737,
+  "share": {
+   "teardown": 0.0027137042062415195,
+   "ptx-parse": 0.0013568521031207597,
+   "sass-decode": 0.06784260515603799,
+   "tier-build": 0.005427408412483039,
+   "module-load": 0.0,
+   "execute": 0.04613297150610583,
+   "device-init": 0.027137042062415198,
+   "loader": 0.5251017639077341,
+   "sim-other": 0.19131614654002713,
+   "program-host": 0.13297150610583447,
+   "kernel-other": 0.0
+  }
+ },
+ "rodinia/particlefilter_float": {
+  "wall_ms": 80.60849300090922,
+  "samples": 16769,
+  "share": {
+   "teardown": 0.00017890154451666765,
+   "ptx-parse": 0.00011926769634444511,
+   "sass-decode": 0.011032261911861173,
+   "tier-build": 0.0020871846860277894,
+   "module-load": 0.00047707078537778045,
+   "execute": 0.9346413024032441,
+   "device-init": 0.0017890154451666767,
+   "loader": 0.020692945315761227,
+   "sim-other": 0.015981871310155646,
+   "program-host": 0.012940545053372294,
+   "kernel-other": 5.963384817222256e-05
+  }
+ },
+ "rodinia/bfs": {
+  "wall_ms": 8.281529000669252,
+  "samples": 1532,
+  "share": {
+   "teardown": 0.0032637075718015664,
+   "ptx-parse": 0.0019582245430809398,
+   "sass-decode": 0.011096605744125326,
+   "tier-build": 0.0026109660574412533,
+   "module-load": 0.0032637075718015664,
+   "execute": 0.46866840731070497,
+   "device-init": 0.01762402088772846,
+   "loader": 0.20757180156657964,
+   "sim-other": 0.060704960835509136,
+   "program-host": 0.22323759791122716,
+   "kernel-other": 0.0
+  }
+ },
+ "hecbench/adam-cuda": {
+  "wall_ms": 22.008694999385625,
+  "samples": 4402,
+  "share": {
+   "teardown": 0.00045433893684688776,
+   "ptx-parse": 0.0,
+   "sass-decode": 0.014538845979100408,
+   "tier-build": 0.001817355747387551,
+   "module-load": 0.00045433893684688776,
+   "execute": 0.7607905497501136,
+   "device-init": 0.007496592457973648,
+   "loader": 0.06701499318491595,
+   "sim-other": 0.027260336210813266,
+   "program-host": 0.12017264879600181,
+   "kernel-other": 0.0
+  }
+ },
+ "hecbench/atan2-cuda": {
+  "wall_ms": 17.721734999213368,
+  "samples": 3560,
+  "share": {
+   "teardown": 0.0002808988764044944,
+   "ptx-parse": 0.0,
+   "sass-decode": 0.017977528089887642,
+   "tier-build": 0.0014044943820224719,
+   "module-load": 0.0002808988764044944,
+   "execute": 0.6188202247191011,
+   "device-init": 0.007303370786516854,
+   "loader": 0.07528089887640449,
+   "sim-other": 0.043820224719101124,
+   "program-host": 0.2348314606741573,
+   "kernel-other": 0.0
+  }
+ },
+ "hecbench/backprop-cuda": {
+  "wall_ms": 9.71991200276534,
+  "samples": 1896,
+  "share": {
+   "teardown": 0.0026371308016877636,
+   "ptx-parse": 0.002109704641350211,
+   "sass-decode": 0.010021097046413503,
+   "tier-build": 0.0005274261603375527,
+   "module-load": 0.0031645569620253164,
+   "execute": 0.5079113924050633,
+   "device-init": 0.0189873417721519,
+   "loader": 0.16930379746835442,
+   "sim-other": 0.06540084388185655,
+   "program-host": 0.2199367088607595,
+   "kernel-other": 0.0
+  }
+ },
+ "hecbench/sortKV-cuda": {
+  "wall_ms": 168.2126919986331,
+  "samples": 34790,
+  "share": {
+   "teardown": 0.00011497556769186548,
+   "ptx-parse": 8.623167576889911e-05,
+   "sass-decode": 0.01986202931876976,
+   "tier-build": 0.003133084219603334,
+   "module-load": 0.0005748778384593274,
+   "execute": 0.8027881575165278,
+   "device-init": 0.0008048289738430583,
+   "loader": 0.009974130497269331,
+   "sim-other": 0.040356424259844786,
+   "program-host": 0.1223052601322219,
+   "kernel-other": 0.0
+  }
+ },
+ "samples/fp16ScalarProduct": {
+  "wall_ms": 19.006728998647304,
+  "samples": 3784,
+  "share": {
+   "teardown": 0.0010570824524312897,
+   "ptx-parse": 0.0,
+   "sass-decode": 0.0047568710359408035,
+   "tier-build": 0.0010570824524312897,
+   "module-load": 0.0007928118393234672,
+   "execute": 0.2959830866807611,
+   "device-init": 0.005549682875264271,
+   "loader": 0.09619450317124736,
+   "sim-other": 0.04994714587737843,
+   "program-host": 0.544661733615222,
+   "kernel-other": 0.0
+  }
+ },
+ "samples/simpleTemplates": {
+  "wall_ms": 3.4838190003938507,
+  "samples": 513,
+  "share": {
+   "teardown": 0.011695906432748537,
+   "ptx-parse": 0.0,
+   "sass-decode": 0.01949317738791423,
+   "tier-build": 0.001949317738791423,
+   "module-load": 0.003898635477582846,
+   "execute": 0.04093567251461988,
+   "device-init": 0.031189083820662766,
+   "loader": 0.6198830409356725,
+   "sim-other": 0.18323586744639375,
+   "program-host": 0.08771929824561403,
+   "kernel-other": 0.0
+  }
+ },
+ "samples/vectorAdd": {
+  "wall_ms": 4.523111998423701,
+  "samples": 820,
+  "share": {
+   "teardown": 0.0,
+   "ptx-parse": 0.0,
+   "sass-decode": 0.013414634146341463,
+   "tier-build": 0.0,
+   "module-load": 0.0024390243902439024,
+   "execute": 0.13902439024390245,
+   "device-init": 0.036585365853658534,
+   "loader": 0.45121951219512196,
+   "sim-other": 0.11341463414634147,
+   "program-host": 0.24390243902439024,
+   "kernel-other": 0.0
+  }
+ },
+ "samples/scalarProd": {
+  "wall_ms": 31.699887000286253,
+  "samples": 6251,
+  "share": {
+   "teardown": 0.0012797952327627579,
+   "ptx-parse": 0.00031994880819068947,
+   "sass-decode": 0.008318669012957927,
+   "tier-build": 0.00015997440409534473,
+   "module-load": 0.0007998720204767237,
+   "execute": 0.3935370340745481,
+   "device-init": 0.004319308910574308,
+   "loader": 0.05519116941289394,
+   "sim-other": 0.05727083666613342,
+   "program-host": 0.47880339145736683,
+   "kernel-other": 0.0
+  }
+ },
+ "samples/shfl_scan": {
+  "wall_ms": 94.26983000230393,
+  "samples": 19240,
+  "share": {
+   "teardown": 0.00031185031185031187,
+   "ptx-parse": 0.00015592515592515593,
+   "sass-decode": 0.005041580041580042,
+   "tier-build": 0.00031185031185031187,
+   "module-load": 0.00031185031185031187,
+   "execute": 0.8141372141372142,
+   "device-init": 0.0015072765072765074,
+   "loader": 0.01683991683991684,
+   "sim-other": 0.07302494802494802,
+   "program-host": 0.08835758835758836,
+   "kernel-other": 0.0
+  }
+ },
+ "samples/binaryPartitionCG": {
+  "wall_ms": 10.657171998900594,
+  "samples": 2209,
+  "share": {
+   "teardown": 0.003168854685377999,
+   "ptx-parse": 0.0004526935264825713,
+   "sass-decode": 0.016296966953372568,
+   "tier-build": 0.0004526935264825713,
+   "module-load": 0.001358080579447714,
+   "execute": 0.6464463558171119,
+   "device-init": 0.010864644635581712,
+   "loader": 0.15255771842462654,
+   "sim-other": 0.0851063829787234,
+   "program-host": 0.08329560887279312,
+   "kernel-other": 0.0
+  }
+ },
+ "samples/cdpQuadtree": {
+  "wall_ms": 8.141383001202485,
+  "samples": 1647,
+  "share": {
+   "teardown": 0.0018214936247723133,
+   "ptx-parse": 0.0012143290831815423,
+   "sass-decode": 0.0880388585306618,
+   "tier-build": 0.007893139040680024,
+   "module-load": 0.03946569520340012,
+   "execute": 0.3126897389192471,
+   "device-init": 0.014571948998178506,
+   "loader": 0.2495446265938069,
+   "sim-other": 0.1469338190649666,
+   "program-host": 0.13782635094110504,
+   "kernel-other": 0.0
+  }
+ },
+ "samples/cdpSimpleQuicksort": {
+  "wall_ms": 4.495369998039678,
+  "samples": 883,
+  "share": {
+   "teardown": 0.0022650056625141564,
+   "ptx-parse": 0.0033975084937712344,
+   "sass-decode": 0.072480181200453,
+   "tier-build": 0.0033975084937712344,
+   "module-load": 0.04756511891279728,
+   "execute": 0.07361268403171008,
+   "device-init": 0.030577576443941108,
+   "loader": 0.3737259343148358,
+   "sim-other": 0.20838052095130238,
+   "program-host": 0.18459796149490373,
+   "kernel-other": 0.0
+  }
+ }
+}

@@ -1,0 +1,46 @@
+total samples 3261
+ 15.61%      509  vgpu::sass::Runner::step_warp
+  8.71%      284  vgpu::sass::Runner::init_block
+  6.59%      215  vgpu::sass::tier_global_addresses
+  5.64%      184  void vgpu::sass::h_global<false>
+  4.94%      161  [libc.so.6] __nss_database_lookup
+  4.51%      147  vgpu::exec::memcount::detail::sectors_hash
+  4.17%      136  vgpu::simd::avx2_impl::blend_m_k
+  3.96%      129  vgpu::sass::Runner::tier_sreg_fill
+  3.68%      120  vgpu::MemoryManager::load_batch
+  2.94%       96  vgpu::exec::memcount::detail::sectors_fast
+  2.70%       88  vgpu::simd::avx2_impl::imad_k
+  2.67%       87  void vgpu::sass::h_global<true>
+  2.61%       85  unsigned int const* vgpu::sass::tier_dyn<false>
+  2.09%       68  vgpu::simd::avx2_impl::icmp_mask_k
+  1.69%       55  vgpu::exec::LaunchStats::add
+  1.47%       48  vgpu::simd::avx2_impl::iadd3_k
+  1.44%       47  vgpu::sass::h_isetp
+  1.41%       46  vgpu::sass::h_imad
+  1.35%       44  vgpu::sass::Runner::block_round
+  1.32%       43  vgpu::sass::h_s2r
+  1.23%       40  vgpu::sass::h_uldc
+  1.23%       40  vgpu::MemoryManager::store_batch_in
+  1.23%       40  void vgpu::simd::avx2_impl::imad_wide_avx2<true, false, false>
+  1.20%       39  vgpu::sass::Runner::run()::{lambda(unsigned int)#1}::operator()
+  1.07%       35  vgpu::MemoryManager::batch_addresses_ok
+  1.04%       34  vgpu::sass::h_ulop3
+  1.01%       33  vgpu::sass::count_access
+  0.83%       27  vgpu::sass::h_uiadd3
+  0.83%       27  vgpu::sass::h_imad_wide
+  0.83%       27  vgpu::sass::h_iadd3
+  0.80%       26  vgpu::simd::avx2_impl::sector_up_k
+  0.80%       26  vgpu::sass::tier_issue
+  0.77%       25  vgpu::simd::avx2_impl::ffma_k
+  0.77%       25  vgpu::sass::Runner::cluster_barrier_check
+  0.71%       23  vgpu::simd::avx2_impl::sector_window_k
+  0.55%       18  vgpu::sass::h_mov
+  0.52%       17  [libc.so.6] malloc
+  0.46%       15  vgpu::sass::tier_dyn64
+  0.46%       15  vgpu::exec::sasslanes::set_pcs_avx2
+  0.43%       14  vgpu::MemoryManager::batch_faults_clear
+  0.37%       12  vgpu::sass::Runner::fetch
+  0.31%       10  ?? ??:0
+  0.28%        9  vgpu::MemoryManager::store_batch
+  0.28%        9  [libc.so.6] __default_morecore
+  0.28%        9  vgpu::sass::Runner::break_spin_wait

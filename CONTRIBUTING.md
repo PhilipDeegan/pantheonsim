@@ -5,6 +5,29 @@ made is in [GOVERNANCE.md](GOVERNANCE.md), the rules for taking part are in the
 [Code of Conduct](CODE_OF_CONDUCT.md), and security problems go to
 [SECURITY.md](SECURITY.md), not to a public issue.
 
+## How PantheonSim is developed
+
+PantheonSim has one maintainer, Saqib Khan. Most of its code, tests and
+documentation were written with AI coding assistants (Anthropic's Claude),
+directed and reviewed by the maintainer. That is why the project grew to its
+present size in a few months and why pull requests here carry no second
+reviewer. We do not ask you to trust the code because of who or what wrote it.
+Here is the evidence that exists: about 900 ctest tests are registered, and CI
+runs them on every pull request (the ROCm, PyTorch and rocBLAS ones on a runner
+that has ROCm installed), under AddressSanitizer, UBSan and ThreadSanitizer too;
+on that runner, a test that skips without a stated reason fails its job. CUDA
+12.4, 12.8 and 12.9 run in a toolkit matrix beside the main CUDA 13 jobs, as do
+nightly runs of rocBLAS's quick suite, PyTorch model checks, vLLM, and public
+suites (cuda-samples, Rodinia, PolyBench, HeCBench) on simulated GPUs. Expected
+outputs and the 17 "verified" GPU profiles were recorded by hand on physical
+cards (14 NVIDIA profiles, among them the T4, RTX 3060, A10G, A100, H100 and
+GH200, and 3 AMD ones, the MI325X, RX 6800 and RX 6700 XT; the full list is in
+[docs/status.md](docs/status.md#gpu-profiles)); that comparison is not yet
+repeated automatically. What does not work is listed in
+[known limits](docs/status.md) with its issue. If you find a wrong result,
+please open an issue: a wrong answer that reports no error is the bug we most
+want to know about.
+
 ## Start with a question or an issue
 
 - Questions and ideas: [Discussions](https://github.com/pantheongpu/pantheonsim/discussions).
@@ -26,6 +49,10 @@ These are the project's fixed points (see [GOVERNANCE.md](GOVERNANCE.md)):
   simulator without being edited.
 - Anything unsupported fails with an error that names what is missing
   (instruction, API, kernel, profile). It never silently does the wrong thing.
+  Known exceptions are listed in [docs/status.md](docs/status.md): `shfl.sync`
+  in the v0.2.0 release ([#488](https://github.com/pantheongpu/pantheonsim/issues/488),
+  fixed on `main`) and peer access between simulated GPUs
+  ([#598](https://github.com/pantheongpu/pantheonsim/issues/598)).
 - Runs are reproducible: with `VGPU_THREADS=1`, the same program and inputs give
   bit-identical results.
 - Vendor interfaces are written from public documentation, and vendor code comes

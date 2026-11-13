@@ -704,6 +704,283 @@ Tests (unit, wired into CI as `test_host_gpu_track`): `a_thread_that_remembers_s
 * Not run on a real card or in the TSan job locally (no tests on WSL); `GateMemory` is a `thread_local` zero-initialised struct and the new atomics are acquire/release, so TSan has nothing plain to flag, but CI is the check.
 * The remaining gap to plain simulation would need the batched and hot-location paths to work with a card copy, a hot-path change in `MemoryManager` that was not attempted.
 
+## Round sp46 (survey of the worst simulator-to-card ratios): measured, no lever cleared the bar, nothing built (branch `sp46-survey`, base `origin/main` 7b90cee5)
+
+Question: from the cached suites (PolyBench/GPU, Rodinia, HeCBench reduced, CUDA Samples that pass), which programs are furthest from the card in wall time, where does their time go, and is there a lever not already measured out (per-instruction levers, PGO, store forwarding, register-file clear, PTX/AMD counting)? Bar: at least 5 % geometric mean or 1.3x on a class of workloads, bit-identical.
+
+Setup: 124 programs run on the simulator (Release, no LTO, `-g1 -fno-omit-frame-pointer`, `VGPU_THREADS=1`, `VGPU_GPU=nvidia/rtx3060`, SASS, one run each, 70 s timeout, server2 cpu 14, whole sweep under one hold of the builder lock; server2's load average was 9 to 70 from other sessions, so the simulator seconds are single runs and noisy by tens of percent) and natively on the local RTX 3060 (CUDA 13.0 runtime, best of 2, process start about 0.2 s included). Ratio = simulator wall / max(native wall, 0.05 s). Programs whose time is the host's own CPU reference check (CORR, COVAR, GRAMSCHM, 2MM, ratio about 1) the 8 simulator timeouts (2MM among them) and the programs over 60 s (aidw-cuda 85 s, FDTD-2D 71 s) are out of the table; the survey is the 38 programs with a ratio above 1 that finished in 60 s or less. Per-program numbers: `data/sp46/all-programs.tsv`; the top 30 with the class of the first 15: `data/sp46/results.tsv`; the harness scripts are beside them.
+
+| # | program | sim s | card s | ratio | where the time goes |
+|---:|---|---:|---:|---:|---|
+| 1 | radixSortThrust | 27.8 | 0.41 | 67 | per-instruction (`step_warp` 17 %, `exec_mem` 9 %, handlers), shared-memory bank counting 7 % |
+| 2 | alignedTypes | 26.8 | 0.72 | 38 | memory model: `run_out` 17 %, `h_global` 20 %, `load_batch` 8 %, `store_strided` 5 % |
+| 3 | simpleHyperQ | 9.8 | 0.31 | 31 | per-instruction: a `clock64` spin loop (compare/add/setp 75 %) |
+| 4 | LU (PolyBench) | 21.5 | 0.87 | 25 | block set-up `init_block` 9 % and `memset` 7 %, rest per-instruction |
+| 5 | segmentationTreeThrust | 13.6 | 0.57 | 24 | counting: bank-pass table 14 % and widened 10 %, `step_warp` 20 % |
+| 6 | transpose | 5.8 | 0.26 | 22 | per-instruction and counting (not profiled here; see sp41) |
+| 7 | interval | 13.4 | 0.62 | 22 | per-instruction, divergence (not profiled) |
+| 8 | reduction | 8.6 | 0.41 | 21 | per-instruction (not profiled) |
+| 9 | shmembench-cuda | 4.2 | 0.21 | 20 | shared-memory model (not profiled) |
+| 10 | mergeSort | 6.2 | 0.31 | 20 | per-instruction, bank counting 10 % (sp41) |
+| 11 | jacobiCudaGraphs | 15.7 | 0.82 | 19 | graph launches plus per-instruction (not profiled) |
+| 12 | convolutionSeparable | 8.7 | 0.57 | 15 | per-instruction (not profiled) |
+| 13 | atomicAggregate-cuda | 3.2 | 0.21 | 15 | atomics (not profiled) |
+| 14 | gaussian (Rodinia) | 3.1 | 0.21 | 15 | launch overhead, two tiny launches per column (not profiled) |
+| 15 | MC_SingleAsianOptionP | 1.9 | 0.16 | 12 | per-instruction (not profiled) |
+
+Sampling profiles (a SIGPROF preload, 1 ms, instruction pointers symbolised against the library's symbol table, `data/sp46/profiles/`) exist for ranks 1 to 5 only. A queued second batch (mergeSort, sortingNetworks, histogram, reduction, transpose, interval, convolutionSeparable, jacobiCudaGraphs, shmembench, gaussian) never got the builder lock on server2 (another session's job held it for over 80 minutes), so ranks 6 to 15 are classified from the program's nature and earlier rounds, not measured; treat them as unverified. (A preload must be applied after `taskset`/`env`: `ITIMER_PROF` survives `exec`, and a first attempt that preloaded the sampler into `taskset` was killed by its own timer.)
+
+Reading: ranks 1 to 5 are all in the simulator's own interpretation and memory path, 60 to 90 % of the samples in `step_warp`, the tier handlers, the SIMD kernels and `exec_mem`. Nothing is in the host runtime, JIT/compile or API path. The three non-interpretation shares seen:
+
+* Block set-up for tiny blocks (LU): `init_block` plus `memset` is 16 % of LU. sp40 already measured the register-file clear ceiling at 4.6 % on LU and 1.02x pooled; the rest of `init_block` is not separately measured. Not a class lever: it applies to launches of very small grids, one program here.
+* Shared-memory bank counting for scans and sorts (segmentationTreeThrust 24 %, radixSortThrust 7 %, mergeSort 10 % in sp41): the shape memo and the AVX2 window kernel are in place; the `sass_bank_passes_table` fallback is still 14 % of segmentationTreeThrust, so some warps in that program miss every closed form, kernel and memo (accesses wider than 16 bytes or spread over more than 128 words are the candidates; not instrumented). Ceiling if the fallback went to zero: 1.17x on that one program, about 1.07x on radixSortThrust-like programs, nothing on the other 35.
+* `run_out`/`run_in` (`src/core/memory.cpp`), the 8-byte relaxed-atomic copy loop for contiguous runs: 17 % of alignedTypes, 1.6 % of segmentationTreeThrust. A 32-byte vector copy would be a few times faster, but a vector load is not a per-element relaxed atomic (TSan would flag it and a racing host thread could see torn 8-byte words in principle), so it is not a bit-identical change under the project's race rules. Ceiling about 1.1x on one program.
+
+A spin loop fast-forward (simpleHyperQ's `clock64` delay) would be a 3x on that program but needs the instruction counters and the clock register to be advanced analytically per lane for a loop the kernel defines; it applies to one program of 124 (and to `clock`-style Samples only).
+
+Verdict: no lever with a class-wide 5 % geometric mean or 1.3x exists in this corpus beyond what the earlier rounds measured out. The remaining ratios (20 to 60x) are the cost of interpreting a warp's instruction stream, which is where sp37, sp40 and sp41 already looked. No source change was made, so there are no new tests or mutants. Candidates for a later round, with their ceilings above: instrument which warps reach `sass_bank_passes_table` in the Thrust programs; a `run_out` that stays an atomic per 8 bytes but unrolls and prefetches. Not unresolved but worth knowing: the timed numbers of this round are single runs under heavy shared load (server2 load 9 to 70; the builder lock queue was over an hour long), so a ratio can be off by 30 %; the ranking of the first five, which differ by 1.5x or more from the sixth, is not in doubt.
+## Round sp47 (the blocks of one launch on several host threads, with the bits of running them in order: `VGPU_EXACT_THREADS`; branch `sp47-parallel-blocks`, base `origin/main` 27f09add)
+
+Question: can a launch whose result must be that of `VGPU_THREADS=1` (blocks in order: the reference of `tools/verify`, of the counter checks and of the result cache) use several host cores, and what is that worth on Rodinia, PolyBench and HeCBench?
+
+**What was there.** Blocks on several host threads are not new: `VGPU_THREADS=N` is the default (`Runner::run`, `launch_grid`; [host-parallelism.md](../host-parallelism.md)), with a pool, a width rule and lockstep for kernels that wait on one another. What it does not give is a proof: a kernel whose blocks share an atomic, or race, has one answer in order and one of several on threads, and nothing says which kind a kernel is. The held branch `sp4-threads` (f5798425) was about the cost of that mode, not its exactness: per-worker counter sums and an atomic failure flag (both on main since round 12, `worker_mt`) and the hand-out counter on a cache line of its own (measured as nothing in Round sp15 and dropped). It has nothing this round needed. [host-parallelism.md](../host-parallelism.md) H4 names why exactness was never attempted: whether blocks are independent "cannot be decided from the instruction stream in general (a store index is data)".
+
+**What was built.** The decision is made while the launch runs instead of from the instruction stream. `VGPU_EXACT_THREADS=N` beside `VGPU_THREADS=1` (opt-in; unset, nothing changes) runs a SASS launch on `N` threads on trial under a shadow of device memory: one word per four bytes (untouched, read by one block, read by several, written by one block), moved by compare-and-swap before each access. A block that would read what another block wrote, or write what another read or wrote, stops the trial before making the access; a block's first write to a word keeps the old bytes. A trial with no stop is kept and is the run in order (each block read only the launch's start and its own stores, and wrote bytes no other block touched); any other is undone from the kept bytes and the launch runs in order as it always did. The argument, the table of every other channel by which a block could see the order (atomics, `%smid`, printf, device launches, textures, host and mapped memory, traces) and what each does, and the two things that are not the same (how memory is held after an undone trial, and time) are in [exact-threads.md](../../exact-threads.md). Code: `src/core/memory_spec.cpp` (shadow and undo log), the hooks in `src/core/memory.cpp` (35 methods; each is one null test when no trial is on), `Runner::run_exact` in `src/sass/exec.cpp`. Not statically decided: nothing is. A static rule only chooses the launches that are not tried at all (externs, clusters, cooperative, lockstep, textures, mapped memory).
+
+Machines: server2 (Ryzen 9 9950X, 16 cores, runs CI runners and a database) for the ceiling, the tests, the A/B and the sanitizer run, programs on cpus 8-15 (eight cores, one thread each), `nice -n 19`, under the builder lock; server3 (Ryzen 7 PRO 8840U) for instruction counts and the mutation runs. Release builds without LTO (`-DVGPU_LTO=OFF`, as the other rounds on these hosts), `VGPU_GPU=nvidia/rtx3060`. Scripts and raw data: [data/sp47](../data/sp47).
+
+### 1. The ceiling, measured before anything was built
+
+`ceiling-log.patch` (not merged) logs each SASS launch: blocks, wall time inside the launch, the atomics it ran, and the static facts that keep a launch on one thread. One run of each program at `VGPU_THREADS=1` (`sp47_run.py ceiling`, `ceiling.json`). "Bound" is Amdahl's with the eligible share on N threads and no overhead; the host's load average was between 10 and 25 during this run (other sessions' builds), which moves the wall times and, less, the shares.
+
+| corpus | program | wall s | in launches | in launches of 8 blocks or more | of those, none of the static rules | bound at 2 / 4 / 8 threads | kept on one thread by |
+|---|---|---:|---:|---:|---:|---|---|
+| polybench | 2DCONV | 0.61 | 43.4 % | 43.4 % | 43.4 % | 1.28 / 1.48 / 1.61 |  |
+| polybench | 2MM | 115.42 | 34.8 % | 34.8 % | 34.8 % | 1.21 / 1.35 / 1.44 |  |
+| polybench | 3DCONV | 0.50 | 74.1 % | 74.1 % | 74.1 % | 1.59 / 2.25 / 2.84 |  |
+| polybench | 3MM | 1.31 | 63.7 % | 63.7 % | 63.7 % | 1.47 / 1.91 / 2.26 |  |
+| polybench | ADI | 0.16 | 77.7 % | 0.0 % | 0.0 % | 1.00 / 1.00 / 1.00 |  |
+| polybench | ATAX | 0.77 | 94.5 % | 94.5 % | 94.5 % | 1.90 / 3.44 / 5.79 |  |
+| polybench | BICG | 0.19 | 65.2 % | 65.2 % | 65.2 % | 1.48 / 1.96 / 2.33 |  |
+| polybench | CORR | 39.33 | 45.1 % | 45.1 % | 45.1 % | 1.29 / 1.51 / 1.65 |  |
+| polybench | COVAR | 47.16 | 55.4 % | 55.4 % | 55.4 % | 1.38 / 1.71 / 1.94 |  |
+| polybench | FDTD-2D | 76.54 | 97.4 % | 97.4 % | 97.4 % | 1.95 / 3.71 / 6.75 |  |
+| polybench | GEMM | 0.44 | 70.2 % | 70.2 % | 70.2 % | 1.54 / 2.11 / 2.59 |  |
+| polybench | GEMVER | 0.48 | 74.3 % | 74.3 % | 74.3 % | 1.59 / 2.26 / 2.86 |  |
+| polybench | GESUMMV | 0.24 | 61.2 % | 61.2 % | 61.2 % | 1.44 / 1.85 / 2.15 |  |
+| polybench | GRAMSCHM | 113.06 | 36.5 % | 36.2 % | 36.2 % | 1.22 / 1.37 / 1.46 |  |
+| polybench | JACOBI1D | 0.73 | 90.6 % | 90.6 % | 90.6 % | 1.83 / 3.12 / 4.82 |  |
+| polybench | JACOBI2D | 0.39 | 94.3 % | 94.3 % | 94.3 % | 1.89 / 3.41 / 5.71 |  |
+| polybench | LU | 21.07 | 98.8 % | 98.7 % | 98.7 % | 1.97 / 3.85 / 7.32 |  |
+| polybench | MVT | 0.86 | 84.9 % | 84.9 % | 84.9 % | 1.74 / 2.75 / 3.89 |  |
+| polybench | SYR2K | 7.88 | 89.6 % | 89.6 % | 89.6 % | 1.81 / 3.05 / 4.62 |  |
+| polybench | SYRK | 4.11 | 89.8 % | 89.8 % | 89.8 % | 1.81 / 3.06 / 4.66 |  |
+| rodinia | backprop | 0.43 | 74.7 % | 74.7 % | 74.7 % | 1.60 / 2.27 / 2.89 |  |
+| rodinia | gaussian | 3.03 | 99.7 % | 99.5 % | 99.5 % | 1.99 / 3.94 / 7.72 |  |
+| rodinia | lud | 1.49 | 62.5 % | 62.2 % | 62.2 % | 1.45 / 1.87 / 2.19 |  |
+| rodinia | needle | 0.52 | 86.1 % | 85.8 % | 85.8 % | 1.75 / 2.80 / 4.01 |  |
+| rodinia | pathfinder | 0.91 | 33.7 % | 33.7 % | 33.7 % | 1.20 / 1.34 / 1.42 |  |
+| rodinia | srad_v2 | 0.03 | 0.0 % | 0.0 % | 0.0 % | 1.00 / 1.00 / 1.00 |  |
+| rodinia | particlefilter_float | 1.16 | 99.1 % | 99.1 % | 99.1 % | 1.98 / 3.89 / 7.50 |  |
+| rodinia | sc_gpu | 0.53 | 91.9 % | 91.9 % | 91.9 % | 1.85 / 3.22 / 5.11 |  |
+| rodinia | hotspot | 0.77 | 98.8 % | 98.8 % | 98.8 % | 1.98 / 3.86 / 7.36 |  |
+| rodinia | bfs | 0.01 | 45.9 % | 45.9 % | 45.9 % | 1.30 / 1.53 / 1.67 |  |
+| rodinia | nn | 0.01 | 6.2 % | 6.2 % | 6.2 % | 1.03 / 1.05 / 1.06 |  |
+| rodinia | lavaMD | 1.30 | 98.9 % | 98.9 % | 98.9 % | 1.98 / 3.87 / 7.42 |  |
+| hecbench | adam-cuda | 0.02 | 72.2 % | 72.2 % | 72.2 % | 1.57 / 2.18 / 2.72 |  |
+| hecbench | aidw-cuda | 120.13 | 0.0 % | 0.0 % | 0.0 % | 1.00 / 1.00 / 1.00 | stopped at the time limit |
+| hecbench | aligned-types-cuda | 146.69 | 47.3 % | 47.3 % | 47.3 % | 1.31 / 1.55 / 1.71 | stopped at the time limit |
+| hecbench | aobench-cuda | 0.56 | 96.3 % | 96.3 % | 96.3 % | 1.93 / 3.61 / 6.37 |  |
+| hecbench | aop-cuda | 1.34 | 96.5 % | 95.9 % | 11.5 % | 1.06 / 1.09 / 1.11 | atomics 1.13 s |
+| hecbench | asmooth-cuda | 0.18 | 89.2 % | 89.2 % | 27.6 % | 1.16 / 1.26 / 1.32 | atomics 0.11 s |
+| hecbench | asyncAllocation-cuda | 2.40 | 95.3 % | 95.3 % | 95.3 % | 1.91 / 3.51 / 6.02 |  |
+| hecbench | atan2-cuda | 0.02 | 50.0 % | 50.0 % | 50.0 % | 1.33 / 1.60 / 1.78 |  |
+| hecbench | atomicAggregate-cuda | 3.05 | 99.9 % | 99.9 % | 0.0 % | 1.00 / 1.00 / 1.00 | atomics 3.05 s |
+| hecbench | atomicCost-cuda | 13.61 | 0.0 % | 0.0 % | 0.0 % | 1.00 / 1.00 / 1.00 | exit code -9 |
+| hecbench | atomicIntrinsics-cuda | 0.15 | 88.4 % | 88.4 % | 0.0 % | 1.00 / 1.00 / 1.00 | atomics 0.13 s |
+| hecbench | atomicPerf-cuda | 0.82 | 99.2 % | 99.2 % | 0.0 % | 1.00 / 1.00 / 1.00 | atomics 0.81 s |
+| hecbench | atomicReduction-cuda | 120.03 | 99.4 % | 99.4 % | 0.0 % | 1.00 / 1.00 / 1.00 | atomics 119.34 s; stopped at the time limit |
+| hecbench | attention-cuda | 0.02 | 31.8 % | 17.6 % | 1.2 % | 1.01 / 1.01 / 1.01 | atomics 0.00 s |
+| hecbench | axpby-cuda | 0.29 | 86.8 % | 77.3 % | 77.3 % | 1.63 / 2.38 / 3.09 |  |
+| hecbench | babelstream-cuda | 142.38 | 42.6 % | 42.6 % | 42.6 % | 1.27 / 1.47 / 1.59 | stopped at the time limit |
+| hecbench | background-subtract-cuda | 0.04 | 0.0 % | 0.0 % | 0.0 % | 1.00 / 1.00 / 1.00 |  |
+| hecbench | backprop-cuda | 0.01 | 0.0 % | 0.0 % | 0.0 % | 1.00 / 1.00 / 1.00 |  |
+| hecbench | base64e-cuda | 0.37 | 0.0 % | 0.0 % | 0.0 % | 1.00 / 1.00 / 1.00 | exit code 2 |
+| hecbench | bgmv-cuda | 0.00 | 0.0 % | 0.0 % | 0.0 % | 1.00 / 1.00 / 1.00 | exit code 1 |
+| hecbench | bh-cuda | 0.01 | 20.1 % | 20.1 % | 20.1 % | 1.11 / 1.18 / 1.21 |  |
+| hecbench | bilateral-cuda | 0.04 | 0.0 % | 0.0 % | 0.0 % | 1.00 / 1.00 / 1.00 |  |
+| hecbench | binomial-cuda | 120.10 | 99.0 % | 99.0 % | 99.0 % | 1.98 / 3.88 / 7.45 | stopped at the time limit |
+| hecbench | bitonic-sort-cuda | 0.21 | 92.2 % | 92.2 % | 92.2 % | 1.85 / 3.24 / 5.16 |  |
+| hecbench | black-scholes-cuda | 16.71 | 83.7 % | 83.7 % | 83.7 % | 1.72 / 2.69 / 3.74 |  |
+| hecbench | blockAccess-cuda | 0.01 | 53.3 % | 53.3 % | 53.3 % | 1.36 / 1.67 / 1.87 |  |
+| hecbench | fpdc-cuda | 5.03 | 82.7 % | 82.7 % | 82.7 % | 1.70 / 2.63 / 3.61 |  |
+| hecbench | perplexity-cuda | 0.30 | 92.9 % | 0.0 % | 0.0 % | 1.00 / 1.00 / 1.00 |  |
+| hecbench | radixsort2-cuda | 1.66 | 98.8 % | 98.6 % | 0.0 % | 1.00 / 1.00 / 1.00 | atomics 0.41 s, polls (lockstep) 1.23 s |
+| hecbench | s3d-cuda | 0.26 | 93.1 % | 93.1 % | 93.1 % | 1.87 / 3.32 / 5.41 |  |
+| hecbench | shmembench-cuda | 3.50 | 99.8 % | 99.8 % | 99.8 % | 2.00 / 3.98 / 7.90 |  |
+| hecbench | silu-cuda | 0.39 | 86.5 % | 86.5 % | 86.5 % | 1.76 / 2.85 / 4.11 |  |
+| hecbench | sortKV-cuda | 0.13 | 85.3 % | 85.0 % | 0.0 % | 1.00 / 1.00 / 1.00 | atomics 0.03 s, polls (lockstep) 0.08 s |
+| hecbench | zerocopy-cuda | 15.81 | 29.3 % | 29.3 % | 29.3 % | 1.17 / 1.28 / 1.34 |  |
+
+| corpus (programs that ended by themselves with exit code 0) | wall s | in launches | 8 blocks or more | none of the static rules | bound at 2 / 4 / 8 threads |
+|---|---:|---:|---:|---:|---|
+| polybench (20) | 431.3 | 54.8 % | 54.7 % | 54.7 % | 1.38 / 1.70 / 1.92 |
+| rodinia (12) | 10.2 | 85.6 % | 85.4 % | 85.4 % | 1.75 / 2.78 / 3.96 |
+| hecbench (26) | 53.0 | 71.1 % | 70.5 % | 57.3 % | 1.40 / 1.75 / 2.00 |
+
+Reading: launches of fewer than 8 blocks hardly exist in these corpora (the second and third percentage columns are equal almost everywhere; ADI and perplexity are the exceptions); what is not in launches is host code (PolyBench's CPU reference, file reading). The column "atomics" is launches that executed at least one atomic: the built version does not exclude them by rule (a block's atomics on words only it touches are exact), so the true eligible share is between the two columns; the A/B below shows what is kept in practice.
+
+### 2. Speed and bits: `VGPU_THREADS=1` against `VGPU_EXACT_THREADS` 2, 4 and 8, and against plain `VGPU_THREADS=8`
+
+`sp47_run.py ab`: five runs of each variant, interleaved run by run, median wall seconds of the whole program, cpus 8-15, the harness waiting while the load average was above 8. "bits" compares, in every run of the exact variants with the runs at `VGPU_THREADS=1`: the normalised program output and the files it wrote (as `tools/bench/real`), the exit code, `VGPU_COUNTERS_FILE` (every counter of every launch, in launch order) and `VGPU_MEMO_FINAL_HASH` (a hash of all live device memory at exit). `VGPU_THREADS=8` is the existing unproven mode: the ceiling of what a trial can reach.
+
+| corpus | program | `VGPU_THREADS=1` s | exact 2 | exact 4 | exact 8 | `VGPU_THREADS=8` | trials kept / launches tried (8 threads) | bits |
+|---|---|---:|---:|---:|---:|---:|---|---|
+| polybench | 2DCONV | 0.60 | 0.65 (0.93x) | 0.52 (1.16x) | 0.45 (1.33x) | 0.38 (1.60x) | 1 / 1 | same |
+| polybench | 3DCONV | 0.47 | 0.51 (0.93x) | 0.33 (1.45x) | 0.24 (1.94x) | 0.17 (2.74x) | 254 / 254 | same |
+| polybench | 3MM | 1.30 | 1.36 (0.96x) | 0.91 (1.43x) | 0.69 (1.89x) | 0.57 (2.30x) | 3 / 3 | same |
+| polybench | ADI | 0.16 | 0.22 (0.74x) | 0.15 (1.09x) | 0.15 (1.08x) | 0.10 (1.66x) | 2049 / 2049 | same |
+| polybench | ATAX | 0.74 | 0.77 (0.97x) | 0.46 (1.63x) | 0.29 (2.58x) | 0.15 (5.06x) | 2 / 2 | same |
+| polybench | BICG | 0.18 | 0.23 (0.77x) | 0.18 (1.02x) | 0.15 (1.24x) | 0.09 (2.00x) | 2 / 2 | same |
+| polybench | GEMM | 0.43 | 0.40 (1.09x) | 0.28 (1.55x) | 0.21 (2.02x) | 0.17 (2.55x) | 1 / 1 | same |
+| polybench | GEMVER | 0.41 | 0.49 (0.84x) | 0.34 (1.21x) | 0.26 (1.59x) | 0.17 (2.43x) | 3 / 3 | same |
+| polybench | GESUMMV | 0.24 | 0.31 (0.78x) | 0.26 (0.91x) | 0.19 (1.26x) | 0.12 (2.03x) | 1 / 1 | same |
+| polybench | JACOBI1D | 0.72 | 0.87 (0.83x) | 0.56 (1.29x) | 0.72 (1.00x) | 0.37 (1.95x) | 20000 / 20000 | same |
+| polybench | JACOBI2D | 0.39 | 0.45 (0.87x) | 0.26 (1.48x) | 0.16 (2.37x) | 0.08 (5.14x) | 40 / 40 | same |
+| polybench | LU | 20.86 | 18.80 (1.11x) | 10.67 (1.95x) | 6.38 (3.27x) | 3.21 (6.49x) | 2513 / 2513 | same |
+| polybench | MVT | 0.82 | 0.83 (0.98x) | 0.57 (1.45x) | 0.35 (2.32x) | 0.22 (3.73x) | 2 / 2 | same |
+| polybench | SYR2K | 8.02 | 7.10 (1.13x) | 4.26 (1.88x) | 2.77 (2.90x) | 1.93 (4.15x) | 1 / 1 | same |
+| polybench | SYRK | 4.24 | 3.79 (1.12x) | 2.36 (1.80x) | 1.45 (2.93x) | 1.01 (4.21x) | 1 / 1 | same |
+| rodinia | backprop | 0.41 | 0.45 (0.92x) | 0.29 (1.42x) | 0.21 (1.94x) | 0.14 (2.96x) | 2 / 2 | same |
+| rodinia | gaussian | 3.08 | 2.08 (1.48x) | 1.12 (2.75x) | 0.65 (4.71x) | 0.48 (6.46x) | 511 / 511 | same |
+| rodinia | lud | 1.41 | 1.24 (1.14x) | 0.93 (1.53x) | 0.79 (1.78x) | 0.78 (1.82x) | 124 / 124 | same |
+| rodinia | needle | 0.23 | 0.19 (1.18x) | 0.14 (1.68x) | 0.10 (2.20x) | 0.06 (4.01x) | 253 / 253 | same |
+| rodinia | pathfinder | 0.45 | 0.42 (1.08x) | 0.37 (1.23x) | 0.36 (1.26x) | 0.33 (1.36x) | 5 / 5 | same |
+| rodinia | srad_v2 | 0.02 | 0.02 (0.90x) | 0.02 (0.91x) | 0.02 (0.90x) | 0.02 (0.91x) | 0 / 1 | same |
+| rodinia | particlefilter_float | 1.17 | 0.77 (1.53x) | 0.40 (2.95x) | 0.28 (4.20x) | 0.68 (1.73x) | 27 / 36 | not comparable (5 different results in the runs at `VGPU_THREADS=1`) |
+| rodinia | sc_gpu | 0.52 | 0.62 (0.83x) | 0.38 (1.37x) | 0.36 (1.43x) | 0.19 (2.77x) | 1432 / 1432 | same |
+| rodinia | hotspot | 0.77 | 0.46 (1.65x) | 0.25 (3.08x) | 0.18 (4.28x) | 0.15 (5.01x) | 1000 / 1000 | same |
+| rodinia | bfs | 0.01 | 0.01 (0.93x) | 0.01 (0.90x) | 0.01 (0.90x) | 0.00 (1.41x) | 5 / 26 | same |
+| rodinia | nn | 0.01 | 0.01 (0.96x) | 0.01 (0.96x) | 0.01 (0.98x) | 0.01 (1.01x) | 1 / 1 | same |
+| rodinia | lavaMD | 1.26 | 0.69 (1.82x) | 0.36 (3.53x) | 0.19 (6.53x) | 0.18 (7.06x) | 1 / 1 | same |
+| hecbench | adam-cuda | 0.02 | 0.01 (1.51x) | 0.01 (2.21x) | 0.01 (3.04x) | 0.01 (2.94x) | 1 / 1 | same |
+| hecbench | aobench-cuda | 0.50 | 0.26 (1.96x) | 0.13 (3.87x) | 0.07 (7.30x) | 0.07 (7.30x) | 1 / 1 | same |
+| hecbench | aop-cuda | 1.46 | 0.92 (1.59x) | 0.48 (3.01x) | 0.31 (4.74x) | 0.25 (5.88x) | 201 / 201 | same |
+| hecbench | asmooth-cuda | 0.18 | 0.17 (1.07x) | 0.15 (1.19x) | 0.14 (1.27x) | 0.04 (4.19x) | 2 / 3 | same |
+| hecbench | asyncAllocation-cuda | 2.50 | 1.49 (1.67x) | 0.80 (3.10x) | 0.52 (4.82x) | 0.42 (5.97x) | 800 / 800 | same |
+| hecbench | atan2-cuda | 0.01 | 0.01 (1.14x) | 0.01 (1.52x) | 0.01 (1.73x) | 0.01 (2.02x) | 3 / 3 | same |
+| hecbench | atomicAggregate-cuda | 3.29 | 3.29 (1.00x) | 3.26 (1.01x) | 3.28 (1.00x) | 0.60 (5.46x) | 0 / 6 | same |
+| hecbench | atomicIntrinsics-cuda | 0.15 | 0.15 (1.01x) | 0.15 (1.01x) | 0.15 (1.01x) | 0.03 (4.74x) | 0 / 4 | same |
+| hecbench | atomicPerf-cuda | 0.86 | 0.56 (1.55x) | 0.38 (2.29x) | 0.29 (2.97x) | 0.20 (4.41x) | 9 / 18 | same |
+| hecbench | attention-cuda | 0.01 | 0.02 (0.90x) | 0.02 (0.91x) | 0.02 (0.94x) | 0.01 (1.08x) | 1 / 2 | same |
+| hecbench | axpby-cuda | 0.32 | 0.29 (1.08x) | 0.19 (1.65x) | 0.16 (1.91x) | 0.11 (2.94x) | 34 / 34 | same |
+| hecbench | background-subtract-cuda | 0.00 | 0.00 (0.94x) | 0.00 (0.73x) | 0.00 (0.56x) | 0.00 (0.90x) | 0 / 0 | same |
+| hecbench | backprop-cuda | 0.01 | 0.01 (0.88x) | 0.01 (1.13x) | 0.00 (1.37x) | 0.00 (1.57x) | 2 / 2 | same |
+| hecbench | bh-cuda | 0.63 | 0.44 (1.43x) | 0.26 (2.45x) | 0.18 (3.47x) | 0.14 (4.47x) | 8 / 12 | same; `VGPU_THREADS=8` differs |
+| hecbench | bilateral-cuda | 1.00 | 0.57 (1.73x) | 0.32 (3.08x) | 0.21 (4.85x) | 0.21 (4.84x) | 3 / 3 | same |
+| hecbench | bitonic-sort-cuda | 0.22 | 0.17 (1.30x) | 0.10 (2.22x) | 0.07 (3.28x) | 0.07 (3.33x) | 136 / 136 | same |
+| hecbench | black-scholes-cuda | 16.33 | 10.86 (1.50x) | 6.86 (2.38x) | 5.01 (3.26x) | 4.10 (3.98x) | 1 / 1 | same |
+| hecbench | blockAccess-cuda | 0.01 | 0.01 (0.86x) | 0.01 (1.21x) | 0.01 (1.51x) | 0.00 (1.92x) | 4 / 4 | same |
+| hecbench | fpdc-cuda | 5.67 | 5.86 (0.97x) | 3.01 (1.89x) | 3.96 (1.43x) | 2.71 (2.10x) | 1 / 1 | same |
+| hecbench | perplexity-cuda | 0.30 | 0.21 (1.46x) | 0.12 (2.41x) | 0.12 (2.42x) | 0.10 (3.07x) | 1 / 1 | same |
+| hecbench | radixsort2-cuda | 1.61 | 1.61 (1.00x) | 1.60 (1.00x) | 1.62 (1.00x) | 0.49 (3.30x) | 100 / 200 | same; `VGPU_THREADS=8` differs |
+| hecbench | s3d-cuda | 0.25 | 0.35 (0.71x) | 0.21 (1.20x) | 0.14 (1.74x) | 0.08 (3.05x) | 54 / 54 | same |
+| hecbench | shmembench-cuda | 3.60 | 1.83 (1.97x) | 0.91 (3.95x) | 0.50 (7.14x) | 0.50 (7.15x) | 1 / 1 | same |
+| hecbench | silu-cuda | 0.38 | 0.30 (1.28x) | 0.18 (2.16x) | 0.12 (3.22x) | 0.10 (3.97x) | 50 / 50 | same |
+| hecbench | sortKV-cuda | 0.13 | 0.13 (0.99x) | 0.13 (0.98x) | 0.13 (0.98x) | 0.05 (2.55x) | 8 / 16 | same; `VGPU_THREADS=8` differs |
+| hecbench | zerocopy-cuda | 15.81 | 15.88 (1.00x) | 15.86 (1.00x) | 15.81 (1.00x) | 12.10 (1.31x) | 0 / 28 | same |
+
+| geometric mean of the speed-ups | exact 2 | exact 4 | exact 8 | `VGPU_THREADS=8` |
+|---|---:|---:|---:|---:|
+| all (53) | 1.11x | 1.59x | 2.01x | 2.91x |
+| hecbench (26) | 1.20x | 1.70x | 2.07x | 3.17x |
+| polybench (15) | 0.93x | 1.39x | 1.85x | 2.91x |
+| rodinia (12) | 1.16x | 1.66x | 2.06x | 2.43x |
+
+Not in the table: 2MM, GRAMSCHM, FDTD-2D, CORR, COVAR (40 to 115 s each at one thread: five runs of five variants did not fit the time the host could be held; a one-run pass of three of them was queued and skipped: by then the host had under 8 GB of memory available, the floor set for it that night), and the HeCBench programs that hit the time limit or failed in the ceiling run at one thread (aidw, aligned-types, atomicReduction, babelstream, binomial, atomicCost, base64e, bgmv).
+
+Reading:
+
+* **Bits.** Every exact variant gave the output, files, counters and final memory hash of `VGPU_THREADS=1` in every run of every program, with one row that cannot be compared: `particlefilter_float` gives five different results in its five runs at `VGPU_THREADS=1` itself (the program is not deterministic; known from the Rodinia runs). Plain `VGPU_THREADS=8` differs from the run in order on `bh-cuda`, `radixsort2-cuda` and `sortKV-cuda`: those are the programs the proof is for, and the exact variants are the same on all three (their trials are stopped or their kernels poll and run in lockstep as at one thread). What differs there was looked at afterwards (`which_bits.py`, `which_bits.log`, three runs each at 8 threads): the program's output and the hash of all device memory at exit are the same as in order in every run; only the per-launch counters differ (instructions, thread instructions, global loads and their sectors and requests), and only in kernels that wait on other blocks: bh-cuda's `TreeBuildingKernel`, `SummarizationKernel` and `SortKernel` (6 of 17 launches; spin loops over `volatile` child, count and start arrays, and the `atomicCAS` lock of a tree cell), and CUB's one-sweep radix sort in the two Thrust programs (400 of 600 and 32 of 48 launches; its decoupled look-back reads other tiles' prefix descriptors until they are ready). How often such a loop goes round depends on when the other block's store arrives, on a card as here; so this is the programs' own timing dependence showing in exact counters, not a wrong result and not a fault of the simulator's threads.
+* **Speed.** Geometric mean over 53 programs: 1.11x at 2 threads, 1.59x at 4, 2.01x at 8, against 2.91x for the unproven 8 threads. Summed wall time: 104.2 s at one thread, 89.1 / 61.5 / 50.5 s exact, 34.1 s at `VGPU_THREADS=8`. Best rows are at the unproven mode's speed (shmembench 7.2x, lavaMD 6.6x, aobench 7.1x at 8); worst are programs the mode cannot help (zerocopy: every trial stopped at a store to host-mapped memory, 0 of 28 kept, same time as one thread thanks to the hold-back; radixsort2 and sortKV: lockstep kernels and stopped trials).
+* **Two threads do not pay on memory-bound kernels.** 21 of 53 programs are more than 3 % slower at 2 exact threads than at one (PolyBench 0.93x as a group). The shadow resets with every launch, so almost every access of a launch is a first touch: a compare-and-swap per lane, and for a store a copy of the old bytes. On the 33 programs of at least 0.2 s whose trials were all kept, 8 exact threads take 1.38x the time of 8 plain ones (geometric mean), and more on the loads-only PolyBench kernels (ATAX 0.29 s against 0.15 s, LU 6.4 s against 3.2 s). That factor is the price of the proof; it is why the mode is opt-in and why 2 threads are a loss where the kernel is mostly loads.
+* **Trials kept.** Of the 53 programs, 11 had at least one trial stopped: the atomic programs (atomicAggregate 0 of 6, atomicIntrinsics 0 of 4, atomicPerf 9 of 18), bfs (5 of 26: its frontier flags are written by several blocks), bh-cuda (8 of 12), asmooth, attention, srad_v2, radixsort2 and sortKV (half), zerocopy (0 of 28). A stopped trial costs its work once and then the hold-back spaces the retries out.
+
+### 3. What a run that does not ask for it pays
+
+The hooks are a load and a branch in each memory-manager method. `default_cost.py`: base (origin/main with `ceiling-log.patch`) against this branch at `VGPU_THREADS=1` without the variable, cpu 6 of server3, alternating, median of 3: user instructions and cycles (`perf stat`), and `VGPU_COUNTERS_FILE` compared.
+
+| program | user instructions, branch / base | cycles, branch / base | counters |
+|---|---:|---:|---|
+| polybench/ATAX | 1.0030 | 0.9907 | same |
+| polybench/SYRK | 1.0021 | 1.0018 | same |
+| polybench/3MM | 1.0033 | 1.0097 | same |
+| polybench/JACOBI2D | 1.0012 | 1.0034 | same |
+| polybench/MVT | 1.0030 | 1.0012 | same |
+| polybench/LU | 1.0005 | 0.9984 | same |
+| rodinia/hotspot | 1.0001 | 1.0082 | same |
+| rodinia/gaussian | 0.9989 | 1.0459 | same |
+| rodinia/lavaMD | 0.9990 | 0.9885 | same |
+| rodinia/needle | 1.0002 | 1.0148 | same |
+| hecbench/shmembench-cuda | 1.0000 | 1.0009 | same |
+| hecbench/s3d-cuda | 1.0012 | 1.0045 | same |
+| hecbench/aobench-cuda | 1.0000 | 0.9927 | same |
+| hecbench/atomicPerf-cuda | 1.0003 | 0.9979 | same |
+
+Instructions: 0.999 to 1.003 (the null tests). Cycles: within 1.5 % in both directions on 13 of 14, `gaussian` 1.046 (three runs each on a host other sessions were using; not explained, see Unresolved). Counters are the same in every run. Wall-clock A/B of the default afterwards (server3, load average under 4 enforced by the harness, cpu 6, `tools/bench/real/real.py`, 7 interleaved runs, medians; base is origin/main 7b90cee5 and the branch is the merge with it; `default_ab.log`):
+
+| program | base s | branch s | branch / base |
+|---|---:|---:|---:|
+| gaussian | 3.60 | 3.65 | 1.014 |
+| hotspot | 0.99 | 1.00 | 1.010 |
+| lavaMD | 1.75 | 1.75 | 1.000 |
+| SYRK | 5.37 | 5.39 | 1.004 |
+| ATAX | 1.42 | 1.42 | 1.000 |
+| shmembench | 4.82 | 4.86 | 1.008 |
+| s3d | 0.38 | 0.39 | 1.00 (two digits) |
+| gaussian, base against a copy of base | 3.61 | 3.61 | 1.000 |
+
+The 1.046 in cycles for `gaussian` was mostly the shared host: on the quiet one it is 1.014 in wall time, with outputs the same. That 1.4 % comes with FEWER instructions than the base (0.999 above), so it is not the null tests being executed; it is where the memory manager's code landed (the layout effect this log has met before: equal instructions, different cycles). No change was made for it.
+
+### 4. Tests, mutation evidence, sanitizers
+
+* `test_exact_threads` (`tests/unit/test_exact_threads.cpp`, wired three times: default, `VGPU_TIER=0`, `VGPU_FASTPATH=0`): five hand-written sm_86 kernels (independent blocks that share a read; all blocks storing to the same words; a chain where block b reads what block b-1 stored; a fault in block 1 after later blocks could have stored; `%smid` on a grid larger than the device), each at 2, 3, 4 and 8 threads, three launches each, compared with the run in order word for word (128 K words), counter for counter (every `LaunchStats` word and the per-opcode vector) and error for error, and with the trial required to end the way the kernel dictates (kept for the first, stopped for the others); the hold-back schedule after a stop; no trial without `VGPU_THREADS=1`; every reading method of `MemoryManager` stopped at bytes another block wrote and every writing method at bytes another block read (26 methods; the two that decline must decline), the six things a trial may not do; a stopped trial undone to the byte across chunk ends, in never-written memory and at an allocation's tail that is no whole word; the shadow empty again after a trial.
+* Mutations (`mutants.py`, each one wrong line, rebuilt and run in the three forms):
+
+  | mutant | what is wrong | result |
+  |---|---|---|
+  | `write_conflict_ignored` | a write of a word another block read or wrote goes on | killed (all three forms) |
+  | `read_of_written_ignored` | a read of a word another block wrote goes on | killed |
+  | `readers_not_merged` | a second reader takes the word's mark instead of "several readers" (it could then write it) | killed |
+  | `no_write_back` | a stopped trial does not put the kept bytes back | killed |
+  | `nothing_kept` | zeros are kept instead of the old bytes | killed |
+  | `kept_first_word_of_a_run_only` | only the first word of a run of newly owned words is kept | killed |
+  | `shadow_not_cleared` | the shadow keeps its pages after a trial | killed |
+  | `host_store_allowed` | a store outside the device's range is let through | killed |
+  | `hook_store_batch`, `hook_load_run`, `hook_store_scalar`, `hook_load_scalar` | the method does not note its access | killed, each |
+  | `window_not_declined` | `batch_window` hands out its pointer during a trial | killed |
+  | `stopped_trial_kept` | a stopped trial is treated as kept | killed |
+  | `blocks_not_run_again_from_zero` | the run in order after a stop starts where the trial's hand-out ended | killed |
+  | `counters_not_summed` | only one worker's counters reach the launch | killed |
+  | `smid_not_stopped` | `%smid` by host thread does not stop the trial | killed |
+  | `no_hold_after_a_stop` | a stopped kernel is tried again at once | killed |
+  | `failed_block_not_a_stop` | a block that throws does not stop the trial | **survived** the first run (every failing block of the test failed at an access the shadow stops anyway); the test `a_launch_whose_blocks_fail_without_touching_memory_fails_as_the_run_in_order_does` was added for it (a step budget that ends every block before its store); rerun after the merge of main 7b90cee5 (server3): **killed** in the three forms, and the unmutated test passes 11 of 11 in each |
+  | `tried_without_blocks_in_order` | the variable is honoured without `VGPU_THREADS=1` | **survived**, and is equivalent on a host with more than one CPU: without `VGPU_THREADS=1` a launch of several blocks takes the several-thread path and never reaches the trial (the test `nothing_is_tried_without_the_variable_or_without_blocks_in_order` holds that from outside). On a one-CPU host the mutant would try launches the user did not ask to be in order; the results would still be those of one thread |
+
+  20 mutants: 19 killed (one of them only by the test added for it), 1 survived and is equivalent on a host with more than one CPU; the unmutated test passes in the three forms (`mutants.log`, server3).
+
+* ThreadSanitizer (server3, after the merge of main 7b90cee5; `-fsanitize=thread -g -O1`, Debug, the CI job's flags, `setarch -R`): `test_exact_threads` in its three forms 11 of 11 each, and `test_memory`, `test_memfast`, `test_memalloc`, `test_memrmw`, `test_memhot_sp8`, `test_load_batch16`, `test_memcopy_direct`, `test_memrmw_lockfree`, `test_memcount_forms`, `test_atom_rmw` all pass, with 0 ThreadSanitizer reports in every one (`tsan.log`). The rest of the suite under TSan is CI's.
+* The same tests in a Release build of the merged tree, plus `test_host_gpu_logic` (54), `test_host_gpu_ref` (7), `test_host_gpu_track` (14) and `test_memo` (49): all pass (`merged_tests.log`).
+
+### 5. Unresolved
+
+* The trial's cost per access (1.38x at 8 threads, more on loads-only kernels) is first-touch compare-and-swaps. Not tried: taking two or four words with one wider compare-and-swap for a coalesced warp, an AVX2 test of a warp's 32 words before the scalar path, a shadow kept across the launches of one kernel. Until then 2 threads are a loss on memory-bound kernels.
+* Default mode: `gaussian` is 1.4 % slower in wall time at 0.1 % fewer instructions (layout), the other six programs within 1 %. Not removed.
+* Only the SASS engine. The PTX interpreter and the AMD engine run in order under the variable; clusters, cooperative launches, lockstep kernels, modules with any device runtime call (printf, malloc), textures, and devices with virtual-memory mappings or shared memory are never tried.
+* The liveness rule (a worker looks at the stop flag after each round of a block's warps) has no test: mutant-free code is exercised, but no kernel in the test waits forever on another block's store.
+* `config.md` / `vgpu` configuration key: the mode is an environment variable only.
+* After a stopped trial, chunks the trial stored to stay materialized (bytes equal; host memory higher). No program in the corpora showed it as a problem; it is not measured.
+* The five longest PolyBench programs and the eight HeCBench programs that do not finish at one thread within the limit have no A/B rows.
 ## Round sp48 (compiling whole blocks to host code): the ceiling measured per instruction kind, the design of the next stage, and fused runs of register-only ops built and measured (branch `sp48-block-compiler`, base `origin/main` 27f09add)
 
 Question: tier 2 (the JIT, `VGPU_JIT=1`) is worth about 1.10 over the tier on warm caches (round sp38). Would compiling whole basic blocks to straight-line host code, with guest registers in host registers, counters added once per block and side exits that restore the state, give the step that the op-by-op generated code did not? Staged: (1) measure what share of the executed work is dispatch, operand decode, register-file traffic and counting, against the lane arithmetic itself; that share bounds the gain; (2) design the next stage; (3) build the smallest slice that gives a real number; keep it only at 5 % or more on three compute-bound programs.
@@ -723,7 +1000,7 @@ Method. `perf record -e ibs_op/cnt_ctl=1/ -c 400009` (AMD IBS: one sample every 
 
 Programs: the five below, prebuilt (`~/.cache/polybenchGpu`, `gpu-rodinia`, `HeCBench`), the sizes of `tools/bench/real/real.py`. Four are compute-bound in the sense that matters here (the memory system is under a quarter of their work); SYRK is the control: its inner loop is three loads and a store, and 71 % of it is the memory path. A sixth, `srad_v2`, runs 0.4 G micro-ops at this size, nearly all in its own host code, and is left out.
 
-Tier only (the default engine; micro-ops, % of the process's samples; a second profile of each program, `tier-again` in `ibs-tier.txt`, differs by under 1 point in the loop, decode, rows and lanes columns and by at most 1.8 points in any column):
+Tier only (the default engine; micro-ops, % of the process's samples; a second profile of each program differs by under 1 point in the loop, decode, rows and lanes columns and by at most 1.8 points in any column):
 
 | program | G micro-ops | loop | decode | rows | **lanes** | mem handlers | mem system | other | loop + decode + rows |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -733,7 +1010,7 @@ Tier only (the default engine; micro-ops, % of the process's samples; a second p
 | rodinia/hotspot | 19 | 21.8 | 30.8 | 4.4 | **12.6** | 13.0 | 10.5 | 6.8 | 57.0 |
 | polybench/SYRK | 103 | 8.5 | 8.3 | 1.9 | **2.6** | 18.9 | 52.1 | 7.6 | 18.7 |
 
-With the JIT, warm cache (`VGPU_JIT=1 VGPU_JIT_THRESHOLD=100000 VGPU_JIT_SYNC=1`, the default cheap form; `ibs-jit.txt`):
+With the JIT, warm cache (`VGPU_JIT=1 VGPU_JIT_THRESHOLD=100000 VGPU_JIT_SYNC=1`, the default cheap form):
 
 | program | G micro-ops | loop | ALU handlers and kernels left (decode / rows / lanes) | **generated code** (decode / rows / lanes) | mem handlers | mem system | other | warp instructions in a region call | 
 |---|---:|---:|---|---|---:|---:|---:|---:|
@@ -777,7 +1054,7 @@ What exists already (rounds 11 to 15, sp33, sp38) is most of what "compile a bas
 
 ### Stage 3: the slice that was built: fused runs (`VGPU_JIT_FUSE=1`)
 
-The smallest piece of the design that changes the shape of the data (all of it is in `data/sp48/fused-runs.patch`, see the verdict): `jit::fusable` and `jit::gen_fused_run` (`src/sass/jit_gen.cpp`, about 110 lines), eight one-block helpers in the generated code's header (`src/sass/jit_rt.h`: `ld8`, `st8`, `sp8`, `lm8`, `bl8`, `tmod8`, `fadd8`, `fmul8`, `ffma8`), and 18 lines in `Engine::source` that hand a run to it. A run is two or more consecutive ops of the forms MOV, IADD3, IMAD, LOP3 (without a predicate result), plain LEA, FADD, FMUL, FFMA (round to nearest), each unguarded, with any source kind the op-by-op form takes (a row, a constant, a register with a modifier, a word of constant bank 0, a uniform register); the run is written twice, for a whole warp (a result is the row) and for any group (the lanes outside the group keep the register's value through a blend with the lane mask of the block). The integer forms are the kernels' expressions on one vector (`x + y + z + add`, `x * y + z`, the LOP3 table as its minterms); the float forms are `fadd_k`, `fmul_k` and `ffma_k` for one block with the same `VGPU_CANON_NAN`. Only for the AVX2 level and only without register residence (the default form since round sp38). The counters of a run are the pending counts of its ops, written where the stretch writes them. The key of a cached object hashes the generated text, so objects with and without fused runs never mix.
+The smallest piece of the design that changes the shape of the data (see the verdict; the patch itself is not kept in the repository, fused runs came back as `VGPU_JIT_FUSE` in round sp52): `jit::fusable` and `jit::gen_fused_run` (`src/sass/jit_gen.cpp`, about 110 lines), eight one-block helpers in the generated code's header (`src/sass/jit_rt.h`: `ld8`, `st8`, `sp8`, `lm8`, `bl8`, `tmod8`, `fadd8`, `fmul8`, `ffma8`), and 18 lines in `Engine::source` that hand a run to it. A run is two or more consecutive ops of the forms MOV, IADD3, IMAD, LOP3 (without a predicate result), plain LEA, FADD, FMUL, FFMA (round to nearest), each unguarded, with any source kind the op-by-op form takes (a row, a constant, a register with a modifier, a word of constant bank 0, a uniform register); the run is written twice, for a whole warp (a result is the row) and for any group (the lanes outside the group keep the register's value through a blend with the lane mask of the block). The integer forms are the kernels' expressions on one vector (`x + y + z + add`, `x * y + z`, the LOP3 table as its minterms); the float forms are `fadd_k`, `fmul_k` and `ffma_k` for one block with the same `VGPU_CANON_NAN`. Only for the AVX2 level and only without register residence (the default form since round sp38). The counters of a run are the pending counts of its ops, written where the stretch writes them. The key of a cached object hashes the generated text, so objects with and without fused runs never mix.
 
 `VGPU_JIT_FUSE` is off unless set to `1`. Nothing outside the generator changed: the run loop, the tier and the handlers are the base's, so the comparison below is two settings of one binary.
 
@@ -818,7 +1095,7 @@ Reading it:
 
 ### Verdict: not kept; the patch, its test and the numbers are in `data/sp48/`
 
-The bar set beforehand was 5 % or more on at least three compute-bound programs. One of the five programs reached it (black-scholes, 1.111); SYRK is at 1.045 and is not compute-bound; hotspot, gaussian and LU are at 1.03 or less. The source change is therefore not in the tree: this branch carries this section, the data and `data/sp48/fused-runs.patch` (the generator change and the test, as measured; it applies to `origin/main` 27f09add). What the round leaves for the next one:
+The bar set beforehand was 5 % or more on at least three compute-bound programs. One of the five programs reached it (black-scholes, 1.111); SYRK is at 1.045 and is not compute-bound; hotspot, gaussian and LU are at 1.03 or less. The source change is therefore not in the tree: this branch carries this section, and the data (the patch as measured, against `origin/main` 27f09add, is not kept in the repository; round sp52 rebuilt fused runs as `VGPU_JIT_FUSE`). What the round leaves for the next one:
 
 * Fused runs are worth taking up again **together with predicates in the run** (design item 1). Where the eight forms cover the code the slice took most of what stage 1 says is there (black-scholes 10.0 of 11.2 %, SYRK 4.3 of 6.2 %); where compares and guarded ops end the runs it took little (gaussian 1.4 of 9.0 %, hotspot 2.7 of 7.8 %, LU about 0 of 14.9 %). If that proportion holds, compares, selects and guarded ops in the run would put LU, gaussian and hotspot above the bar; that is an extrapolation from five programs, not a measurement.
 * The larger number is the run loop between region calls (24 to 40 % of the compute-bound programs with the JIT on): linking a region's exit to the next entry inside generated code, and a split branch handled there, is the block compiler's real next stage. It needs `pick_group`'s rule (the group at the lowest address) and the chain's conditions reproduced exactly, which is the work round sp33 did for uniform branches, extended to the divergent ones.
@@ -833,6 +1110,234 @@ The bar set beforehand was 5 % or more on at least three compute-bound programs.
 * How many of the executed ops ran in fused runs was not counted (the statistics have no counter for it and the cache keeps no source).
 * Not measured for the fused form: the cold run (a run is written twice, so the compile is larger), the full form (`VGPU_JIT_RESIDENCE=1`: fused runs are off there), AVX-512 (16 lanes a register), the seven `e2e_sass_jit` shards with `VGPU_JIT_FUSE=1`, a sanitizer build, a build without the mutation hooks, g++-12. The unit test and the five programs' same-bits comparison are what holds the patch.
 * Cleanup: the scratch tree of this round on server3 (`~/.cache/sp48`) was removed by exact path.
+## Round sp50 (16-lane AVX-512 forms of the SASS lane kernels): ceiling measured, built with the same bits, measured on Zen 5, one program over the bar, not kept (branch `sp50-avx512`, base `origin/main` 27f09add)
+
+Question: the 32-lane kernels the SASS tier calls for every arithmetic instruction (`src/simd/kernels.inc`, `avx2_impl`) take a warp as four steps of eight lanes. The AVX-512 table that is the default on a host with AVX-512 F/BW/DQ/VL and VNNI replaces only the tensor-core tile kernels (rounds sp3, sp8, sp12, sp13, sp26, sp27); every other entry of it is the AVX2 kernel. Would 16-lane forms of the lane kernels, with mask registers for the lane masks, pay on a CPU with full-width 512-bit units? Rule set beforehand: keep the change only if at least three real programs gain 5 % or more.
+
+What earlier rounds had measured: no round had tried 512-bit lane kernels (the AVX-512 work was all on the tensor-core kernels, where one instruction is thousands of operations). Round sp40 is the nearest: IBS on this host put the lane kernels at about 2 % of the operations each (`icmp_mask_k` 2.2 %, `ibin_m_k` 2.2 %, `blend_m_k` 2.1 %, `iadd3x_k` 2.1 % on mergeSort) and found that removing 60 to 70 % of the failed store-to-load forwards in them moved no cycles. That is a warning about what the samples inside these kernels are, not a measurement of this lever, so it was built and measured.
+
+Setup: server2 (Ryzen 9 9950X, Zen 5, full-width 512-bit units; `lscpu`: avx512f, bw, cd, dq, vl, ifma, vbmi, vbmi2, vnni, bitalg, vpopcntdq, bf16, vp2intersect), Release with LTO and `-g`, GCC 13.3, `VGPU_GPU=nvidia/rtx3060`, SASS engine, `VGPU_THREADS=1`, cpu 14, `nice -n 19`, one process at a time under the shared builder lock (from 04:25 also under a 4 GB memory cap), prebuilt programs of `tools/bench/real` (PolyBench/GPU, Rodinia, HeCBench). `perf` is not allowed there: shares are from the `SIGPROF` sampler of `tools/bench-amd/profile` at 1000 Hz of CPU time. server3 (Ryzen 7 PRO 8840U, Zen 4, the same flags without vp2intersect; 512-bit operations run as two halves) ran the five-round timing with the libraries built on server2, once server2 had no memory to spare (section 3).
+
+### 1. Ceiling: the share of CPU time inside the AVX2 kernels (base build, self time)
+
+| program | samples | all AVX2 kernels | table lane kernels | scheduler lanes (`pick_group_avx2`, `set_pcs_avx2`, `select_pcs_avx2`) | address and counting kernels (`warp_rows_k`, `warp_run_k`, sectors, banks) | the largest |
+|---|---:|---:|---:|---:|---:|---|
+| rodinia/lavaMD | 1,361 | 49.5 % | 46.5 % | 1.1 % | 1.8 % | `dop_avx2_t` (binary64 add, mul, fma) 37.3 %, `dop_m_k` 8.2 % |
+| hecbench/black-scholes-cuda | 16,275 | 32.3 % | 22.6 % | 8.5 % | 1.2 % | `pick_group_avx2` 7.0 %, `blend_m_k` 6.8 %, `ffma_k` 5.3 %, `mufu_k` 2.5 %, `iadd3_k` 1.6 %, `icmp_mask_k` 1.3 %, `set_pcs_avx2` 1.3 % |
+| polybench/SYRK | 4,198 | 18.0 % | 8.5 % | 0 | 9.6 % | `warp_rows_k` 6.5 %, `fmul_k` 5.1 %, `warp_run_k` 3.1 %, `ffma_k` 1.7 % |
+| hecbench/radixsort2-cuda | 1,653 | 15.7 % | 12.2 % | 1.0 % | 2.5 % | `icmp_mask_k` 3.2 %, `lop3_k` 2.7 %, `lane_unary_k` 1.8 %, `shf_k` 1.5 % |
+| polybench/SYR2K | 7,981 | 15.5 % | 9.8 % | 0 | 5.7 % | `fmul_k` 5.4 %, `warp_rows_k` 3.4 %, `warp_run_k` 2.3 %, `iadd3x_k` 1.7 %, `imad_wide` 1.2 % |
+| rodinia/gaussian | 3,261 | 14.5 % | 12.6 % | 0.5 % | 1.5 % | `blend_m_k` 4.2 %, `imad_k` 2.7 %, `icmp_mask_k` 2.1 %, `iadd3_k` 1.5 %, `imad_wide` 1.2 % |
+
+So the ceiling, if every sample inside a kernel were an operation that a wider vector halves, is 7 to 25 % of the wall time, and the whole share (kernels free) 14 to 49 %. (polybench/LU was meant to be the seventh program; it dies of `SIGPROF` under the sampler, exit status -27, with no samples written, and was left out of the timing as well: not explained.) Full tables: `docs/perf-design/data/sp50/profile-base/`.
+
+### 2. What was built (all of it switched by the kernel table: `VGPU_SIMD=avx2` gives the 256-bit code, and a host without AVX-512 never reaches the new code)
+
+`src/simd/lanes512.inc` (included by `simd.cpp` in `avx512_impl`, under the target pragma the tile kernels already had; `make_avx512` puts the entries in the Avx512 table) and three functions in `src/simd/lanes.cpp`:
+
+* `iadd3`, `imad`, `fadd`, `fmul`, `ffma`: two 16-lane steps; the canonical NaN through a compare into a mask register and a masked move. `ffma` is `vfmadd` as in the AVX2 kernel, the others are never fused (contraction is off for the unit).
+* `lop3`: `vpternlogd` with the table as its immediate for the 19 tables the AVX2 kernel has as expressions, the sum of minterms for the rest.
+* `icmp_mask`: the compare writes the lane bits to a mask register (no `movmskps`, no sign flip for the unsigned forms).
+* `blend_m`: a masked load over the old row and a whole-row store (not a masked store: the next kernel loads the row whole).
+* `iadd3x`: the carries out as mask registers (each of the three 32-bit additions wrapped or not), instead of four widened 64-bit sums per eight lanes.
+* `imad_wide`: the even lanes multiplied where they are and the odd lanes after a shift (`vpmuludq` / `vpmuldq`), the addend's words put beside each other with a blend: 14 vector operations per 16 lanes where the AVX2 kernel has 24 per 16.
+* `mufu` (RCP, RSQ, SQRT): eight doubles to a vector.
+* `dop_m` (binary64 add, mul, fma on register pairs): the low and high words of 16 lanes interleaved into two vectors of eight doubles by two-source permutes; the NaN rule (`simd::dop_nan` on the operands as the registers hold them) on the rare path, as before.
+* `warp_rows`, `warp_run` (the addresses of a full warp's global access): eight 64-bit lanes to a step, and sixteen 32-bit ones.
+* `pick_group_diverged`, `set_pcs_partial`, `select_pcs`: eight addresses to a step, the lane masks as mask registers, an unsigned 64-bit minimum (the AVX2 code flips sign bits for a signed compare). The addresses are still loaded 16 bytes at a time, for the reason the AVX2 code gives.
+
+Not built: `ibin_m`, `shf`, `lane_unary`, `fcmp_mask`, `ffma_x` / `fadd_x` / `fmul_x`, `i2f`, `f2i`, `fmnmx`, `prmt0`, `dcmp`, the sector and bank counting kernels (each under 2 % of every program above).
+
+### 3. Results
+
+A = `origin/main` 27f09add, A2 = a second copy of A's two shim libraries (the A/A control), W = this branch at its default (the 512-bit kernels), W2 = the same libraries with `VGPU_SIMD=avx2` (the same binary on the 256-bit kernels: placement held equal). Whole-process wall seconds, the four variants interleaved (order reversed every other round), one lock hold for the run.
+
+**Zen 5 (server2), the host the question is about: one round only.** The five-round run could not be made: from 04:46 on the host had under 8 GB of memory available (production Postgres), and the rule in force from 04:25 forbids a run below that; the run was queued three times and skipped each time by its own memory gate. What exists is the pilot round taken at 03:57 (load 3 to 8 at run start), one run per cell:
+
+| program | A s | A2 s | W s | W2 s | A/W | A2/W | W2/W | A/A2 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| polybench/SYRK | 4.319 | 4.138 | 4.152 | 4.123 | 1.040 | 0.997 | 0.993 | 1.044 |
+| polybench/SYR2K | 8.072 | 7.820 | 7.743 | 7.987 | 1.042 | 1.010 | 1.032 | 1.032 |
+| hecbench/black-scholes-cuda | 16.990 | 16.890 | 16.203 | 17.166 | 1.049 | 1.042 | 1.059 | 1.006 |
+| rodinia/gaussian | 3.175 | 3.170 | 3.146 | 3.202 | 1.009 | 1.008 | 1.018 | 1.002 |
+| hecbench/radixsort2-cuda | 1.629 | 1.635 | 1.608 | 1.654 | 1.013 | 1.017 | 1.029 | 0.996 |
+| rodinia/lavaMD | 1.334 | 1.346 | 1.218 | 1.322 | 1.095 | 1.105 | 1.085 | 0.991 |
+
+One run a cell is not a measurement by this project's rule (five interleaved runs, medians), and the A/A column shows why: the first program's first run differs from its copy by 4.4 %. Read with that: lavaMD about 1.09 to 1.10, black-scholes about 1.04 to 1.06, the other four inside the A/A spread.
+
+**Zen 4 (server3, 512-bit operations as two halves; the same binaries, stripped; cpu 13, load 1.0 to 3.5): five rounds, medians, (max - min) / median in brackets.**
+
+| program | A s | A2 s | W s | W2 s | **A/W** | A2/W | W2/W | A/A2 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| polybench/SYRK | 5.339 (1.3 %) | 5.365 (1.0 %) | 5.319 (5.2 %) | 5.409 (2.3 %) | **1.004** | 1.009 | 1.017 | 0.995 |
+| polybench/SYR2K | 10.347 (6.8 %) | 10.235 (1.4 %) | 10.258 (1.5 %) | 10.381 (4.9 %) | **1.009** | 0.998 | 1.012 | 1.011 |
+| hecbench/black-scholes-cuda | 20.147 (7.2 %) | 20.239 (2.2 %) | 19.631 (2.1 %) | 20.125 (1.9 %) | **1.026** | 1.031 | 1.025 | 0.995 |
+| rodinia/gaussian | 3.586 (1.7 %) | 3.579 (3.5 %) | 3.611 (1.4 %) | 3.605 (1.3 %) | **0.993** | 0.991 | 0.998 | 1.002 |
+| hecbench/radixsort2-cuda | 2.005 (3.0 %) | 2.008 (0.2 %) | 1.988 (2.4 %) | 2.003 (0.9 %) | **1.008** | 1.010 | 1.008 | 0.998 |
+| rodinia/lavaMD | 1.748 (35.6 %) | 1.757 (3.9 %) | 1.506 (2.2 %) | 1.759 (4.6 %) | **1.161** | 1.167 | 1.168 | 0.995 |
+
+A/A is within 1.1 % in every row. One program gains more than 5 % (lavaMD, 16 %: binary64 arithmetic, where a 256-bit step is four lanes), black-scholes gains 2.6 %, and the other four are inside the A/A spread (gaussian 0.7 % slower, the same as its W2, so not the kernels). No row shows a frequency or licence cost on this host.
+
+Same bits: on server2, `VGPU_COUNTERS_FILE`, `VGPU_KERNEL_DIGEST`, the exit status and the filtered output of SYRK and SYR2K equal A's for W and W2 (the check was stopped there to change the driver's locking, and its full rerun at one and four threads is part of the run the memory gate skipped). On server3, one thread: counters, kernel digests and exit status equal A's for all six programs, W and W2; the filtered output is equal for four, and for black-scholes and lavaMD it differs in every run, W2 from W as well (those two print their kernel and processing times in milliseconds, which the filter does not remove: two runs of A differ in the same two lines of black-scholes, and A against W in those two lines only). Files: `docs/perf-design/data/sp50/` (`ab-zen4-server3.json`, `ab-zen4-server3.txt`, `same-bits-zen4-server3.txt`, `ab-zen5-server2-pilot-1-round.json`, the drivers `ab.py` and `profile.py`).
+
+Why the ceiling of section 1 does not arrive: the 512-bit forms run about half the vector operations, but the samples inside the kernels are mostly not those operations. A kernel such as `fmul_k` is eight loads, four multiplies, four compares and four stores; 5 % of SYR2K cannot be four multiplies. The time is the kernel waiting for its source rows (rows the load handler or the previous kernel has just written, round sp40's failed forwards; rows a gather has just fetched) and the call itself, and neither is shorter at 16 lanes. `dop_m` is the exception because its AVX2 form really is long (unpacks and shuffles around four-lane double vectors, eight steps a warp). A profile of the branch to confirm this share by share was queued with the Zen 5 run and did not run, so this paragraph is an inference from the kernels' length and from round sp40, not a measurement.
+
+### 4. Tests and mutants
+
+`tests/unit/test_lanes512.cpp` (`vgpu_unit_test(test_lanes512)`, framework-free, `SKIP_REGULAR_EXPRESSION "^SKIP:"`): on a host that runs both tables it asks for them by level (`simd::kernels_for(Level::Avx2)` and `(Level::Avx512)`, `simd::testing::warp_rows_at` / `warp_run_at`, `sasslanes::testing::pick_group_at` / `set_pcs_at` / `select_pcs_at`, all new) and runs every 512-bit form against the 256-bit one and against a definition written lane by lane in the test: random rows, 38 edge words (carries, signs, quiet and signalling NaNs with signs and payloads, infinities, subnormals, the largest and smallest normals), each edge word in each lane of the float kernels, the four rounding modes for `ffma`, `fadd`, `fmul`, `mufu` and `dop_m`, all 256 `lop3` tables, the six comparisons signed and unsigned at 32 and 64 lanes, masks of every shape, result rows that are source rows, rows at three alignments with guard words on both sides, the `dop_m` NaN rule with every modifier (the test requires more than 1,000 lanes through it), warps on and off a stride with the low word and all 64 bits wrapping, addresses at both ends of the range for the scheduler functions. The first case checks that the Avx512 table's entries are not the AVX2 functions, so the rest cannot be the AVX2 code against itself. On a host without AVX-512 F/BW/DQ/VL/VNNI the executable prints `SKIP: ...` and CTest reports the test as skipped, not as passed. `VGPU_SIMD=avx2` (which existed) forces the 256-bit code everywhere; `test_simd`, `test_tier` and `test_sass_alu_runs` are registered a second time with it (`*_lanes_avx2`), because on a host with AVX-512 their default run would otherwise only reach the 512-bit kernels. `test_simd`'s `f16c_check_is_lazy_and_selects_what_it_did` compared the table in use with the Avx2 table's `iadd3` and `ffma`; it now compares with the table of the level in use.
+
+Run on server2 (Zen 5): `test_lanes512` 13/13; `test_simd` 30/30 at `VGPU_SIMD=avx2` and 29/30 at the default and `avx512` before the change to the case above (that case); `test_simd_dispatch` 3/3 at the three settings. Run on server3 (Zen 4, a Release build of commit `df002f21` without LTO), each at the default, `VGPU_SIMD=avx2` and `VGPU_SIMD=avx512`: `test_lanes512` 13/13, `test_simd` 30/30, `test_tier` 9/9, `test_sass_alu_runs` 6/6, `test_simd_dispatch` 3/3; `check_hot_unit_layout.py` passes (6 objects on 64-byte function boundaries).
+
+Mutants (`docs/perf-design/data/sp50/mutants.py`, one textual change each, `test_lanes512` rebuilt and run; results in `mutants.txt`): **37 of 37 killed**, at least two in every kernel. Among them the ones a looser test would miss: `ffma` and `dop_m`'s fma as a multiply then an add (not fused), `fadd` and `mufu` rounded to nearest whatever the rounding mode, the NaN as 0x7fc00000, `dop_m`'s NaN rule applied after the modifiers or leaving out the addend, -x applied before |x|, a subnormal `mufu` result not flushed, `pick_group` with a signed minimum or with the lanes that do not run in it, `warp_run` letting a carry through when there is no high row, the Avx512 table keeping the AVX2 `ffma`, and `warp_rows_at(Avx512)` handing out the AVX2 kernel.
+
+### 5. Verdict, caveats, what is left
+
+**Not kept.** The rule was 5 % on at least three programs; one program reaches it (lavaMD 1.16 on Zen 4, about 1.09 to 1.10 in the single Zen 5 round), black-scholes gains 2.6 % (Zen 4) to perhaps 5 % (Zen 5, one round), and SYRK, SYR2K, gaussian and radixsort2 gain nothing measurable. The implementation and its test are commit `df002f21` of the branch (complete, same bits, 37 of 37 mutants killed); the commit after this section's removes them again, so the branch's head carries only this section and its data.
+
+Caveats and what is left:
+* **The Zen 5 number is one round.** If the five-round run is wanted, `ab.py --variants base,base2,work,work@avx2 --reps 5` on server2 once it has memory; the Zen 4 table suggests the verdict would not change (only black-scholes is near the bar).
+* **`dop_m` alone is the part worth a second look**: it is the whole of lavaMD's gain, it is one kernel (about 80 lines), and programs that compute in binary64 are common outside these corpora. It was not measured on its own, and one program is not a case; HeCBench `aop-cuda` (binary64, 1.4 s) would be the second data point.
+* Not run on the branch: the rest of the test suite (only the five tests named above), `test_tier` and `test_sass_alu_runs` on the Zen 5 (they ran on the Zen 4), the sanitizer builds, a g++-12 compile, hosted CI (nothing was pushed), and a host without AVX-512 (the skip path of `test_lanes512` was not seen to run).
+* polybench/LU dies of `SIGPROF` under the sampler (exit status -27 after about 20 s, no samples file); the other six programs do not. Not looked into.
+* The JIT (off by default) compiles `kernels.inc` at the level the host's compiler reports and was not touched: generated code keeps the 256-bit lane kernels either way.
+* No Intel host was measured.
+## Round sp51 (persistent on-disk caches for short programs): the split measured first, load, decode and compile are 3 percent of a short program, nothing built (branch `sp51-disk-cache`, base `origin/main` 27f09add)
+
+Question: most CI programs run well under a second, so does work a process repeats at every start (decoding a module's SASS, building the tier's micro-ops, parsing PTX) dominate them, and would an opt-in directory of decoded modules or compiled kernels (`VGPU_CACHE_DIR`), read back by the next process, pay? Rule set beforehand: split the wall time of about 15 short programs first; build the cache only if decode and compile are 15 % or more of the wall on them; keep it only if warm runs gain 10 % or more in the geometric mean. Result: on the default engine the four phases a cache of decoded modules could replace (module load, SASS check and decode, tier analysis, PTX parse) are 2.9 % of the samples in the mean of 20 short programs and at most 13.7 % in one; removing every one of those samples and adding nothing would be 1.031x in the geometric mean. On the PTX engine it is 6.1 % and 1.069x. Both gates fail by a wide margin, so no cache was built. What is kept: the tool that makes the split (`tools/bench/real/short.py`) with a CMake-wired self-test of its rules, the tables, and this section.
+
+### What is on disk already (read from the code and earlier rounds before measuring)
+
+* The SASS verdict file (`src/sass/ok_cache.cpp`, #438, on by default since round sp11): a 16-byte hash per cubin found to run in full, in `$XDG_CACHE_HOME/pantheonsim/sass-ok-v1-<build id>`. It saves the check that decodes every instruction word of a cubin when a fatbin is registered. It holds no code and no decoded form.
+* The JIT's object cache (`VGPU_JIT_CACHE`, off unless `VGPU_JIT=1`): shared objects of hot regions, compiled only after 100 M warp instructions of a section, so a short program never reaches it.
+* In the process: a code section is decoded when first run (`Code::instr`, one `call_once` per section), the tier's program is built per section when first run, a PTX module of 16 KiB or more is parsed a kernel at a time (round sp19), the launch and look-up caches. So a short program already decodes only the sections it runs.
+* An earlier design for a persistent cache of generated code exists (`docs/perf-design/02-tiering-and-caching.md`, hypothetical `VGPU_CACHE_DIR`) and round 10's "design only" section for the verdict file, which became the file above. No earlier round built a cache of decoded modules.
+
+### Method
+
+server3 (Ryzen 7 PRO 8840U, 16 CPUs, Linux 6.8, GCC 13.3), Release build with LTO of `origin/main` 27f09add, `VGPU_THREADS=1`, `VGPU_GPU=nvidia/rtx3060`, `taskset -c 12`, `nice -n 19`, every run under the builder lock, a private `XDG_CACHE_HOME`. The programs are the cached binaries of the four real-program corpora (`tools/bench/real`, CUDA 13.0, sm_86), Rodinia at the small sizes of the card/sim runner. `short.py survey` ran all 124 candidates (4 s limit, the box busy at the time): 36 hit the limit, one does not start (a missing library), 71 finish under a second and 42 under 100 ms. The 20 below were picked from those across the corpora and from 3.5 ms to 300 ms, with the two dynamic-parallelism samples (their cubins carry the device runtime library, the largest modules of the short set) to give decoding its best case.
+
+`short.py split`: each program 10 times under `perf record -F 20000 -g -e cycles` (user and kernel), every sample of the program's process put in one phase by its call chain. The rules are in the tool (`PHASES`, checked by `lint_short_split_selftest`): the first rule that matches a frame's function name wins, the specific phases before `execute`, so decoding inside the first launch is decoding; `loader` is exec plus the dynamic loader; `sim-other` is the simulator's API outside the named phases (allocation, `cudaMemcpy`, first-touch page faults of device memory); `program-host` is the program's own code and libc. `perf_event_paranoid` is 4 on this host: perf ran as `sudo -n perf record ... -- sudo -n -u <user> -- <program>`, the program as the ordinary user, no system setting changed. Wall is the median of five unprofiled runs. The 1-minute load was 4.0 when the split started (the previous lock holder's tail) and 0.8 when it ended; shares do not depend on it, the wall column may by a few percent. The first split had a rule that matched `vgpu::ptx::` anywhere in a symbol and so counted `launch(vgpu::ptx::EntryFn const&, ...)` as parsing (33 % to 70 % "parse" on the PTX engine): rules now look at the function's own name only, the self-test has that case, and the tables are from the rerun.
+
+### Split, SASS engine (the default), verdict file warm: percent of samples
+
+| program | wall ms | samples | loader | device-init | module-load | sass-decode | tier-build | ptx-parse | execute | teardown | sim-other | program-host | **load+decode+compile** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| samples/simpleTemplates | 3.5 | 513 | 62.0 | 3.1 | 0.4 | 1.9 | 0.2 | 0.0 | 4.1 | 1.2 | 18.3 | 8.8 | **2.5** |
+| rodinia/srad_v2 | 4.5 | 737 | 52.5 | 2.7 | 0.0 | 6.8 | 0.5 | 0.1 | 4.6 | 0.3 | 19.1 | 13.3 | **7.5** |
+| samples/cdpSimpleQuicksort | 4.5 | 883 | 37.4 | 3.1 | 4.8 | 7.2 | 0.3 | 0.3 | 7.4 | 0.2 | 20.8 | 18.5 | **12.7** |
+| samples/vectorAdd | 4.5 | 820 | 45.1 | 3.7 | 0.2 | 1.3 | 0.0 | 0.0 | 13.9 | 0.0 | 11.3 | 24.4 | **1.6** |
+| samples/cdpQuadtree | 8.1 | 1647 | 25.0 | 1.5 | 3.9 | 8.8 | 0.8 | 0.1 | 31.3 | 0.2 | 14.7 | 13.8 | **13.7** |
+| rodinia/bfs | 8.3 | 1532 | 20.8 | 1.8 | 0.3 | 1.1 | 0.3 | 0.2 | 46.9 | 0.3 | 6.1 | 22.3 | **1.9** |
+| hecbench/backprop-cuda | 9.7 | 1896 | 16.9 | 1.9 | 0.3 | 1.0 | 0.1 | 0.2 | 50.8 | 0.3 | 6.5 | 22.0 | **1.6** |
+| samples/binaryPartitionCG | 10.7 | 2209 | 15.3 | 1.1 | 0.1 | 1.6 | 0.0 | 0.0 | 64.6 | 0.3 | 8.5 | 8.3 | **1.9** |
+| rodinia/gaussian | 12.5 | 2176 | 15.2 | 1.5 | 0.4 | 1.2 | 0.1 | 0.1 | 65.8 | 0.2 | 6.3 | 9.2 | **1.8** |
+| hecbench/atan2-cuda | 17.7 | 3560 | 7.5 | 0.7 | 0.0 | 1.8 | 0.1 | 0.0 | 61.9 | 0.0 | 4.4 | 23.5 | **2.0** |
+| samples/fp16ScalarProduct | 19.0 | 3784 | 9.6 | 0.6 | 0.1 | 0.5 | 0.1 | 0.0 | 29.6 | 0.1 | 5.0 | 54.5 | **0.7** |
+| hecbench/adam-cuda | 22.0 | 4402 | 6.7 | 0.7 | 0.0 | 1.5 | 0.2 | 0.0 | 76.1 | 0.0 | 2.7 | 12.0 | **1.7** |
+| samples/scalarProd | 31.7 | 6251 | 5.5 | 0.4 | 0.1 | 0.8 | 0.0 | 0.0 | 39.4 | 0.1 | 5.7 | 47.9 | **1.0** |
+| rodinia/lud | 33.3 | 6475 | 6.1 | 0.3 | 0.0 | 2.4 | 0.2 | 0.0 | 69.9 | 0.0 | 4.2 | 16.8 | **2.7** |
+| rodinia/backprop | 39.4 | 8187 | 5.1 | 0.4 | 0.0 | 0.6 | 0.0 | 0.0 | 71.2 | 0.1 | 3.5 | 19.1 | **0.7** |
+| rodinia/particlefilter_float | 80.6 | 16769 | 2.1 | 0.2 | 0.0 | 1.1 | 0.2 | 0.0 | 93.5 | 0.0 | 1.6 | 1.3 | **1.4** |
+| samples/shfl_scan | 94.3 | 19240 | 1.7 | 0.2 | 0.0 | 0.5 | 0.0 | 0.0 | 81.4 | 0.0 | 7.3 | 8.8 | **0.6** |
+| hecbench/sortKV-cuda | 168.2 | 34790 | 1.0 | 0.1 | 0.1 | 2.0 | 0.3 | 0.0 | 80.3 | 0.0 | 4.0 | 12.2 | **2.4** |
+| polybench/ADI | 215.0 | 49182 | 0.8 | 0.2 | 0.0 | 0.4 | 0.0 | 0.1 | 75.7 | 0.0 | 1.6 | 21.2 | **0.5** |
+| polybench/BICG | 303.4 | 63785 | 0.6 | 0.2 | 0.0 | 0.1 | 0.0 | 0.0 | 62.3 | 0.0 | 3.4 | 33.4 | **0.1** |
+| mean of shares | | | 16.8 | 1.2 | 0.5 | 2.1 | 0.2 | 0.1 | 51.5 | 0.2 | 7.8 | 19.6 | **2.9** |
+| wall-weighted | 1090.9 | | 3.3 | 0.3 | 0.1 | 0.9 | 0.1 | 0.0 | 70.0 | 0.0 | 3.9 | 21.3 | **1.1** |
+
+Ceiling (every sample of those four columns removed, nothing added): geomean 1.031x over 20 programs; 0 of 20 programs at or above 15 %.
+
+
+### Split, PTX engine (`VGPU_SASS=0`): percent of samples
+
+| program | wall ms | samples | loader | device-init | module-load | sass-decode | tier-build | ptx-parse | execute | teardown | sim-other | program-host | **load+decode+compile** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| samples/simpleTemplates | 2.8 | 584 | 57.9 | 3.8 | 5.8 | 0.0 | 0.0 | 4.8 | 3.9 | 0.9 | 17.8 | 5.1 | **10.6** |
+| samples/vectorAdd | 4.6 | 890 | 33.6 | 2.4 | 3.8 | 0.0 | 0.0 | 2.4 | 26.2 | 0.3 | 9.2 | 22.1 | **6.2** |
+| samples/cdpSimpleQuicksort | 5.0 | 1053 | 37.0 | 2.6 | 11.5 | 0.0 | 0.0 | 9.3 | 7.6 | 0.2 | 16.2 | 15.6 | **20.8** |
+| rodinia/srad_v2 | 5.5 | 989 | 36.4 | 2.8 | 2.2 | 0.0 | 0.0 | 16.8 | 3.0 | 0.2 | 18.7 | 19.8 | **19.0** |
+| rodinia/bfs | 12.4 | 2382 | 14.0 | 1.2 | 1.0 | 0.0 | 0.0 | 2.2 | 62.6 | 0.1 | 5.5 | 13.4 | **3.2** |
+| samples/binaryPartitionCG | 14.3 | 2884 | 10.9 | 1.1 | 2.3 | 0.0 | 0.0 | 4.5 | 61.0 | 0.7 | 11.3 | 8.3 | **6.8** |
+| hecbench/backprop-cuda | 15.4 | 3166 | 12.6 | 1.0 | 0.9 | 0.0 | 0.0 | 1.9 | 66.3 | 0.1 | 5.1 | 12.1 | **2.7** |
+| samples/cdpQuadtree | 16.7 | 3446 | 12.0 | 0.8 | 5.8 | 0.0 | 0.0 | 22.8 | 22.2 | 0.1 | 15.4 | 20.9 | **28.6** |
+| rodinia/gaussian | 24.2 | 4846 | 7.7 | 0.5 | 0.5 | 0.0 | 0.0 | 1.1 | 84.5 | 0.1 | 3.5 | 2.1 | **1.6** |
+| hecbench/atan2-cuda | 28.6 | 5805 | 7.0 | 0.5 | 0.4 | 0.0 | 0.0 | 1.7 | 70.7 | 0.1 | 3.3 | 16.3 | **2.1** |
+| hecbench/adam-cuda | 32.1 | 6613 | 5.1 | 0.4 | 0.5 | 0.0 | 0.0 | 2.9 | 76.4 | 0.1 | 3.3 | 11.3 | **3.4** |
+| samples/fp16ScalarProduct | 33.2 | 6701 | 5.5 | 0.5 | 1.0 | 0.0 | 0.0 | 1.9 | 55.4 | 0.1 | 3.5 | 32.0 | **2.9** |
+| samples/scalarProd | 33.6 | 6822 | 5.5 | 0.6 | 0.9 | 0.0 | 0.0 | 1.7 | 41.5 | 0.1 | 5.6 | 44.2 | **2.6** |
+| rodinia/backprop | 65.4 | 13431 | 2.8 | 0.2 | 0.2 | 0.0 | 0.0 | 0.8 | 82.1 | 0.0 | 2.7 | 11.1 | **1.0** |
+| rodinia/lud | 86.8 | 18325 | 2.3 | 0.1 | 0.2 | 0.0 | 0.0 | 2.3 | 86.4 | 0.0 | 2.0 | 6.7 | **2.5** |
+| samples/shfl_scan | 165.1 | 34265 | 1.2 | 0.1 | 0.4 | 0.0 | 0.0 | 1.5 | 88.7 | 0.0 | 2.6 | 5.6 | **1.8** |
+| rodinia/particlefilter_float | 176.1 | 36551 | 1.0 | 0.1 | 0.2 | 0.0 | 0.0 | 2.2 | 91.0 | 0.0 | 2.7 | 3.0 | **2.3** |
+| polybench/ADI | 186.3 | 38793 | 0.9 | 0.2 | 0.1 | 0.0 | 0.0 | 0.5 | 72.2 | 0.0 | 2.2 | 23.9 | **0.6** |
+| polybench/BICG | 444.6 | 93954 | 0.4 | 0.1 | 0.0 | 0.0 | 0.0 | 0.1 | 76.4 | 0.0 | 2.2 | 20.7 | **0.1** |
+| hecbench/sortKV-cuda | 765.5 | 163058 | 0.2 | 0.0 | 0.2 | 0.0 | 0.0 | 3.0 | 80.6 | 0.0 | 8.2 | 7.8 | **3.2** |
+| mean of shares | | | 12.7 | 0.9 | 1.9 | 0.0 | 0.0 | 4.2 | 57.9 | 0.2 | 7.1 | 15.1 | **6.1** |
+| wall-weighted | 2118.3 | | 1.7 | 0.2 | 0.3 | 0.0 | 0.0 | 2.0 | 78.2 | 0.0 | 4.9 | 12.7 | **2.3** |
+
+Ceiling (every sample of those four columns removed, nothing added): geomean 1.069x over 20 programs; 3 of 20 programs at or above 15 %.
+
+
+What the columns say:
+
+* **Loader.** The shortest programs are the dynamic loader: 37 % to 62 % of a 3.5 to 4.5 ms program, 15 % to 25 % at 8 to 12 ms, under 10 % from 18 ms. Round sp19 took this apart (2503 symbol bindings, 1729 of them libstdc++'s own; `-Bsymbolic` is not safe for the two libraries that carry the core; lazy binding is already the right setting); the 10 MB shim has 2302 relative relocations, which is nothing. No new lever here.
+* **Load, decode, compile.** Under 3 % for 17 of the 20 on the default engine. The three above are `cdpQuadtree` (13.7 %), `cdpSimpleQuicksort` (12.7 %) and `srad_v2` (7.5 %, a 4.5 ms run). In those the decode samples are spread over `malloc` under `sass::decode` (an `Instr` owns its operand vector and mnemonic string), `Code::instr` and `parse_cubin`; no single symbol is 1 % of the program (`data/sp51/detail-shortest.txt`).
+* **PTX engine.** Parsing and lowering is 4.2 % in the mean; three programs are at or over 15 % (`cdpQuadtree` 28.6 %, `cdpSimpleQuicksort` 20.8 %, `srad_v2` 19.0 %, with zstd decompression of the fatbin's PTX inside module-load). `vgpu::ptx::lex` alone is 9 % of `cdpQuadtree`'s samples.
+* **Device init and teardown** are 1.2 % and 0.2 % in the mean (profile YAML, telemetry segment, the fault hook's directory); nothing in them reaches the 2 % bar round sp19 used, so no lazy-init change was made.
+* **sim-other** in the shortest programs (11 % to 21 %) is led by the kernel clearing pages under `cudaMemcpy` (3 % to 5 %: the first touch of device memory the program copies into), the rest in pieces under 1 %.
+
+### The verdict file there already is (`VGPU_SASS_CACHE`): off, cold, warm
+
+| program | off ms | cold ms | warm ms | off/warm | off/cold | outputs |
+|---|---:|---:|---:|---:|---:|---|
+| samples/simpleTemplates | 2.92 | 3.41 | 2.69 | 1.087 | 0.856 | same |
+| samples/vectorAdd | 3.90 | 4.72 | 3.79 | 1.030 | 0.827 | same |
+| rodinia/srad_v2 | 4.33 | 4.19 | 4.30 | 1.008 | 1.034 | same |
+| samples/cdpSimpleQuicksort | 4.92 | 5.92 | 4.50 | 1.092 | 0.830 | same |
+| samples/cdpQuadtree | 8.93 | 9.41 | 8.25 | 1.082 | 0.948 | same |
+| rodinia/bfs | 8.63 | 8.08 | 8.43 | 1.025 | 1.068 | same |
+| hecbench/backprop-cuda | 9.24 | 9.93 | 9.46 | 0.976 | 0.930 | same |
+| samples/binaryPartitionCG | 11.10 | 11.41 | 10.93 | 1.016 | 0.973 | same |
+| rodinia/gaussian | 11.08 | 11.09 | 10.96 | 1.011 | 0.999 | same |
+| hecbench/atan2-cuda | 18.32 | 18.90 | 18.02 | 1.016 | 0.969 | same |
+| samples/fp16ScalarProduct | 19.58 | 19.47 | 19.34 | 1.012 | 1.005 | same |
+| hecbench/adam-cuda | 22.40 | 22.62 | 22.16 | 1.011 | 0.990 | same |
+| rodinia/lud | 32.53 | 32.25 | 31.79 | 1.023 | 1.009 | same |
+| samples/scalarProd | 32.25 | 32.58 | 32.45 | 0.994 | 0.990 | same |
+| rodinia/backprop | 35.41 | 35.55 | 35.45 | 0.999 | 0.996 | same |
+| rodinia/particlefilter_float | 82.52 | 81.91 | 81.55 | 1.012 | 1.007 | DIFFER |
+| samples/shfl_scan | 95.38 | 95.85 | 96.12 | 0.992 | 0.995 | same |
+| hecbench/sortKV-cuda | 173.47 | 174.55 | 170.69 | 1.016 | 0.994 | same |
+| polybench/ADI | 216.92 | 215.41 | 216.01 | 1.004 | 1.007 | same |
+| polybench/BICG | 277.14 | 277.36 | 276.99 | 1.001 | 0.999 | same |
+
+geomean off/warm = 1.0199 over 20 programs
+
+geomean off/cold = 0.9692 over 20 programs
+
+
+`off` is `VGPU_SASS_CACHE=0`, `cold` deletes the file before every run (so every run checks the cubin in full and writes the file), `warm` is the default with the file present; 7 interleaved runs, medians, unprofiled, load under 1.5. Outputs are the same in every variant for every program except `particlefilter_float`, which differs from itself between runs (the known nondeterministic program). The file that exists is worth 2 % on the short set when warm and costs 3 % on a first run (the hash, a directory and one append; 0.5 to 1 ms on the 3 to 5 ms programs). This is the measured size of the part of decoding that is already cached across processes; what a new cache could still remove is the bold column above.
+
+### Decision
+
+Not built. The gate was 15 % of wall in decode and compile: the default engine has 2.9 % in the mean (1.1 % wall-weighted), no program at 15 %, and a ceiling of 1.031x with a free, perfect cache; the keep bar was 10 %. A real cache would return less than the ceiling: it has to hash the module (the verdict file's hash already does), open and validate a file, and rebuild the pointers of the decoded form. The PTX engine's ceiling is 1.069x, also under the bar, and that engine runs in the nightly suite, not on every pull request.
+
+Design notes for whoever revisits this with a different workload (many processes loading the same very large modules, as the PyTorch sweeps do): cache the decoded form (`Instr` arrays, the tier's `MOp` arrays with handler indexes rather than pointers), never machine code; key on the image hash, the simulator's build id, the device's `sm` and the knobs that change decoding (`VGPU_TIER`, `VGPU_FASTPATH`, `VGPU_SIMD`); reuse `ok_cache.cpp`'s trust rules (directory and file owned by the user, not group- or world-writable, `O_NOFOLLOW`, regular file) and write through a temporary file and `rename`. The verdict file is the model for all of that.
+
+### Leads the split leaves (not followed: each is under the bar on this set)
+
+* `vgpu::ptx::lex` on the PTX engine for modules that carry the device runtime (9 % of `cdpQuadtree`): the token vector is not reserved and a lazily parsed kernel lexes the module's declarations again.
+* The first run with a verdict file missing is 3 % slower than no file at all on the short set, 17 % to 21 % on the three shortest samples (0.5 to 1.0 ms): a CI job that starts each program in a fresh cache directory pays it every time. `actions/cache` of `~/.cache/pantheonsim`, or `VGPU_SASS_CACHE=0` in such a job, avoids it.
+* `malloc` under `sass::decode`: an `Instr` with inline operand storage would shrink the decode of large modules; worth looking at only where decode is large (it is not on these programs).
+
+### Tests (CMake-wired, no build needed) and mutants
+
+`lint_short_split_selftest` (`python3 -I tools/bench/real/short.py selftest`): 25 call chains of the shapes perf gives, each with the phase it belongs to (decode and tier analysis inside a launch, a handler whose chain perf could not walk, a destructor frame inside a launch, kernel frames under the program's own code, the loader by object and by symbol, a `ptx::` type among a function's parameters or template arguments). Six mutants of the rules, each run on server3, each fails it (`data/sp51/selftest-mutants.txt`): the execute rule placed first (3 cases wrong), rules matched on the whole symbol (4), any destructor counted as teardown (2), no executor-leaf rule (3), no loader-by-object rule (1), kernel frames taken as user frames (1).
+
+No simulator source changed, so there is no same-bits check of counters to report beyond the output check of the off/cold/warm table.
+
+Data: `docs/perf-design/data/sp51/` (`survey.txt`, `split-sass.json` and `split-ptx.json` behind the tables, `tables.py` and `tables.md`, `ab-okfile.*`, `detail-shortest.txt`, `selftest-mutants.txt`, the load before and after). Caveats: one host; perf's chains are cut under the tier's handlers, which the leaf rule covers for execution but which could hide a callee of decode in `sim-other` (bounded: the whole of `sim-other` is listed by its leaves in `detail-shortest.txt` and none of the top entries is decode); HIP programs were not measured (round sp19 found their start mostly kernel time); the 20 programs are short programs of the benchmark corpora, not the e2e suite itself, which needs nvcc and is not built on this host. Cleanup: the scratch directory of this round on server3 was removed by exact path.
+
 
 
 ## Round sp52 (linking): keeping execution inside generated code across region exits (branch `sp52-region-linking`, base `origin/main` 7b90cee5)
@@ -1100,7 +1605,7 @@ The short kernels compile as fast or faster (one function instead of two or thre
 
 ### Fused runs on top (round sp48's patch, item 5 of the brief)
 
-Linking clears 5 % on more than three programs, so round sp48's fused runs (`data/sp48/fused-runs.patch`: runs of register-only ops computed block by block of eight lanes, `VGPU_JIT_FUSE=1`) were put on top: the patch applies to this branch with five one-line conflicts (the option beside `link` in `Config`, `Engine::source` and its three callers; a `stop` op is never fusable, nothing else interacts). Its own test (`jit_fused_runs_equal_the_op_by_op_code`: 202 runs of 925 ops, 336 region runs, 0 failures) passes on the combined build. Five sides of that build, same protocol:
+Linking clears 5 % on more than three programs, so round sp48's fused runs (the patch round sp48 measured, no longer kept beside its data: runs of register-only ops computed block by block of eight lanes, `VGPU_JIT_FUSE=1`) were put on top: the patch applies to this branch with five one-line conflicts (the option beside `link` in `Config`, `Engine::source` and its three callers; a `stop` op is never fusable, nothing else interacts). Its own test (`jit_fused_runs_equal_the_op_by_op_code`: 202 runs of 925 ops, 336 region runs, 0 failures) passes on the combined build. Five sides of that build, same protocol:
 
 | program | JIT s | linked s | linked again s | linked + fused s | JIT + fused s | **linked / linked + fused** | control linked / linked again | JIT / linked + fused | JIT / JIT + fused | outputs |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
@@ -1398,6 +1903,336 @@ The A/B compares the normalised output of every run of every side: equal on all 
 * Deviations from the round's rules: one hold of the machine lock ran 26 minutes (a build and sixteen test legs; the limit was about 20) and two others about 20; `cmake` was configured once outside the lock (2 s); a disassembly was written to `/tmp` and removed in the same command.
 * Cleanup: the scratch tree of the round on server3 (`~/.cache/sp53`) was removed by exact path.
 
+## Round sp54 (the 512-bit binary64 lane kernel `dop_m` on its own): eight of nine binary64 programs gain 5 % or more on Zen 4, controls flat, same bits, kept (branch `sp54-dop512`, base `origin/main` 5938bb5a)
+
+Question: round sp50 (branch `sp50-avx512`, not merged; its section and data are on that branch, implementation commit `df002f21`, removed again by `9265a0a4`) built sixteen-lane AVX-512 forms of fourteen SASS lane kernels and did not keep them: on a Zen 4 host only rodinia/lavaMD gained (1.161), and that gain was the binary64 kernel `dop_m` (DADD, DMUL and DFMA on register pairs); the other thirteen kernels gained under 3 % anywhere. Its last section named `dop_m` alone as "the part worth a second look", measured on one program. This round takes that one kernel from `df002f21` and nothing else, finds the programs of the cached corpora that compute in binary64, and measures it on them. Rule set beforehand: keep it if at least three binary64 programs gain 5 % or more and no single-precision control falls below 0.995; kept means on by default on a host whose kernel table is the Avx512 one, through the dispatch that exists, with AVX2 hosts untouched.
+
+What earlier rounds had measured: round sp50, as above (lavaMD: `dop_avx2_t` 37.3 % and `dop_m_k` 8.2 % of the samples on a Zen 5 host; A/W 1.161 on the Zen 4 host with all fourteen kernels). No round had measured `dop_m` on its own or on a second binary64 program.
+
+Setup: server3 (Ryzen 7 PRO 8840U, Zen 4, 8 cores / 16 threads, AVX-512 F/BW/CD/DQ/VL/IFMA/VBMI/VBMI2/VNNI/BITALG/VPOPCNTDQ/BF16; a 512-bit operation runs as two 256-bit halves on this core), Linux 6.8, GCC 13.3, Release with LTO and `-g1` (the shipping configuration; `simd.cpp` is one of the hot units built outside LTO on 64-byte function boundaries, so the change moves no code outside that unit), `VGPU_GPU=nvidia/rtx3060`, SASS engine with the tier, `VGPU_QUIET=1`, `VGPU_THREADS=1` on cpu 13 for timing, `nice -n 19`, every build and run under the host's shared builder lock (another round shares the host and the lock, one process at a time). `perf` is not allowed there (`perf_event_paranoid` 4): shares are from the `SIGPROF` sampler of `tools/bench-amd/profile` at 1000 Hz of CPU time, self time. Programs: the prebuilt corpora of `tools/bench/real` (PolyBench/GPU, Rodinia, the reduced HeCBench list) plus 49 further HeCBench programs and 8 CUDA Samples copied as binaries from the builds cached on server2, chosen because their sources compute in `double` (`docs/perf-design/data/sp54/progs2.txt`: the list, and the arguments each was cut down to so that a run takes seconds).
+
+### 1. The binary64 programs: share of CPU samples inside the kernel (base build, self time)
+
+"kernel" is `dop_m_k`, its body `dop_avx2_t<kind, mods>` and `dop_nan`: the code the 512-bit form replaces. "path" adds the handler `h_dop` and the other binary64 forms (`dcmp`, the `f2f` conversions, `i2d`, the f64 tiles), which this round does not touch.
+
+| program | arguments | exit | wall s | samples | kernel | path | the largest |
+|---|---|---:|---:|---:|---:|---:|---|
+| rodinia/lavaMD | `-boxes1d 6` | 0 | 1.73 | 1,727 | 43.5 % | 53.9 % | `dop_avx2_t<2, false>` (fma) 22.7 %, `dop_m_k` 6.1 % |
+| hec2/kalman-cuda | `1000 50 3 2` | 0 | 1.64 | 1,586 | 45.3 % | 53.7 % | `dop_avx2_t<2, false>` 32.6 %, `dop_m_k` 6.1 % |
+| hec2/rsbench-cuda | `-s small -m event -l 20000` | 1 | 1.77 | 1,764 | 42.1 % | 49.1 % | `dop_avx2_t<2, false>` 17.6 %, `<2, true>` 10.0 %, `<1, false>` (mul) 7.4 % |
+| hec2/vanGenuchten-cuda | `64 64 64 10` | 0 | 1.56 | 1,550 | 38.3 % | 51.4 % | `dop_avx2_t<2, false>` 15.1 %, `<0, false>` (add) 7.2 % |
+| hec2/lulesh-cuda | `-i 10 -s 48 -r 11 -b 1 -c 1` | 0 | 3.67 | 3,660 | 27.8 % | 34.5 % | `dop_avx2_t<2, false>` 9.0 % |
+| hec2/burger-cuda | `1024 1024 20` | 0 | 2.45 | 2,449 | 21.1 % | 27.8 % | `dop_avx2_t<2, false>` 7.7 %, `<2, true>` 4.8 % |
+| hec2/romberg-cuda | `128 64 4` | 0 | 2.61 | 2,604 | 17.3 % | 24.6 % | `dop_avx2_t<2, false>` 12.6 % |
+| hec2/zmddft-cuda | `1` | 0 | 3.01 | 2,981 | 13.5 % | 17.6 % | (memory counting leads: `sectors_hash` 13.8 %, `store_batch_in` 12.0 %) |
+| hec2/xsbench-cuda | `-s small -m event -l 200000` | 0 | 1.34 | 1,321 | 12.2 % | 13.6 % | (the program's host code leads: `lookup_reference` 13.8 %, `grid_init` 11.0 %) |
+| hec2/aop-cuda | `-runs 1` | 0 | 1.80 | 1,791 | 7.4 % | 9.6 % | (`exec_mem` 17.5 %, `step_warp` 16.4 %; under the line) |
+
+Nine programs are over the 10 % line (the task asked for at least six), one of them from Rodinia and eight from HeCBench; `aop-cuda`, which round sp50 named as the second data point, is under it (7.4 %) and was timed anyway. Read the shares with these in mind:
+
+* **The cached corpora hold few binary64 programs as built.** PolyBench/GPU is built with `float` (no double build is cached), Rodinia has one (lavaMD; its `particlefilter` is the float variant), and the reduced HeCBench list of `tools/bench/real` has `aop-cuda` and `babelstream-cuda` (kernel 2.0 %: its time is memory traffic). The other eight came from the full HeCBench build cached on server2 (about 500 programs), from which 49 whose sources use `double` were copied; 34 of them were run under the sampler before the triage was stopped at nine programs over the line. The eight CUDA Samples copied (`MC_EstimatePiP --precision=double`, `interval`, `binomialOptions`, ...) were never run. All the triage lines, including the programs that failed, timed out at the arguments tried or came out under the line, are in `docs/perf-design/data/sp54/profile-base/shares.txt`.
+* `hec2/rsbench-cuda` exits with status 1 at this size: RSBench checks its result against a checksum that it only knows for its default number of lookups, prints "INVALID CHECKSUM" at any other and returns 1. The same status and the same checksum come from every build (section 4); it is a property of the cut-down size, not a failure of the simulator.
+* `hec2/lavaMD-cuda` is HeCBench's lavaMD, which is built with `float` there (kernel share 0.0 %): the same program as rodinia/lavaMD without the binary64 arithmetic, used as one of the four controls.
+* The fused multiply-add without modifiers (`dop_avx2_t<2, false>`) is the largest form in every program where the kernel leads; the forms with |x| / -x modifiers (`<., true>`) are a large part of the kernel's samples in rsbench and burger.
+* Shares are of the whole process, the program's host code included (xsbench spends a quarter of its samples in its own host-side code, which is why its kernel share is low).
+
+### 2. What was built
+
+`src/simd/lanes512.inc` (new; included by `simd.cpp` in `avx512_impl` under the target pragma the tile kernels have; `make_avx512` puts `dop_m_k` in the three Avx512 tables, and no other entry changes): the low and the high words of sixteen lanes are interleaved into two vectors of eight doubles by two-source permutes (`vpermt2d`), the operation is one `vaddpd` / `vmulpd` / `vfmadd` on each in the host's rounding mode, and two more permutes take the results' words apart; the |x| and -x modifiers are an AND and an XOR on the high words before the interleave; a block whose result holds a NaN goes to the rare path, which applies `simd::dop_nan` to the operands as the registers hold them, lane by lane, exactly as `dop_avx2_t` does; the lane mask is a mask register (a whole store when all sixteen lanes are in it, a masked store otherwise). Two steps a warp where the AVX2 kernel takes eight. `VGPU_SIMD=avx2` (which existed) keeps the 256-bit kernel on any host, and a host without AVX-512 F/BW/DQ/VL/VNNI never reaches the new code. Nothing else of `df002f21` was taken: no other lane kernel, no warp-address kernel, no scheduler function, no new `testing` entry point.
+
+### 3. Results
+
+A = `origin/main` 5938bb5a, A2 = a second copy of A's shim libraries (the A/A control), W = this branch at its default (the 512-bit `dop_m`), W2 = the same libraries with `VGPU_SIMD=avx2` (the same binary on the 256-bit kernel: placement held equal). Whole-process wall seconds, the four variants interleaved (A, A2, W, W2, the order reversed every other round), five rounds, medians, (max - min) / median in brackets; one lock hold for the five rounds (12 minutes), load 1.0 to 1.2 at the end of each round. "kernel share" is section 1's.
+
+| program | kernel share | A s | A2 s | W s | W2 s | **A/W** | A2/W | W2/W | A/A2 | A/W2 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| rodinia/lavaMD | 43.5 % | 1.735 (3.5 %) | 1.715 (2.2 %) | 1.474 (1.1 %) | 1.723 (8.7 %) | **1.177** | 1.164 | 1.169 | 1.012 | 1.007 |
+| hec2/kalman-cuda | 45.3 % | 1.508 (1.3 %) | 1.511 (0.7 %) | 1.306 (5.0 %) | 1.511 (4.1 %) | **1.155** | 1.157 | 1.157 | 0.998 | 0.999 |
+| hec2/rsbench-cuda | 42.1 % | 1.753 (0.7 %) | 1.758 (2.8 %) | 1.265 (1.4 %) | 1.750 (2.9 %) | **1.386** | 1.390 | 1.384 | 0.997 | 1.002 |
+| hec2/vanGenuchten-cuda | 38.3 % | 1.568 (1.8 %) | 1.550 (12.6 %) | 1.424 (6.1 %) | 1.544 (1.0 %) | **1.101** | 1.088 | 1.084 | 1.012 | 1.016 |
+| hec2/lulesh-cuda | 27.8 % | 3.664 (2.1 %) | 3.658 (1.1 %) | 3.415 (2.0 %) | 3.649 (1.3 %) | **1.073** | 1.071 | 1.068 | 1.002 | 1.004 |
+| hec2/burger-cuda | 21.1 % | 2.413 (2.4 %) | 2.412 (1.4 %) | 2.291 (1.5 %) | 2.414 (2.6 %) | **1.053** | 1.053 | 1.054 | 1.000 | 1.000 |
+| hec2/romberg-cuda | 17.3 % | 2.512 (3.0 %) | 2.499 (1.4 %) | 2.330 (2.3 %) | 2.499 (1.4 %) | **1.078** | 1.072 | 1.072 | 1.005 | 1.005 |
+| hec2/zmddft-cuda | 13.5 % | 3.038 (2.8 %) | 3.021 (4.6 %) | 2.958 (1.5 %) | 3.014 (1.5 %) | **1.027** | 1.021 | 1.019 | 1.006 | 1.008 |
+| hec2/xsbench-cuda | 12.2 % | 1.336 (2.1 %) | 1.333 (6.4 %) | 1.221 (0.5 %) | 1.327 (1.3 %) | **1.094** | 1.092 | 1.087 | 1.002 | 1.007 |
+| hec2/aop-cuda | 7.4 % | 1.776 (1.3 %) | 1.778 (0.6 %) | 1.735 (1.4 %) | 1.783 (0.5 %) | **1.024** | 1.024 | 1.028 | 0.999 | 0.996 |
+| polybench/SYRK | control | 5.360 (5.8 %) | 5.397 (1.8 %) | 5.354 (2.0 %) | 5.376 (7.1 %) | **1.001** | 1.008 | 1.004 | 0.993 | 0.997 |
+| rodinia/gaussian | control | 3.640 (2.3 %) | 3.631 (0.5 %) | 3.636 (1.3 %) | 3.642 (1.8 %) | **1.001** | 0.999 | 1.002 | 1.003 | 1.000 |
+| hecbench/radixsort2-cuda | control | 2.002 (0.7 %) | 2.000 (1.6 %) | 2.000 (2.0 %) | 2.000 (1.3 %) | **1.001** | 1.000 | 1.000 | 1.001 | 1.001 |
+| hec2/lavaMD-cuda | control | 2.174 (1.3 %) | 2.165 (5.0 %) | 2.160 (5.1 %) | 2.157 (4.9 %) | **1.006** | 1.002 | 0.999 | 1.004 | 1.008 |
+
+* **Eight of the nine binary64 programs gain 5 % or more**: rsbench 1.386, lavaMD 1.177, kalman 1.155, vanGenuchten 1.101, xsbench 1.094, romberg 1.078, lulesh 1.073, burger 1.053; zmddft gains 2.7 % and aop (under the 10 % line) 2.4 %. Burger is at the bar and not clear of it (its five per-round ratios run from 1.041 to 1.080); the other seven are above 1.05 in every single round (the lowest single-round ratio among them is lulesh's 1.055). Leaving out burger and rsbench (which exits 1, section 1), six programs remain over the bar.
+* **The gain is the kernel, not the build**: W2, the same binary on the AVX2 kernel, is within 1.6 % of A in every row (A/W2 0.996 to 1.016), and W2/W repeats the A/W column to within 1.7 points.
+* **Controls**: SYRK 1.001, gaussian 1.001, radixsort2 1.001, the float lavaMD 1.006: none below 0.995, all inside the A/A spread.
+* **A/A** is 0.993 to 1.012 over the fourteen rows (SYRK 0.993, lavaMD and vanGenuchten 1.012), so a ratio within about 1.2 % of 1 says nothing here, and a 5 % gain is four times the noise.
+* The gain follows the kernel's share but is not proportional to it: rsbench (42 %) gains 39 %, kalman (45 %) gains 16 %. The likely reason, inferred from the base profiles and not measured on the branch: a kernel whose time is the arithmetic and the shuffles around it (rsbench: three forms of `dop_avx2_t` back to back) halves, and one whose samples are mostly the wait for its operands (kalman: every operand comes from a local-memory load, `h_local` 22 %) does not, which is what round sp50 found for the single-precision kernels. No row shows a frequency or licence cost from the 512-bit instructions on this core.
+* Not measured: a host with full-width 512-bit units (Zen 5, Intel). Round sp50's single Zen 5 round had lavaMD at about 1.09 to 1.10 with all fourteen kernels, lower than its Zen 4 figure, so the gains there may be smaller than these; server2 (Zen 5) was not to be used for runs in this round.
+
+Files: `docs/perf-design/data/sp54/` (`ab-zen4-server3.json` and `.txt`, the drivers `ab.py`, `profile.py`, `sp54lib.py`).
+
+### 4. Same bits
+
+`ab.py --same`: for each of the fourteen programs, at `VGPU_THREADS=1` and `4`, the reference A twice and then W and W2, each with `VGPU_COUNTERS_FILE` and `VGPU_KERNEL_DIGEST`; the counters file (its `pid` removed), the kernel-digest file, the exit status and the whole output (stdout and stderr, nothing filtered) of the second A, of W and of W2 against the first A's. 84 comparisons (`docs/perf-design/data/sp54/same-bits-zen4-server3.txt`; the differing lines of five programs in `same-bits-differing-lines.txt`).
+
+* **Counters, kernel digests and exit status: equal to A's for W and for W2 in 75 of the 84 comparisons, and in each of the other nine the second run of A differs from the first in the same way**, so the difference is not the kernel's:
+  * `hec2/xsbench-cuda`, both thread counts (6 comparisons): the kernel digest differs between any two runs, A against A included; counters, exit status and the program's own verification checksum are equal. Looked at in four more runs at one thread (two of A, two of W): the digest line is one hash per device allocation, six of the seven hashes are equal in all four runs, and the seventh (the allocation at `0x200000000200`, at most 3.5 KB, an input the host copies in) is different in every run, the two of A included. So an input differs from run to run before any kernel runs; the likely cause is uninitialised host memory in what XSBench copies to the device, which was not checked in its source.
+  * `hecbench/radixsort2-cuda` at 4 threads (3 comparisons): the counters differ between any two runs, A against A included (the digests are equal, and at one thread the counters are equal too). This is a single-precision control that never calls `dop_m`; that its counters are not reproducible at 4 threads on `origin/main` is a finding of this round that was not followed up.
+* **Output: every difference is a timing line, and each also differs between two runs of A.** Round sp50 left lavaMD's output difference unexplained beyond "it prints times"; here the lines were compared one by one. rodinia/lavaMD prints 11 lines, of which 7 differ between any two runs: its lines of per-stage times (`0.000014000000 s, 0.000806520344 % : GPU: SET DEVICE / DRIVER INIT`, `GPU MEM: ALO`, `GPU MEM: COPY IN` and the ones after them; each is a number of seconds and its share of the total), in A against A exactly as in A against W; the other 4 lines are equal, and lavaMD's results never reach its output (the kernel digest covers them, and it is equal). The same holds for the rest: every differing line pair is equal once its numbers are blanked and names a time or a rate (`Runtime`, `Lookups/s`, `Elapsed time`, `Grind time`, `FOM`, ...). The script called two cases "VALUE LINES DIFFER", and both are timing lines it did not recognise: PolyBench prints its GPU and CPU run times as bare numbers on lines of their own (`4.746803`, `0.655295`: SYRK, all six comparisons, A against A included), and LULESH pads a shorter number with one more space (`4.3858931` against ` 4.315144` in its grind-time line; one comparison, A against A; `ab.py` now collapses spaces before comparing, and the saved table is the run before that change). No program printed a different result value in any run.
+
+### 5. Tests and mutants
+
+`tests/unit/test_lanes512.cpp` (`vgpu_unit_test(test_lanes512)`, framework-free, `SKIP_REGULAR_EXPRESSION "^SKIP:"`), the `dop_m` part of round sp50's test: on a host that runs both tables it asks for them by level (`simd::kernels_for(Level::Avx2)` and `(Level::Avx512)`, so `VGPU_SIMD` does not matter to it) and
+
+* `the_avx512_table_has_its_own_dop_m`: the Avx512 table's `dop_m` is not the AVX2 function (otherwise the comparison would be the AVX2 kernel against itself), and its `iadd3`, `ffma`, `fmul`, `blend_m` and `mufu` are (nothing else was replaced);
+* `dop_m_gives_the_avx2_bits_in_every_rounding_mode`: 1,600 warps (400 in each of the four rounding modes) through both kernels and through a definition written lane by lane in the test (`x + y`, `x * y`, `std::fma` on `volatile` doubles in the current rounding mode after the |x| / -x modifiers; `simd::dop_nan` of the unmodified operands when one is a NaN). Operands: random 64-bit patterns, 22 edge values (zeros of both signs, ones, infinities of both signs, quiet and signalling NaNs with signs and payloads, the all-ones NaN, the smallest and the largest subnormal, the smallest and the largest normal, values whose sum or product rounds differently in each mode), small exact values with ties, `a - a` and `inf - inf` lanes (a NaN result with no NaN operand, which must stay the processor's default NaN); the three kinds; no modifiers and random modifier words over all six bits; masks all ones, zero, each half and random; the result rows apart from the sources and on each of the three source pairs; rows at two alignments with 16 guard words on each side of every row. Every row of both buffers must be equal after the call (so unmasked lanes and guards are covered), every masked-out lane must keep its value, and the test requires more than 1,000 lanes through the NaN rule and more than 1,000 masked-out lanes, so the rare path is not rare there.
+
+On a host without AVX-512 F/BW/DQ/VL/VNNI the executable prints `SKIP: ...` and CTest reports the test as skipped, not as passed. `test_simd`, `test_tier` and `test_sass_alu_runs` are registered a second time with `VGPU_SIMD=avx2` (`*_lanes_avx2`): on a host with AVX-512 their default run now reaches only the 512-bit kernel, and the AVX2 one is what every other host runs.
+
+Run on server3 (Release with LTO, the build that was timed), each at the default, `VGPU_SIMD=avx2` and `VGPU_SIMD=avx512`: `test_lanes512` 2/2, `test_simd` 30/30, `test_tier` 9/9, `test_sass_alu_runs` 6/6, `test_simd_dispatch` 3/3; `tests/lint/check_hot_unit_layout.py` passes (6 objects on 64-byte function boundaries). Log: `docs/perf-design/data/sp54/tests-zen4-server3.txt`.
+
+Mutants (`docs/perf-design/data/sp54/mutants.py`, one textual change each of `lanes512.inc` or `simd.cpp`; results in `mutants.txt`): **17 of 17 killed**, and the unmutated source passes again through the same route afterwards. Sixteen in the kernel: the fma as a multiply then an add, the sum rounded to nearest and the product toward zero whatever the rounding mode, the NaN rule applied after the modifiers, leaving out the addend, not reached when only lanes 8 to 15 of a block hold a NaN, or its results dropped for those lanes, -x applied before |x|, |x| of the addend never applied, the addend given source b's modifiers, every lane written whatever the mask, lanes 16 to 31 not computed or given the mask bits of lanes 0 to 15, either half-block permute wrong, DMUL run as DADD; and one in the dispatch (the Avx512 table keeping the AVX2 `dop_m`, caught by the first test case alone). How they were run: `simd.cpp` compiled with the build's own command for that object and `test_lanes512` linked from it and the build's archive (11 to 14 s a mutant), not through `cmake --build`: re-creating `libvgpu.a` on this host took five minutes a mutant, and the first two were also run that way with the same result (`mutants-archive-route.txt`).
+
+### 6. Verdict, caveats, what is left
+
+**Kept.** The rule was 5 % on at least three binary64 programs and no control below 0.995: eight of nine binary64 programs reach it on the Zen 4 host (seven clear of it in every round, burger at 1.053), the controls are 1.001, 1.001, 1.001 and 1.006, A/A is within 1.2 %, and counters, kernel digests, exit status and output are the same bits wherever two runs of the base itself agree. The 512-bit `dop_m` is the Avx512 table's entry, so it is on by default wherever that table is (AVX-512 F/BW/DQ/VL and VNNI, as for the tile kernels); a host without them runs the code it ran before, and `VGPU_SIMD=avx2` gives the 256-bit kernel anywhere. `docs/performance.md`, `docs/cli.md`, `docs/config.md` and `CHANGELOG.md` say so.
+
+Caveats and what is left:
+
+* **One host, one core family.** Zen 4 only, where a 512-bit operation is two 256-bit halves. Not measured on Zen 5 (server2 was off limits for runs in this round) or on any Intel core, where 512-bit instructions can cost frequency; round sp50's single Zen 5 round suggests a smaller gain there (lavaMD about 1.09 to 1.10). If a host turns out to lose, the knob is `VGPU_SIMD=avx2`.
+* **Burger is at the bar**, not over it by a margin (1.053; per-round 1.041 to 1.080), and **rsbench exits 1** at the cut-down size (its own checksum check). The verdict does not rest on either: six programs remain without them.
+* **The program sizes are cut down** from the HeCBench Makefiles' until a run takes 1.3 to 3.7 s, so start-up and the program's own host code are a larger part of each run than at full size; the gains at full size were not measured.
+* **Shares were not re-measured on the branch**: there is no profile of W showing what the kernel's share became.
+* **Two same-bits checks rest on "A differs from A too"**, not on equality: xsbench's digest (one input allocation, both thread counts) and radixsort2's counters at 4 threads. Neither program's difference was traced to its cause.
+* The triage stopped at nine programs: 14 of the 44 HeCBench candidates and the 8 CUDA Samples in `progs2.txt` were never run, and thirteen more candidates timed out or failed at the arguments tried. The list of binary64 programs is a sample, not a census.
+* Not run on the branch: the rest of the test suite (only the five tests named above), the sanitizer builds, a g++-12 compile, hosted CI (nothing was pushed), and a host without AVX-512 (the skip path of `test_lanes512` was not seen to run; its condition is `simd::supported(Level::Avx512)`).
+* The JIT (off by default) compiles `kernels.inc` at the level the host's compiler reports and was not touched: generated code keeps the 256-bit `dop_m` either way.
+* The other binary64 forms (`dcmp`, the `f2f` conversions, `i2d`) stay at 256 bits and were not looked at.
+## Round sp55 (the cost of the proof of exact parallel launches: pages that are only read noted as a whole, what a worker remembers, two words at once; branch `sp55-exact-shadow`, base `speed-round-sp46-sp51` 49d02daa)
+
+Question: Round sp47 built `VGPU_EXACT_THREADS` and found the trial's note (one atomic word per four bytes, a compare-and-swap before every first touch, the old bytes kept on a first write) to cost 1.38x per thread, so that 21 of 53 programs were slower at 2 exact threads than at one. Where does that factor go, and how much of it can be removed without weakening the proof (a kept trial is the run in order, a conflict is found before the access, a stopped trial is undone to the byte, atomics are writes)?
+
+Host: server3 only (Ryzen 7 PRO 8840U, Zen 4, 8 cores / 16 threads, g++ 13.3), shared with another session of this round; every build, test and timed run under `flock /tmp/pantheonsim-builder.lock` in holds of a few minutes, `nice -n 19`, builds at `-j3`. Release builds without LTO, `-g1`, `VGPU_GPU=nvidia/rtx3060`. Round sp47 measured on server2 (Zen 5, eight full cores), which this round could not use, so its table is not the base here: the base build (49d02daa, sp47's shadow unchanged) was measured again in the same interleaved runs. On this host the trial costs more than sp47 saw, and two base exact threads lose on more programs. Scripts and data: [data/sp55](../data/sp55).
+
+### 1. Where the trial's time went (the base's note)
+
+Eight programs: six load-heavy ones on which 2 exact threads lose (ATAX, GESUMMV, GEMVER, JACOBI2D, s3d-cuda, sc_gpu), LU (the longest program of the set, in place) and JACOBI1D (20,000 small launches). Two cores (cpus 0 and 2), medians of 3 (`tune.sh`, `tune.log`; LU one run). Wall / CPU seconds of the whole program:
+
+| | ATAX | GESUMMV | GEMVER | JACOBI2D | s3d-cuda | sc_gpu | JACOBI1D | LU |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `VGPU_THREADS=1` | 1.43 / 1.43 | 0.39 / 0.39 | 0.64 / 0.64 | 0.57 / 0.57 | 0.38 / 0.38 | 0.67 / 0.67 | 0.96 / 0.96 | 29.03 / 29.03 |
+| `VGPU_THREADS=2` (no proof) | 0.83 / 1.58 | 0.29 / 0.43 | 0.45 / 0.70 | 0.35 / 0.63 | 0.31 / 0.44 | 0.56 / 0.86 | 0.98 / 0.99 | 16.89 / 32.69 |
+| base, 2 exact threads | 1.32 / 2.56 | 0.48 / 0.78 | 0.80 / 1.34 | 0.67 / 1.26 | 0.49 / 0.78 | 0.93 / 1.30 | 0.98 / 0.99 | 26.33 / 48.76 |
+| CPU, exact / plain (the price of the proof) | 1.61 | 1.81 | 1.92 | 1.99 | 1.78 | 1.50 | 1.00 | 1.49 |
+
+So on this host the proof costs 1.5x to 2.0x the CPU time of two plain threads on these programs (sp47's 1.38x was the geometric mean of 33 programs on server2), which is why 2 exact threads only break even. JACOBI1D pays nothing because almost nothing is tried: at 2 threads the width rule keeps all but about 150 of its 20,000 launches on one thread.
+
+What the notes are (`VGPU_EXACT_STATS`, this round's counters, with `VGPU_EXACT_PAGES=0`, which is the base's note; one run at 2 threads; millions):
+
+| | ATAX | GESUMMV | GEMVER | JACOBI2D | s3d-cuda | sc_gpu | LU |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| trials (all kept) | 2 | 1 | 3 | 40 | 54 | 1432 | 1939 |
+| calls of the hooks | 25.2 | 4.2 | 6.3 | 5.1 | 3.4 | 7.5 | 183.2 |
+| words looked at for a read | 276.8 | 68.2 | 86.0 | 119.5 | 61.6 | 131.1 | 2960.0 |
+| ... taken by compare-and-swap, first reader | 33.6 | 33.6 | 50.4 | 39.9 | 55.4 | 122.4 | 1451.5 |
+| ... moved to several readers by compare-and-swap | 0.008 | 0.004 | 0.02 | 5.9 | 0.001 | 0.03 | 2.1 |
+| ... a repeat touch (load and compare) | 243.2 | 34.6 | 35.6 | 73.7 | 6.2 | 8.7 | 1506.4 |
+| words looked at for a write | 268.5 | 33.6 | 50.3 | 39.8 | 28.9 | 6.3 | 1449.4 |
+| ... taken by compare-and-swap (first write, bytes kept) | 0.008 | 0.008 | 16.8 | 39.8 | 26.3 | 6.2 | 1449.4 |
+| pieces kept / MiB kept | 0.0003 / 0.03 | 0.0003 / 0.03 | 0.52 / 64 | 1.28 / 152 | 0.67 / 100 | 6.2 / 24 | 45.8 / 5529 |
+| 4 KiB shadow pages put in place and zeroed again | 0.033 | 0.033 | 0.049 | 0.078 | 0.067 | 0.187 | 2.1 |
+
+And where the samples fall (the SIGPROF preload sampler `sigprof.so` of round sp53, 2000 Hz of process CPU time, preloaded after `taskset env`; `profile.sh`, `lines.py`: a sample at a `lock cmpxchg` or the instruction after it is "at a compare-and-swap", which includes the page fault of a shadow page's first touch). Percent of all samples of the program at 2 base exact threads:
+
+| | ATAX | GESUMMV | GEMVER | JACOBI2D | s3d-cuda | sc_gpu | LU |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| samples | 1435 | 490 | 833 | 774 | 531 | 961 | 30658 |
+| read notes (`spec_read`, `spec_read_each`): at a compare-and-swap | 3.0 | 9.6 | 9.4 | 15.1 | 12.2 | 12.8 | 11.1 |
+| read notes: the rest (page lookup, loads, compares) | 16.5 | 8.4 | 7.4 | 10.1 | 10.4 | 12.4 | 6.6 |
+| write notes (`spec_write`, `spec_write_each`): at a compare-and-swap | 0.0 | 0.0 | 3.1 | 9.7 | 6.8 | 1.0 | 6.1 |
+| write notes: the rest | 13.0 | 7.1 | 3.7 | 4.7 | 2.6 | 1.6 | 2.4 |
+| `spec_keep` (the undo log's bookkeeping; its copy is in libc) | 0 | 0 | 1.1 | 0.1 | 0.6 | 2.2 | 0.5 |
+| `spec_end` (zeroing and pooling the shadow pages) | 1.0 | 2.0 | 2.2 | 2.6 | 3.0 | 1.6 | 2.2 |
+| libc string functions (memset of shadow pages, the undo copies; also the program's own) | 0.7 | 3.3 | 8.4 | 10.7 | 10.0 | 3.4 | 8.0 |
+| libc memory calls (brk, mprotect, munmap: the undo log and fresh shadow pages; also the program's own) | 2.0 | 11.2 | 5.6 | 0.5 | 6.6 | 0.3 | 0.1 |
+| `ld.so` (`__tls_get_addr`: the hook's look-up of its worker) | 0.7 | 0.8 | 0 | 0.3 | 0.2 | 0.9 | 0.2 |
+
+Reading, per item of the question:
+
+* **Compare-and-swap on first touch.** 17 to 25 % of the program's samples on the kernels that write what they touch (JACOBI2D, s3d, LU), 10 to 14 % where the first touches are reads (GESUMMV, sc_gpu). Most first touches are of words nobody writes: the inputs.
+* **Repeat touches.** A load and three compares a word, inlined: 7 to 17 % for reads and up to 13 % for writes, largest where a kernel keeps a sum in memory (ATAX and GESUMMV store `tmp[i]` 4096 times a thread: 268 M and 34 M words looked at for a write, 8192 of them first writes).
+* **The undo save.** Small as bookkeeping (`spec_keep` 0 to 2 %), larger as memory: the log is a vector that grows from nothing in every trial (the `brk`/`mprotect`/`munmap` row, and part of the string row; the libc rows are by the nearest exported symbol of a stripped libc, so they are groups, not functions). LU keeps 5.4 GiB over its run.
+* **Shadow cache misses.** Not separable on this host (no hardware counters without root). The shadow doubles the bytes a first touch pulls in (4 KiB of words per 4 KiB of data), and its cost is inside the compare-and-swap rows and the zeroing.
+* **The hook's own test.** Under 1 %: the stop flag and a thread-local look-up per call, 3 M to 183 M calls. With no trial on it is the one null test Round sp47 measured.
+* **Hold-back reruns.** None here: every trial of these eight was kept. (The programs whose trials stop are in the A/B table: with the hold-back they run at the speed of one thread.)
+
+### 2. What was tried, in the order of the task
+
+Each mechanism was measured alone by switching it off in one build that had all of them (`VGPU_EXACT_TUNE`, removed again; the build also had the two mechanisms that were not kept). Wall / CPU seconds, 2 exact threads on two cores, medians of 3 (`tune.log`, `tune_table.py`):
+
+| variant (2 exact threads unless said) | ATAX | GESUMMV | GEMVER | JACOBI2D | s3d-cuda | sc_gpu | JACOBI1D | LU |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| base, `VGPU_THREADS=1` | 1.43 / 1.43 | 0.39 / 0.39 | 0.64 / 0.64 | 0.57 / 0.57 | 0.38 / 0.38 | 0.67 / 0.67 | 0.96 / 0.96 | 29.03 / 29.03 |
+| base, `VGPU_THREADS=2` (no proof) | 0.83 / 1.58 | 0.29 / 0.43 | 0.45 / 0.70 | 0.35 / 0.63 | 0.31 / 0.44 | 0.56 / 0.86 | 0.98 / 0.99 | 16.89 / 32.69 |
+| base, 2 exact threads | 1.32 / 2.56 | 0.48 / 0.78 | 0.80 / 1.34 | 0.67 / 1.26 | 0.49 / 0.78 | 0.93 / 1.30 | 0.98 / 0.99 | 26.33 / 48.76 |
+| this round's code, every page by word, no runs, no pairs | 1.86 / 3.63 | 0.58 / 1.00 | 0.80 / 1.35 | 0.65 / 1.22 | 0.49 / 0.76 | 1.04 / 1.60 | 0.97 / 0.98 | 25.36 / 47.42 |
+| every page by word, with runs and pairs | 1.92 / 3.74 | 0.60 / 1.03 | 0.80 / 1.33 | 0.59 / 1.11 | 0.45 / 0.71 | 1.11 / 1.65 | 0.97 / 0.98 | 23.69 / 44.53 |
+| by page; 64 pages remembered by low bits, no runs, no pairs, no refinement | 1.38 / 2.67 | 0.44 / 0.71 | 0.69 / 1.13 | 0.50 / 0.89 | 0.45 / 0.69 | 1.06 / 1.62 | 0.99 / 1.01 | 26.29 / 49.61 |
+| all but the 256 hashed pages (64 by low bits) | 1.31 / 2.54 | 0.43 / 0.70 | 0.67 / 1.09 | 0.47 / 0.84 | 0.42 / 0.66 | 1.19 / 1.65 | 1.00 / 1.01 | 24.11 / 44.77 |
+| all but the runs of words | 1.17 / 2.27 | 0.38 / 0.60 | 0.65 / 1.05 | 0.47 / 0.84 | 0.40 / 0.66 | 1.00 / 1.53 | 0.97 / 1.00 | 24.42 / 45.73 |
+| all but the pairs | 1.08 / 2.08 | 0.36 / 0.55 | 0.65 / 1.07 | 0.48 / 0.90 | 0.40 / 0.70 | 1.24 / 1.74 | 0.98 / 1.00 | 25.65 / 47.58 |
+| all but the written-page refinement | 1.08 / 2.08 | 0.35 / 0.55 | 0.64 / 1.03 | 0.46 / 0.85 | 0.38 / 0.66 | 1.12 / 1.66 | 0.98 / 0.99 | 24.01 / 45.08 |
+| all | 1.08 / 2.08 | 0.35 / 0.55 | 0.64 / 1.03 | 0.47 / 0.84 | 0.40 / 0.66 | 1.11 / 1.65 | 0.97 / 0.98 | 24.00 / 44.73 |
+
+**Kept:**
+
+* **Pages that are only read are noted as a whole** (task items b and d). A state per 4 KiB page beside the words: untouched, read by one block, read by several; a page is noted by word only once a block writes in it (or where the trial's plan says so). A read of a page that nobody writes costs one compare-and-swap per page and block instead of one per word, and nothing per word afterwards. A write in a page other blocks have read by page state cannot be told from a conflict, so it stops the trial as *coarse*; the launch is then tried again with that allocation noted by word from its first touch, and the kernel remembers the allocation ([exact-threads.md](../../exact-threads.md), "A stop the page grain made"). This is what item (d) asked for without needing an earlier launch: the first trial of a kernel finds out which allocations it writes in place. Alone (the row "by page; 64 pages remembered by low bits, no runs, no pairs, no refinement") it takes ATAX from 1.32 to 1.38 s (no gain: see the next item), GESUMMV 0.48 to 0.44, GEMVER 0.80 to 0.69, JACOBI2D 0.67 to 0.50, s3d 0.49 to 0.45.
+* **What a worker remembers** (item a). Three memories, none of them shared: 256 pages its block may read with no further note, at a place given by a hash of the page number (with 64 places by the low bits, ATAX and GESUMMV, whose lanes read rows 4 pages apart, missed on every lane: 142.7 M looks at the shadow in ATAX, 5.2 M with the hash; ATAX 1.31 to 1.08 s, GESUMMV 0.43 to 0.35); the last four runs of words the block took as their writer and the last four it noted for reading (ATAX 1.17 to 1.08, GESUMMV 0.38 to 0.35, LU 24.4 to 24.0: the 268 M repeat write checks of ATAX become 8.4 M range compares; runs of 4 words or more in this table's build, of 16 or more in the end, below); and where the words of the last 64 pages it read in are, so that a read whose words already allow it stays inline (added after the table above: its fourth row shows this round's code with every page by word slower than the base where a warp's lanes are scattered, ATAX 1.86 s against 1.32 and sc_gpu 1.04 against 0.93, because each lane's note had become a call; with the words found inline again sc_gpu, whose big allocation stays by word, measured 0.91 s against the base's 0.89 at 2 threads).
+* **Two words by one compare-and-swap.** Two neighbouring words that are both free for the block are taken by one 64-bit compare-and-swap, and two that already allow the access are passed with one load. LU 25.65 to 24.00 s (6 %), JACOBI2D 0.90 to 0.84 CPU seconds; nothing on the kernels that no longer note their reads by word.
+* **The undo log keeps its memory between trials** (up to 64 MiB a worker). Not measured apart; it removes the `brk`/`munmap` row above.
+
+**Two changes after a first A/B.** The first full A/B of the mechanisms above (the same 52 programs and method as the table below; its raw data is not kept in the repository) gained on PolyBench (geometric mean 0.92x / 1.21x / 1.46x to 1.16x / 1.55x / 1.77x at 2 / 4 / 8 exact threads) and gained nothing on Rodinia (1.08x / 1.37x / 1.56x to 1.08x / 1.39x / 1.58x) and HeCBench (1.23x / 1.53x / 1.78x to 1.22x / 1.54x / 1.79x), with 21 of 123 program-thread counts more than 3 % slower than the base. Two causes were found and removed; the A/B of section 3 is of the code with both.
+
+* *A lane's few words asked the memory of runs.* lavaMD (1.67x to 1.53x at 2 threads), gaussian (1.28x to 1.19x), sc_gpu, bitonic-sort: kernels that update an allocation in place lane by lane, a word or a structure of eight words a lane, 36 M hook calls in lavaMD. Such an access is not in a remembered run (none of the 36 M was), asking costs it eight range compares, and remembering it pushes out the runs of the other 31 lanes. Runs are now remembered and asked only for accesses of 16 words or more (a warp's lanes one after another). `run-threshold.txt` (`run_threshold.sh`, medians of 3 on four cores, CPU seconds at 2 exact threads; base, before, after): lavaMD 1.85, 1.98, 1.85; gaussian 5.63, 5.96, 5.83; sc_gpu 1.37, 1.46, 1.41; ATAX 2.56, 1.94, 1.95; GESUMMV 0.78, 0.51, 0.51; GEMVER 1.23, 1.03, 1.02.
+* *A grid of a few blocks, and a store at a block's end.* perplexity-cuda fell from 1.40x to 0.73x at 2 threads: its one launch has 4 blocks, each reads the page it will write and stores at its end, so the coarse stop came when the first block was done and all four had been run for nothing. A launch of fewer than 8 blocks is now noted by word from the start (no coarse stop is possible; it runs as on the base). The general case, a kernel of few blocks whose first store in a page it read comes late, still pays up to one block's time on every thread for each allocation it learns; see Unresolved.
+
+**Not kept:**
+
+* **A vector pre-check for a warp's lanes** (item c): built as "lanes one after another are one range" and "lanes in one remembered page need one look", with tests. Measured as counters: of 3.4 M to 183 M hook calls a program, 0 were warps of lanes one after another, and 18 thousand (sc_gpu, of 7.5 M) were warps in one page. The tier already notes a coalesced warp as the one range it is (`load_run`, `store_run`: one hook call and one kept piece for 32 lanes, 31 words a piece in the table above), and what reaches the per-lane hooks is scattered. Removed.
+* **Pages by history** (item d as written, built as a refinement of the above): after a kept trial, only the pages a learned allocation was written in are noted by word at the kernel's next launch, the rest of it by page again, falling back to the whole allocation on a coarse stop. Correct and tested, and worth nothing on these programs (the row "all but the written-page refinement" is the row "all" within noise): the kernels that write an allocation in place read little of it that they do not write (GEMVER, LU), or write it in scattered single words whose pages cover it (sc_gpu: 6.2 M words in 6.2 M pieces). Removed.
+* **Whole pages claimed by a writer** (item b for writes): not built. Blocks share the pages they write (256 threads of 4 bytes are 1 KiB: four blocks a page), so a writer's page claim falls back to words on almost every page, and falling back exactly needs the first writer's words, which a claim by page does not have: the claim would have to keep them privately, and handing a private note to a second thread safely costs an atomic per access again, or a `membarrier` per page.
+* **A generation number instead of clearing** (item e): not built. Clearing is `spec_end`, 1 to 3 % of the samples on the base, and with pages noted as a whole only the pages a block writes in have words to clear (ATAX: 8 pages of words where the base had 32,784). A generation in every word would cost a compare per word looked at to save a `memset` per page.
+
+What a trial costs after this (the same counters, default mode, millions): ATAX looks at 0 words for reads and 0.008 for writes (276.8 and 268.5 on the base), takes 32,776 pages as their reader and answers 8.4 M accesses from remembered runs; JACOBI2D looks at 0 words for reads (119.5) and still takes its 39.8 M output words, two at a time; GEMVER and LU, which update a matrix in place, are tried twice at their first launch (GEMVER: 3 coarse stops for 3 kept trials; LU: 6 for 1928) and then note that matrix by word as before: LU still takes 1451 M words for reads and 1449 M for writes, in pairs.
+
+### 3. A/B on 52 of the 53 programs of Round sp47
+
+`sp55_ab.py` (it uses `sp47_run.py`'s runner and signature): the base build and this round's (bcc01a2a), ten variants interleaved run by run, 5 runs (3 for the seven programs whose first run at one thread took 4 s or more: LU, SYR2K, SYRK, asyncAllocation, black-scholes, shmembench, zerocopy; fpdc-cuda left out, see Unresolved), medians of the wall seconds of the whole program, cpus 0,2,...,14 (one logical CPU of each of the eight cores), the machine lock held for one round of the ten at a time. "Bits": in every run of every exact variant of both builds, and of the new build at `VGPU_THREADS=1`, the normalised output and the files written, the exit code, `VGPU_COUNTERS_FILE` (every counter of every launch) and `VGPU_MEMO_FINAL_HASH` (all live device memory at exit) are those of the base at `VGPU_THREADS=1`. "Base twice" is the A/A control (the base at `VGPU_THREADS=1` a second time in each round, over the first); "default" is the new build at `VGPU_THREADS=1` without the variable over the base.
+
+| corpus | program | `VGPU_THREADS=1` s (base) | base exact 2 / 4 / 8 | this round exact 2 / 4 / 8 | `VGPU_THREADS=8` | base twice | default, new / base | trials at 8: kept / stopped / again | bits |
+|---|---|---:|---|---|---:|---:|---:|---|---|
+| polybench | 2DCONV | 0.70 | 0.83x / 0.98x / 1.05x | 0.97x / 1.13x / 1.18x | 1.47x | 1.022 | 1.018 | 1 / 0 / 0 | same |
+| polybench | 3DCONV | 0.68 | 0.93x / 1.24x / 1.48x | 1.27x / 1.69x / 1.90x | 2.04x | 0.993 | 0.990 | 254 / 0 / 0 | same |
+| polybench | 3MM | 2.08 | 0.93x / 1.27x / 1.45x | 1.26x / 1.52x / 1.68x | 1.75x | 0.992 | 1.006 | 3 / 0 / 0 | same |
+| polybench | ADI | 0.23 | 0.73x / 0.91x / 0.91x | 0.74x / 0.95x / 0.95x | 1.53x | 1.017 | 1.015 | 2049 / 0 / 0 | same |
+| polybench | ATAX | 1.43 | 1.08x / 1.54x / 2.27x | 1.43x / 2.28x / 3.22x | 3.92x | 1.000 | 1.007 | 2 / 0 / 0 | same |
+| polybench | BICG | 0.28 | 0.83x / 1.05x / 1.18x | 1.23x / 1.55x / 1.72x | 1.83x | 1.005 | 1.006 | 2 / 0 / 0 | same |
+| polybench | GEMM | 0.73 | 1.00x / 1.22x / 1.43x | 1.23x / 1.47x / 1.59x | 1.69x | 0.998 | 1.001 | 1 / 0 / 1 | same |
+| polybench | GEMVER | 0.66 | 0.83x / 1.16x / 1.43x | 1.06x / 1.41x / 1.61x | 2.12x | 0.962 | 0.977 | 3 / 0 / 3 | same |
+| polybench | GESUMMV | 0.39 | 0.84x / 0.96x / 1.12x | 1.16x / 1.38x / 1.51x | 1.72x | 1.014 | 1.014 | 1 / 0 / 2 | same |
+| polybench | JACOBI1D | 1.07 | 0.81x / 1.01x / 0.90x | 1.07x / 1.26x / 0.88x | 1.61x | 1.002 | 0.995 | 19744 / 0 / 0 | same |
+| polybench | JACOBI2D | 0.55 | 0.81x / 1.24x / 1.59x | 1.20x / 1.75x / 2.28x | 3.32x | 1.011 | 1.007 | 40 / 0 / 0 | same |
+| polybench | LU | 28.89 | 1.11x / 1.61x / 2.26x | 1.21x / 1.86x / 2.44x | 3.70x | 0.999 | 0.993 | 2498 / 0 / 2 | same |
+| polybench | MVT | 1.58 | 1.09x / 1.56x / 1.97x | 1.39x / 2.05x / 2.62x | 3.07x | 1.001 | 1.007 | 2 / 0 / 2 | same |
+| polybench | SYR2K | 10.40 | 0.99x / 1.35x / 1.87x | 1.15x / 1.71x / 2.19x | 2.77x | 1.013 | 1.006 | 1 / 0 / 1 | same |
+| polybench | SYRK | 5.39 | 0.97x / 1.29x / 1.84x | 1.14x / 1.69x / 2.23x | 2.82x | 1.011 | 1.002 | 1 / 0 / 1 | same |
+| rodinia | backprop | 0.53 | 0.77x / 1.06x / 1.29x | 0.73x / 1.02x / 1.35x | 2.35x | 1.002 | 0.995 | 2 / 0 / 3 | same |
+| rodinia | gaussian | 3.71 | 1.30x / 1.92x / 2.73x | 1.25x / 1.94x / 2.75x | 3.80x | 1.001 | 0.995 | 511 / 0 / 2 | same |
+| rodinia | lud | 2.97 | 1.06x / 1.21x / 1.29x | 1.05x / 1.21x / 1.30x | 1.43x | 1.002 | 0.997 | 124 / 0 / 2 | same |
+| rodinia | needle | 0.33 | 1.00x / 1.31x / 1.48x | 1.22x / 1.65x / 1.93x | 2.63x | 0.997 | 1.010 | 253 / 0 / 2 | same |
+| rodinia | pathfinder | 0.54 | 1.11x / 1.21x / 1.30x | 1.10x / 1.23x / 1.31x | 1.32x | 0.993 | 0.994 | 5 / 0 / 1 | same |
+| rodinia | srad_v2 | 0.03 | 1.00x / 0.99x / 0.97x | 1.00x / 0.97x / 0.96x | 0.96x | 0.940 | 0.936 | 0 / 1 / 0 | same |
+| rodinia | particlefilter_float | 1.38 | 1.37x / 2.04x / 2.49x | 1.23x / 1.90x / 2.34x | 1.22x | 0.994 | 1.010 | 27 / 3 / 5 | not comparable (`VGPU_THREADS=1` differs from run to run) |
+| rodinia | sc_gpu | 0.68 | 0.92x / 1.16x / 1.19x | 0.88x / 1.26x / 1.17x | 1.82x | 1.002 | 1.010 | 1432 / 0 / 33 | same |
+| rodinia | hotspot | 0.95 | 1.36x / 2.06x / 2.71x | 1.41x / 2.17x / 2.83x | 3.25x | 1.023 | 1.013 | 1000 / 0 / 0 | same |
+| rodinia | bfs | 0.01 | 0.88x / 0.89x / 0.92x | 0.86x / 0.93x / 0.88x | 1.23x | 0.965 | 0.929 | 5 / 7 / 5 | same |
+| rodinia | nn | 0.01 | 0.97x / 0.96x / 0.95x | 0.96x / 0.95x / 1.01x | 0.98x | 0.932 | 0.932 | 1 / 0 / 0 | same |
+| rodinia | lavaMD | 1.51 | 1.66x / 2.47x / 3.62x | 1.49x / 2.46x / 3.40x | 4.30x | 1.003 | 1.000 | 1 / 0 / 1 | same |
+| hecbench | adam-cuda | 0.02 | 1.43x / 1.90x / 2.03x | 1.29x / 1.59x / 1.67x | 2.12x | 0.971 | 1.012 | 1 / 0 / 3 | same |
+| hecbench | aobench-cuda | 0.57 | 1.86x / 2.82x / 4.00x | 1.73x / 2.81x / 3.99x | 4.59x | 1.014 | 1.015 | 1 / 0 / 0 | same |
+| hecbench | aop-cuda | 1.79 | 1.48x / 2.23x / 2.93x | 1.55x / 2.34x / 3.06x | 3.50x | 1.001 | 0.990 | 201 / 0 / 2 | same |
+| hecbench | asmooth-cuda | 0.22 | 1.05x / 1.14x / 1.19x | 1.05x / 1.14x / 1.15x | 2.72x | 1.003 | 1.014 | 2 / 1 / 1 | same |
+| hecbench | asyncAllocation-cuda | 3.91 | 1.76x / 2.60x / 3.40x | 1.88x / 2.78x / 3.62x | 3.85x | 1.006 | 1.004 | 800 / 0 / 1 | same |
+| hecbench | atan2-cuda | 0.02 | 0.99x / 1.25x / 1.50x | 1.12x / 1.28x / 1.66x | 1.73x | 0.959 | 0.953 | 3 / 0 / 0 | same |
+| hecbench | atomicAggregate-cuda | 3.65 | 1.00x / 1.00x / 1.00x | 1.03x / 1.02x / 1.02x | 4.08x | 1.000 | 0.976 | 0 / 3 / 0 | same |
+| hecbench | atomicIntrinsics-cuda | 0.18 | 0.98x / 0.98x / 0.96x | 0.99x / 0.99x / 0.99x | 3.86x | 1.013 | 1.010 | 0 / 2 / 0 | same |
+| hecbench | atomicPerf-cuda | 1.06 | 1.59x / 2.14x / 2.51x | 1.59x / 2.10x / 2.50x | 3.74x | 1.002 | 1.002 | 9 / 9 / 0 | same |
+| hecbench | attention-cuda | 0.02 | 0.89x / 0.87x / 0.86x | 0.86x / 0.88x / 0.87x | 1.00x | 0.976 | 0.995 | 1 / 1 / 2 | same |
+| hecbench | axpby-cuda | 0.40 | 1.13x / 1.49x / 1.78x | 1.27x / 1.70x / 1.97x | 2.29x | 1.016 | 1.010 | 34 / 0 / 0 | same |
+| hecbench | background-subtract-cuda | 0.00 | 1.18x / 1.26x / 1.28x | 1.39x / 1.45x / 1.50x | 1.44x | 0.731 | 0.726 | 0 / 0 / 0 | same |
+| hecbench | backprop-cuda | 0.01 | 0.78x / 0.94x / 1.10x | 0.81x / 0.99x / 1.16x | 1.44x | 0.939 | 0.956 | 2 / 0 / 3 | same |
+| hecbench | bh-cuda | 0.74 | 1.41x / 1.97x / 2.55x | 1.45x / 1.99x / 2.39x | 3.55x | 1.002 | 0.979 | 8 / 2 / 4 | same; `VGPU_THREADS=8` differs |
+| hecbench | bilateral-cuda | 1.09 | 1.63x / 2.43x / 3.29x | 1.63x / 2.46x / 3.30x | 3.58x | 1.006 | 1.008 | 3 / 0 / 0 | same |
+| hecbench | bitonic-sort-cuda | 0.26 | 1.36x / 1.97x / 2.49x | 1.24x / 1.86x / 2.42x | 3.16x | 1.011 | 1.012 | 136 / 0 / 1 | same |
+| hecbench | black-scholes-cuda | 19.86 | 1.36x / 1.89x / 2.34x | 1.47x / 2.03x / 2.54x | 2.63x | 1.006 | 1.000 | 1 / 0 / 0 | same |
+| hecbench | blockAccess-cuda | 0.01 | 0.85x / 1.18x / 1.27x | 0.96x / 1.24x / 1.33x | 1.56x | 0.909 | 0.939 | 4 / 0 / 0 | same |
+| hecbench | perplexity-cuda | 0.38 | 1.41x / 2.09x / 2.01x | 1.24x / 1.82x / 1.82x | 2.61x | 1.014 | 1.023 | 1 / 0 / 0 | same |
+| hecbench | radixsort2-cuda | 2.01 | 0.99x / 0.98x / 0.99x | 0.99x / 0.99x / 0.98x | 2.27x | 1.004 | 1.006 | 100 / 7 / 0 | same; `VGPU_THREADS=8` differs |
+| hecbench | s3d-cuda | 0.38 | 0.80x / 1.08x / 1.41x | 0.93x / 1.28x / 1.56x | 2.25x | 0.999 | 1.001 | 54 / 0 / 20 | same |
+| hecbench | shmembench-cuda | 4.84 | 1.80x / 2.94x / 4.13x | 1.80x / 2.91x / 4.12x | 4.20x | 1.008 | 1.003 | 1 / 0 / 0 | same |
+| hecbench | silu-cuda | 0.45 | 1.34x / 1.91x / 2.46x | 1.46x / 2.13x / 2.79x | 3.18x | 1.017 | 1.018 | 50 / 0 / 0 | same |
+| hecbench | sortKV-cuda | 0.18 | 0.98x / 0.98x / 0.98x | 0.98x / 0.98x / 0.97x | 1.81x | 0.993 | 0.989 | 8 / 4 / 0 | same; `VGPU_THREADS=8` differs |
+| hecbench | zerocopy-cuda | 13.76 | 0.99x / 0.99x / 0.99x | 1.00x / 0.99x / 1.00x | 1.50x | 1.008 | 1.000 | 0 / 0 / 0 | same |
+
+| geometric mean of the speed-ups | base exact 2 | 4 | 8 | this round exact 2 | 4 | 8 | `VGPU_THREADS=8` | base twice | default, new / base |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| all (52) | 1.09x | 1.39x | 1.62x | 1.17x | 1.51x | 1.74x | 2.28x | 0.989 | 0.989 |
+| hecbench (25) | 1.20x | 1.52x | 1.76x | 1.23x | 1.55x | 1.79x | 2.55x | 0.982 | 0.984 |
+| polybench (15) | 0.91x | 1.21x | 1.46x | 1.15x | 1.54x | 1.76x | 2.23x | 1.003 | 1.003 |
+| rodinia (12) | 1.09x | 1.36x | 1.56x | 1.08x | 1.39x | 1.60x | 1.85x | 0.987 | 0.984 |
+
+From the table (`tables.py`):
+
+* Summed wall seconds: `VGPU_THREADS=1` 123.5; base exact 108.5 / 83.6 / 69.1; this round exact 100.4 / 75.7 / 64.6; `VGPU_THREADS=8` 47.6.
+* base: 16 of 52 programs more than 3 % slower at 2 exact threads than at one: 2DCONV, 3DCONV, 3MM, ADI, BICG, GEMVER, GESUMMV, JACOBI1D, JACOBI2D, backprop, sc_gpu, bfs, attention-cuda, backprop-cuda, blockAccess-cuda, s3d-cuda
+* this round: 10 of 52 programs more than 3 % slower at 2 exact threads than at one: 2DCONV, ADI, backprop, sc_gpu, bfs, nn, attention-cuda, backprop-cuda, blockAccess-cuda, s3d-cuda
+* Programs of at least 0.2 s whose trials were all kept (35): 8 exact threads take 1.38x the time of 8 plain ones on the base, 1.25x this round.
+* Programs of at least 0.2 s (41): base twice 1.004 (geometric mean; 0.962 to 1.023); default mode, new / base 1.003 (0.976 to 1.023).
+* base, programs of at least 0.2 s: geometric mean 1.11x / 1.48x / 1.78x at 2 / 4 / 8 exact threads; `VGPU_THREADS=8` 2.54x
+* this round, programs of at least 0.2 s: geometric mean 1.22x / 1.65x / 1.94x at 2 / 4 / 8 exact threads; `VGPU_THREADS=8` 2.54x
+* Slower than the base by more than 3 % (programs of at least 0.2 s): backprop x2 0.95, backprop x4 0.96, gaussian x2 0.96, particlefilter_float x2 0.90, particlefilter_float x4 0.93, particlefilter_float x8 0.94, sc_gpu x2 0.96, lavaMD x2 0.89, lavaMD x8 0.94, aobench-cuda x2 0.93, asmooth-cuda x8 0.97, bh-cuda x8 0.94, bitonic-sort-cuda x2 0.91, bitonic-sort-cuda x4 0.95, perplexity-cuda x2 0.88, perplexity-cuda x4 0.87, perplexity-cuda x8 0.91
+* Faster than the base by more than 3 %: 69 of 123 program-thread counts; slower: 17.
+
+Reading:
+
+* **Bits.** The same in every run of every exact variant of both builds, and of the new build without the variable, on 51 of the 52 programs; `particlefilter_float` cannot be compared (its runs at `VGPU_THREADS=1` differ from one another, as in round sp47). Plain `VGPU_THREADS=8` differs from the run in order on `bh-cuda`, `radixsort2-cuda` and `sortKV-cuda`, as in round sp47; the exact variants do not.
+* **Speed.** Geometric mean of the 52: 1.09x / 1.39x / 1.62x on the base, 1.17x / 1.51x / 1.74x now, against 2.28x for plain `VGPU_THREADS=8`. On the 35 programs of at least 0.2 s whose trials were all kept, 8 exact threads took 1.38x the time of 8 plain ones and take 1.25x. The gain is PolyBench's: 0.91x / 1.21x / 1.46x to 1.15x / 1.54x / 1.76x (plain 2.23x), ATAX 2.27x to 3.22x at 8 threads (plain 3.92x), BICG 1.18x to 1.72x (1.83x), JACOBI2D 1.59x to 2.28x (3.32x), MVT 1.97x to 2.62x (3.07x). HeCBench moves from 1.20x / 1.52x / 1.76x to 1.23x / 1.55x / 1.79x (black-scholes, silu, axpby, asyncAllocation, s3d gain; perplexity, bitonic-sort, adam lose), Rodinia from 1.09x / 1.36x / 1.56x to 1.08x / 1.39x / 1.60x (needle and hotspot gain; lavaMD, particlefilter, backprop lose at 2 threads).
+* **2 exact threads at least as fast as one on every program: not reached.** 16 of 52 programs were more than 3 % slower at 2 exact threads than at one on the base, 10 are now: 2DCONV (0.97x), ADI (0.74x), backprop (0.73x), sc_gpu (0.88x), s3d-cuda (0.93x) and five programs of 0.03 s or less (bfs, nn, attention-cuda, backprop-cuda, blockAccess-cuda). All of PolyBench's nine but 2DCONV and ADI are over 1.0 now (BICG 0.83x to 1.23x, GESUMMV 0.84x to 1.16x, JACOBI2D 0.81x to 1.20x, JACOBI1D 0.81x to 1.07x, 3DCONV 0.93x to 1.27x, 3MM 0.93x to 1.26x, GEMVER 0.83x to 1.06x).
+* **Against the base, per program and thread count.** 69 of 123 (the 41 programs of at least 0.2 s) are more than 3 % faster, 17 more than 3 % slower. The slower ones: lavaMD (0.89 of the base's speed at 2 threads, 0.94 at 8), particlefilter_float (0.90 to 0.94; five coarse stops in its 36 launches; a program whose results differ from run to run), perplexity-cuda (0.87 to 0.91: four blocks, so by word from the start as on the base, and still slower), bitonic-sort (0.91 and 0.95 at 2 and 4), backprop, gaussian and sc_gpu at 2 threads (0.95, 0.96, 0.96), bh-cuda at 8 (0.94), aobench at 2 (0.93).
+* **Part of that is the place in the round.** A round runs the base's variants and then this round's, so the base's 2-thread run follows a 1-thread run and this round's follows the 8-thread run and a 1-thread run, on a laptop processor. `order_check.sh` (`order-check.txt`): the two builds' 2-thread runs alone, one after the other, 7 times, in both orders. aobench (one launch, kept, no coarse stop): 0.30 s and 0.32 s with the base first, 0.30 s and 0.32 s with this round's build first: the second run of a pair is 6 % slower whichever build it is, and aobench's 0.93 is that. lavaMD: 0.90 s (base) and 1.00 s with the base first, 0.98 s and 0.94 s (base) with this round's first: about 4 to 7 % of its 11 % is the build. gaussian: 2.87 s (base) and 3.01 s, then 2.99 s and 2.90 s (base): about 3 % is the build. The same bias sits on every 2-thread column of this round in the table (and, less, on the 4-thread ones); it was not corrected.
+* **Controls.** On the 41 programs of at least 0.2 s the base against itself is 1.004 (geometric mean; 0.962 to 1.023), and default mode (`VGPU_THREADS=1` without the variable), new over base, is 1.003 (0.976 to 1.023): no change outside what two runs of one build give. (Over all 52 both are 0.989: the programs of a few hundredths of a second scatter.)
+* **Trials.** A coarse stop and a second trial happened in 25 of the 52 programs (the last column's third number, at 8 threads): once or twice for most (GEMM 1, GESUMMV 2, MVT 2, LU 2 for 2498 kept trials, gaussian 2 for 511), s3d-cuda 20 for 54, sc_gpu 33 for 1432. No program has more trials stopped for a real conflict than on the base.
+
+### 4. Tests, mutation evidence, sanitizers
+
+* `test_exact_threads` (`tests/unit/test_exact_threads.cpp`) has 22 tests (11 before) and is wired four times: default, `VGPU_TIER=0`, `VGPU_FASTPATH=0` and, new, `VGPU_EXACT_PAGES=0` (every page by word: the base's note, which the note by page must agree with). New this round:
+  * a page that blocks only read is noted as a whole and a page a block writes in by word (the counters say which: one page taken by a reader, one made several readers', one by word, one word read by compare-and-swap), and the shadow is empty again after the trial;
+  * **the adversary of the note by page**: block 0 claims a page whole (as its reader; as its reader and then a writer in it; with a second reader; or writes in it first), and a second block, on the same worker and on another, touches the page at 144 places: every byte of the first, a middle and the last word, six lengths from 1 to 8 bytes, the last ones ending in the next page. Nothing goes through that a note by word stops; every stop is undone to the byte; a stop that only the grain made is said to be coarse, names the allocation, and the same accesses are kept when run again with the allocation by word; a stop at a writer's mark is never coarse;
+  * what a worker remembers of a page is the block's and not the next block's on the same worker, and not another page's that shares its place in the memory (two such pages are found with the hash; the same for the pages of words);
+  * every lane of a warp is noted wherever it lies (a word in the middle of 32 lanes one after another taken by another block; a lane in another page than the rest; a lane whose last byte, or whose first, is in another page);
+  * remembered runs of words (sixteen words or more) answer for their block only, on the same worker and on another, for reads and for writes; a short access does not ask them; two runs with another block's word between them are not one run, and a run answers only for an access that lies in it whole;
+  * words a worker finds readable are looked at every time: what allowed block 0 does not allow block 1, and a word another block wrote since is seen;
+  * two words at once: block 1 holds one word (as reader or writer, at an even and at an odd place, with the other word of its pair untouched or block 0's own) and block 0's 40-byte store and load over it from six starting places are stopped exactly where the single-word rules stop them; a store over words the block read one by one keeps every byte once (48 bytes, 12 words);
+  * **600 random interleavings** of four blocks on two workers over five pages (reads, writes, long reads, a warp's loads and stores one after another and scattered) against a model that keeps the four word states of exact-threads.md for every word: noted by word the shadow stops exactly the access the model stops; noted by page it stops every access the model stops and stops earlier only as a coarse stop, after which the same run with the allocation by word is the model's again; a stopped run leaves the bytes of before, a kept one the stores. All three endings are required to occur at least 20 times;
+  * a kernel that updates its buffer in place (sixteen blocks a page) is stopped coarsely, tried again by word and kept, with the words and every counter of the run in order, at 2, 4 and 8 threads; the same kernel on 6 blocks is noted by word from the start (no trial thrown away), on 8 by page; a chain (each block reads what the one before wrote) stopped by a coarse note is tried by word, stopped for the real conflict and run in order.
+* The test in its four forms, Release build of the measured tree (server3): 22 of 22 in each.
+* Mutations (`mutants.py`, `mutants.log`): one wrong line each. A copy of the file with the line changed is compiled with the build's own command and the test is linked with that object ahead of the library, so the trees are not touched; the three files through the same road unchanged pass in the four forms first. 42 mutants: **38 killed** (each by the default form already), **4 survived, all equivalent**:
+
+  | group | mutants | result |
+  |---|---|---|
+  | the note by page | the worker's memory of a page answering for any block; for any page; a write in a page others read let through; the sole reader's reads forgotten when it writes; a second reader not noted; a writer taking a page of several readers; a coarse stop not said (at a page state; at a word of a coarse page); page states not cleared; the plan's by-word ranges ignored; the plan's "no pages" ignored | 11 of 11 killed |
+  | the second trial | no second trial; the second trial with the first one's plan; a grid of a few blocks noted by page | 3 of 3 killed |
+  | | the second trial's counter slots not emptied first | survived, equivalent: every worker of a trial writes its sum into its slot before the trial ends |
+  | runs of words | a run answering for any block; a run known by its first word only; runs joined across a gap | 3 of 3 killed |
+  | | a run remembered before its note is made (reads; writes) | 2 survived, equivalent: a note that fails stops the trial, and every later hook of a stopped trial throws before it asks the memory |
+  | pages of words | readable for another block; not looked at; a lone word taken whatever it holds; the words of another page that shares the place | 4 of 4 killed |
+  | two words at once | a pair written when only the first is free; only the second; over any reader's mark; a written pair not kept; a pair read by its first word; by its second; a pair taken for written by its first word | 7 of 7 killed |
+  | round sp47's, on lines this round moved | a write conflict ignored; a read of written ignored; readers not merged; no write back; nothing kept; the first word of a run only kept; the shadow not cleared; a store outside the device let through; `store_batch` without its hook; a stopped trial kept | 10 of 10 killed |
+  | | the undo log not emptied at the end of a trial | survived, equivalent: the log is emptied again when the next trial begins |
+
+* ThreadSanitizer (server3; the Release tree deleted first; `-fsanitize=thread -g -O1`, Debug, the CI job's flags, `setarch -R`; `tsan.sh`, `tsan.log`): `test_exact_threads` in its four forms 22 of 22 each, and `test_memory` (80), `test_memfast` (15), `test_memalloc` (18), `test_memrmw` (10), `test_memhot_sp8` (4), `test_load_batch16` (3), `test_memcopy_direct` (6), `test_memrmw_lockfree` (6), `test_memcount_forms` (10), `test_atom_rmw` (1) all pass, with 0 ThreadSanitizer reports in every one. (The marks of the shadow are plain 32-bit words moved only by the `__atomic` builtins, so that two can be taken as one 64-bit value; the sanitizer sees every access as atomic.) The rest of the suite, and the other sanitizers, are CI's: nothing was pushed in this round.
+
+### 5. Unresolved
+
+* **Not every program gains.** The note by page pays where a kernel reads much that nobody writes (PolyBench). Where a kernel updates its data in place the allocation is learned and noted by word as before, and what is left of the round for it is the pairs, less what the learning costs: the trial that finds an in-place allocation out is thrown away, once per allocation and kernel. For a kernel that stores early in a block that is nothing (lavaMD: 12 thousand of 36 M hook calls); for one that stores at a block's end it is up to a block's time on every thread, per allocation (adam-cuda: three coarse stops for its one launch of 40 blocks). Against the base 17 of 123 program-thread counts are more than 3 % slower (section 3); what is known of each is there.
+* **A scout instead of a thrown-away trial.** Not built: running the launch's first block alone, in order, before the others start (it is the first block of the run in order, so nothing of it is thrown away) would show which allocations a block of this kernel reads and then writes, all of them in one pass, at the price of one block's time on one thread instead of every thread's time up to the first coarse stop. It would also allow the page grain on grids of fewer than 8 blocks.
+* **2 exact threads still lose on some programs**: 2DCONV (0.97x), ADI (0.74x), backprop (0.73x), sc_gpu (0.88x), s3d-cuda (0.93x) and five programs of 0.03 s or less. They are programs of many small launches or of almost no work (the hand-off to a second thread is what a small launch pays, with or without the proof), and ADI, whose trials are strided stores, each lane a page and a piece of the undo log of its own (3.2 M pieces for 6.3 M words; `spec_keep` is 9 % of its samples at 8 threads).
+* **JACOBI1D at 8 exact threads is slower than at one in both builds** (0.90x on the base, 0.88x now; 1.26x at 4 threads): the width rule tries more of its 20,000 launches at 8 threads as the trial gets cheaper (13,306 on the base, 18,720 in the first A/B), and for launches this small 8 threads' hand-off costs more than it saves under a trial (plain `VGPU_THREADS=8` gains). The rule was not touched.
+* **Kernels that update in place keep the cost of round sp47 per word**, less the pairs: LU still takes 1.45 G words for reads and 1.45 G for writes. Not tried: taking a word as its writer at the block's first read of it where the kernel's last launch wrote it (one compare-and-swap where there are two); a coarser word (a cache line) for allocations whose blocks' footprints are aligned to it.
+* **What is learned is kept by address range and kernel name and never forgotten** (32 ranges, then the kernel is noted by word everywhere). A program that gives a kernel a new buffer at a new address for every launch pays a coarse stop per buffer until then; sc_gpu has 33 coarse stops for 1432 kept trials. Keying by the kernel's argument instead of the address was not tried.
+* **Shadow cache misses** were not measured apart (no hardware counters for an unprivileged user on this host). **A worker's memories are reset for every trial** (about 5 KiB a worker); not measured apart.
+* **fpdc-cuda has no row** (52 programs, not sp47's 53): each run writes its compressed output, hundreds of megabytes, into its directory, and on this host's disk (a USB stick) a run took 30 to 190 s at 3 to 7 % CPU.
+* As in round sp47: the five longest PolyBench programs and the eight HeCBench programs that do not finish at one thread have no rows; the liveness rule has no test; only the SASS engine is tried.
+* Round sp47's table (server2, eight Zen 5 cores) is not reproduced here: on this host the same base build gives 1.09x / 1.39x / 1.62x at 2 / 4 / 8 exact threads where sp47 measured 1.11x / 1.59x / 2.01x, and plain `VGPU_THREADS=8` gives 2.28x where it measured 2.91x.
 ## Round sp57: the JIT as the default, measured, not flipped; the count on the way to the threshold moved to the plain loop (branch `sp57-jit-default`)
 
 Question: every per-instruction lever of the tier has been used, so the largest speed-up left for a user who sets nothing may be to turn tier 2 on for them (`VGPU_JIT=1`, with or without `VGPU_JIT_LINK=1` and `VGPU_JIT_FUSE=1`). What would that buy and cost with the *default* settings (threshold 100,000,000 region instructions, the compile in the background), on a cold and on a warm cache; what stands in the way; and should it be the default. The earlier JIT rounds (15, sp33, sp38, sp48, sp52, sp53) all measured with `VGPU_JIT_THRESHOLD=100000 VGPU_JIT_SYNC=1` on a filled cache: the best case, on the programs that reach generated code. The reason given for "off by default" is round 14's: a section that is kept by the share rule is counted in the hook loop until it is compiled, which cost four bench workloads 2 to 5 % in a cold run.

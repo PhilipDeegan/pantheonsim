@@ -1,0 +1,33 @@
+rank	program	sim_wall_s	native_wall_s	ratio	class_and_evidence
+1	samples/radixSortThrust	27.79	0.41	67.0	per-instruction (step_warp 17%, exec_mem 9%, handlers) plus shared-memory bank counting 7% [profiled]
+2	samples/alignedTypes	26.83	0.72	37.5	memory model: run_out/load_batch/store_strided/h_global ~50%, rest per-instruction [profiled]
+3	samples/simpleHyperQ	9.75	0.31	30.9	per-instruction: clock64 spin loop (icmp/iadd3/isetp ~75%) [profiled]
+4	polybench/LU	21.50	0.87	24.8	launch/block setup: init_block 9% + libc memset 7%, rest per-instruction [profiled]
+5	samples/segmentationTreeThrust	13.58	0.57	24.0	memory counting: bank-pass table 14% + widened 10%, step_warp 20% [profiled]
+6	samples/transpose	5.76	0.26	21.8	per-instruction + shared/global counting (sp41 PTX data) [not profiled here]
+7	samples/interval	13.36	0.62	21.7	per-instruction (divergence-heavy) [not profiled here]
+8	samples/reduction	8.61	0.41	20.8	per-instruction + shared counting [not profiled here]
+9	hecbench/shmembench-cuda	4.23	0.21	19.7	shared-memory model + counting [not profiled here]
+10	samples/mergeSort	6.19	0.31	19.7	per-instruction + bank counting 10% (sp41) [not profiled here]
+11	samples/jacobiCudaGraphs	15.71	0.82	19.2	graph launch overhead + per-instruction [not profiled here]
+12	samples/convolutionSeparable	8.67	0.57	15.3	per-instruction [not profiled here]
+13	hecbench/atomicAggregate-cuda	3.24	0.21	15.1	atomics (memory model) [not profiled here]
+14	rodinia/gaussian	3.13	0.21	14.6	launch overhead (2 tiny launches per column) [not profiled here]
+15	samples/MC_SingleAsianOptionP	1.91	0.16	11.6	per-instruction (f64/RNG) [not profiled here]
+
+# next 15 (ratio, no classification)
+16	samples/cudaTensorCoreGemm	7.98	0.82	9.8	
+17	samples/sortingNetworks	9.23	0.97	9.6	
+18	samples/histogram	9.94	1.07	9.3	
+19	hecbench/radixsort2-cuda	1.98	0.26	7.5	
+20	samples/MC_EstimatePiInlineP	1.55	0.21	7.2	
+21	polybench/SYR2K	8.01	1.12	7.2	
+22	polybench/SYRK	4.19	0.72	5.9	
+23	hecbench/aop-cuda	1.44	0.26	5.5	
+24	rodinia/lavaMD	1.38	0.26	5.2	
+25	hecbench/black-scholes-cuda	18.31	3.83	4.8	
+26	rodinia/particlefilter_float	1.21	0.27	4.6	
+27	hecbench/bilateral-cuda	1.10	0.27	4.2	
+28	samples/warpAggregatedAtomicsCG	1.84	0.46	4.0	
+29	hecbench/asyncAllocation-cuda	2.33	0.67	3.5	
+30	samples/simpleCudaGraphs	1.46	0.46	3.1	

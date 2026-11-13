@@ -1,0 +1,32 @@
+== which bits
+hecbench/bh-cuda: VGPU_THREADS=1 twice: output True, final memory True, counters False
+  VGPU_THREADS=8 run 0: output same, final memory same, launches whose counters differ 6 of 17
+     kernels: [('_Z18TreeBuildingKerneliiPViPK6float4PKfPi', 2), ('_Z19SummarizationKerneliiPViPKiPV6float4Pi', 2), ('_Z10SortKerneliiPiPKiPViS_S_', 2)]
+     fields: [('instructions', 6), ('thread_instructions', 6), ('global_loads', 6), ('global_bytes_read', 6), ('global_sectors_ld', 6), ('global_sectors_st', 6), ('global_requests_ld', 6), ('global_requests_st', 6)]
+  VGPU_THREADS=8 run 1: output same, final memory same, launches whose counters differ 6 of 17
+     kernels: [('_Z18TreeBuildingKerneliiPViPK6float4PKfPi', 2), ('_Z19SummarizationKerneliiPViPKiPV6float4Pi', 2), ('_Z10SortKerneliiPiPKiPViS_S_', 2)]
+     fields: [('instructions', 6), ('thread_instructions', 6), ('global_loads', 6), ('global_bytes_read', 6), ('global_sectors_ld', 6), ('global_sectors_st', 6), ('global_requests_ld', 6), ('global_requests_st', 6)]
+  VGPU_THREADS=8 run 2: output same, final memory same, launches whose counters differ 6 of 17
+     kernels: [('_Z18TreeBuildingKerneliiPViPK6float4PKfPi', 2), ('_Z19SummarizationKerneliiPViPKiPV6float4Pi', 2), ('_Z10SortKerneliiPiPKiPViS_S_', 2)]
+     fields: [('instructions', 6), ('thread_instructions', 6), ('global_loads', 6), ('global_bytes_read', 6), ('global_sectors_ld', 6), ('global_sectors_st', 6), ('global_requests_ld', 6), ('global_requests_st', 6)]
+hecbench/radixsort2-cuda: VGPU_THREADS=1 twice: output True, final memory True, counters False
+  VGPU_THREADS=8 run 0: output same, final memory same, launches whose counters differ 400 of 600
+     kernels: [('_ZN3cub17CUB_300001_SM_8606detail10radix_sort29DeviceRadixSo', 400)]
+     fields: [('instructions', 400), ('thread_instructions', 400), ('global_loads', 400), ('global_bytes_read', 400), ('global_sectors_ld', 400), ('global_requests_ld', 400), ('global_bytes_ld', 400)]
+  VGPU_THREADS=8 run 1: output same, final memory same, launches whose counters differ 400 of 600
+     kernels: [('_ZN3cub17CUB_300001_SM_8606detail10radix_sort29DeviceRadixSo', 400)]
+     fields: [('instructions', 400), ('thread_instructions', 400), ('global_loads', 400), ('global_bytes_read', 400), ('global_sectors_ld', 400), ('global_requests_ld', 400), ('global_bytes_ld', 400)]
+  VGPU_THREADS=8 run 2: output same, final memory same, launches whose counters differ 400 of 600
+     kernels: [('_ZN3cub17CUB_300001_SM_8606detail10radix_sort29DeviceRadixSo', 400)]
+     fields: [('instructions', 400), ('thread_instructions', 400), ('global_loads', 400), ('global_bytes_read', 400), ('global_sectors_ld', 400), ('global_requests_ld', 400), ('global_bytes_ld', 400)]
+hecbench/sortKV-cuda: VGPU_THREADS=1 twice: output True, final memory True, counters False
+  VGPU_THREADS=8 run 0: output same, final memory same, launches whose counters differ 32 of 48
+     kernels: [('_ZN3cub17CUB_300001_SM_8606detail10radix_sort29DeviceRadixSo', 32)]
+     fields: [('instructions', 32), ('thread_instructions', 32), ('global_loads', 32), ('global_bytes_read', 32), ('global_sectors_ld', 32), ('global_requests_ld', 32), ('global_bytes_ld', 32)]
+  VGPU_THREADS=8 run 1: output same, final memory same, launches whose counters differ 32 of 48
+     kernels: [('_ZN3cub17CUB_300001_SM_8606detail10radix_sort29DeviceRadixSo', 32)]
+     fields: [('instructions', 32), ('thread_instructions', 32), ('global_loads', 32), ('global_bytes_read', 32), ('global_sectors_ld', 32), ('global_requests_ld', 32), ('global_bytes_ld', 32)]
+  VGPU_THREADS=8 run 2: output same, final memory same, launches whose counters differ 31 of 48
+     kernels: [('_ZN3cub17CUB_300001_SM_8606detail10radix_sort29DeviceRadixSo', 31)]
+     fields: [('instructions', 31), ('thread_instructions', 31), ('global_loads', 31), ('global_bytes_read', 31), ('global_sectors_ld', 31), ('global_requests_ld', 31), ('global_bytes_ld', 31)]
+--- note: "counters False" in the VGPU_THREADS=1 lines above is the process id field of the counters file (the script compared it; fixed since). A check of two runs of sortKV at VGPU_THREADS=1 found pid the only differing field in 48 launches.
