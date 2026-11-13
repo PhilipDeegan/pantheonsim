@@ -1,0 +1,151 @@
+CPU(s):                                  16
+Model name:                              AMD Ryzen 7 PRO 8840U w/ Radeon 780M Graphics
+CPU(s) scaling MHz:                      28%
+6.8.0-147-generic
+gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+perf version 6.8.12
+Samples of a phase by the kernel leaf (if any) and the first three user frames, leaf first; percent of all samples of the program (10 runs).
+== samples/cdpSimpleQuicksort, sass engine, sass-decode: 7.2% of 883 samples
+    0.79% libc.so.6 < malloc < operator new
+    0.45% clear_page_erms | libc.so.6 < malloc < operator new
+    0.45% do_anonymous_page | libc.so.6 < malloc < operator new
+    0.45% vgpu::sass::Code::instr
+    0.34% std::__cxx11::basic_string& std::vector::emplace_back < vgpu::sass::decode
+    0.23% vgpu::sass::decode
+    0.23% alloc_pages_mpol | libc.so.6 < malloc < operator new
+    0.23% vgpu::sass::okcache::key_of
+== samples/cdpSimpleQuicksort, sass engine, module-load: 4.8% of 883 samples
+    0.91% vgpu::sass::parse_cubin
+    0.34% vgpu::sass::cubin_arch_specific
+    0.23% __rcu_read_unlock | __munmap < vgpu::cuda::pick_cubin[abi:cxx11]
+    0.23% vgpu::sass::load
+    0.11% vgpu::ExclusiveGuard::~ExclusiveGuard < vgpu::sass::load
+    0.11% vgpu::MemoryManager::write < vgpu::sass::load
+    0.11% libc.so.6 < cfree < vgpu::sass::cubin_arch_specific
+    0.11% mas_alloc_nodes | __munmap < vgpu::cuda::pick_cubin[abi:cxx11]
+== samples/cdpSimpleQuicksort, sass engine, sim-other: 20.8% of 883 samples
+    3.06% clear_page_erms | libc.so.6 < cudaMemcpy_body
+    0.68% vgpu::memo::hash_bytes
+    0.57% std::map::operator[]
+    0.45% std::once_flag::_Prepare_execution::_Prepare_execution < std::_Sp_counted_ptr_inplace
+    0.45% libc.so.6 < libc.so.6 < libc.so.6
+    0.45% libc.so.6 < libc.so.6 < cfree
+    0.45% vgpu::sass::{anon}::kernel_polls_loop
+    0.45% libc.so.6 < malloc < operator new
+== samples/cdpSimpleQuicksort, sass engine, loader: 37.4% of 883 samples
+   15.29% ld-linux-x86-64.so.2 < ld-linux-x86-64.so.2 < ld-linux-x86-64.so.2
+    0.79% srso_alias_safe_ret | ld-linux-x86-64.so.2 < ld-linux-x86-64.so.2 < ld-linux-x86-64.so.2
+    0.79% ld-linux-x86-64.so.2
+    0.57% kmem_cache_alloc | ld-linux-x86-64.so.2 < ld-linux-x86-64.so.2 < ld-linux-x86-64.so.2
+    0.45% srso_alias_safe_ret | execve
+    0.45% link_path_walk.part.0.constp | ld-linux-x86-64.so.2 < ld-linux-x86-64.so.2 < ld-linux-x86-64.so.2
+    0.34% clear_page_erms | ld-linux-x86-64.so.2 < ld-linux-x86-64.so.2 < ld-linux-x86-64.so.2
+    0.34% __d_lookup_rcu | ld-linux-x86-64.so.2 < ld-linux-x86-64.so.2 < ld-linux-x86-64.so.2
+== samples/cdpQuadtree, sass engine, sass-decode: 8.8% of 1647 samples
+    1.09% clear_page_erms | libc.so.6 < malloc < operator new
+    0.79% libc.so.6 < malloc < operator new
+    0.43% vgpu::sass::Code::instr
+    0.36% vgpu::sass::decode
+    0.30% __rcu_read_unlock | libc.so.6 < malloc < operator new
+    0.30% sync_regs | libc.so.6 < malloc < operator new
+    0.24% vgpu::sass::okcache::key_of
+    0.24% alloc_pages_mpol | libc.so.6 < malloc < operator new
+== samples/cdpQuadtree, sass engine, module-load: 3.9% of 1647 samples
+    1.58% clear_page_erms | libc.so.6 < vgpu::sass::load
+    0.18% vgpu::runtime::Device::load_cubin
+    0.12% set_pte_range | __cudaRegisterFatBinary < __nv_cudaEntityRegisterCallback
+    0.12% lru_gen_del_folio.constprop. | __munmap < vgpu::cuda::pick_cubin[abi:cxx11]
+    0.12% vgpu::sass::parse_cubin
+    0.06% filemap_map_pmd | __cudaRegisterFatBinary < __nv_cudaEntityRegisterCallback
+    0.06% __mod_memcg_lruvec_state | __munmap < vgpu::cuda::pick_cubin[abi:cxx11]
+    0.06% clear_page_erms | vgpu::sass::parse_cubin
+== samples/simpleTemplates, sass engine, sim-other: 18.3% of 513 samples
+    4.87% clear_page_erms | libc.so.6 < cudaMemcpy_body
+    0.58% std::__cxx11::basic_string::_M_dispose
+    0.58% clear_page_erms | libc.so.6 < malloc < operator new
+    0.39% srso_alias_safe_ret | libc.so.6 < cudaMemcpy_body
+    0.39% update_load_avg | libc.so.6 < cudaMemcpy_body
+    0.39% set_pte_range | cudaMemcpy_body
+    0.39% libc.so.6 < malloc < operator new
+    0.39% std::pair std::_Hashtable::_M_insert_unique
+== samples/simpleTemplates, sass engine, device-init: 3.1% of 513 samples
+    0.19% filemap_map_pages | libc.so.6 < vgpu::telemetry::Publisher::Publisher
+    0.19% vgpu::yamlish::{anon}::strip
+    0.19% libc.so.6 < libc.so.6 < __snprintf_chk
+    0.19% do_vmi_munmap | __mmap < vgpu::backing::acquire
+    0.19% vgpu::telemetry::Publisher::device
+    0.19% vgpu::yamlish::{anon}::parse_scalar
+    0.19% set_pte_range | vgpu::DeviceProfile::~DeviceProfile
+    0.19% step_into | open64 < vgpu::backing::{anon}::read_small
+== samples/vectorAdd, sass engine, sim-other: 11.3% of 820 samples
+    3.41% clear_page_erms | libc.so.6 < cudaMemcpy_body
+    0.61% libc.so.6 < cudaMemcpy_body
+    0.37% libc.so.6 < malloc < operator new
+    0.37% do_anonymous_page | libc.so.6 < malloc < operator new
+    0.24% std::__cxx11::basic_string std::operator+
+    0.24% set_pte_range | _GLOBAL__sub_I_interpreter.cpp
+    0.24% set_pte_range | vgpu::sass::{anon}::compute_statics
+    0.12% pte_offset_map_nolock | bool std::operator==
+== samples/vectorAdd, sass engine, device-init: 3.7% of 820 samples
+    0.24% set_pte_range | vgpu::yamlish::Value::~Value
+    0.12% __virt_addr_valid | open64 < vgpu::backing::{anon}::read_small
+    0.12% kmalloc_trace | __mmap < vgpu::telemetry::Publisher::Publisher
+    0.12% vgpu::telemetry::Publisher::refresh_locked
+    0.12% set_pte_range | vgpu::telemetry::Publisher::Publisher
+    0.12% std::chrono::_V2::steady_clock::now < vgpu::telemetry::Publisher::Publisher
+    0.12% vgpu::backing::{anon}::cgroup_walk
+    0.12% filemap_map_pages | libc.so.6 < __isoc23_sscanf < vgpu::DeviceProfile::from_yaml
+== samples/vectorAdd, sass engine, program-host: 24.4% of 820 samples
+    6.22% random < rand < main
+    1.71% main
+    1.71% random < main
+    1.46% rand@plt
+    1.46% libc.so.6
+    0.61% rand < main
+    0.61% clear_page_erms | main
+    0.49% random_r < rand < main
+== rodinia/srad_v2, sass engine, sass-decode: 6.8% of 737 samples
+    0.68% libc.so.6 < malloc < operator new
+    0.68% clear_page_erms | libc.so.6 < malloc < operator new
+    0.54% __alloc_pages | libc.so.6 < malloc < operator new
+    0.41% sync_regs | libc.so.6 < malloc < operator new
+    0.27% vgpu::sass::decode
+    0.27% __mem_cgroup_charge | libc.so.6 < malloc < operator new
+    0.14% vgpu::sass::Code::instr
+    0.14% folio_batch_move_lru | libc.so.6 < malloc < operator new
+== rodinia/srad_v2, sass engine, sim-other: 19.1% of 737 samples
+    3.39% clear_page_erms | libc.so.6 < cudaMemcpy_body
+    0.68% libc.so.6 < malloc < operator new
+    0.54% std::once_flag::_Prepare_execution::_Prepare_execution < std::_Sp_counted_ptr_inplace
+    0.41% libc.so.6 < cfree < std::_Sp_counted_ptr_inplace
+    0.41% libc.so.6 < libc.so.6 < libc.so.6
+    0.27% std::__cxx11::basic_string::_M_dispose
+    0.27% pmd_val | libc.so.6 < malloc < operator new
+    0.27% malloc < operator new < std::__cxx11::basic_string::_M_assign
+== samples/cdpQuadtree, ptx engine, ptx-parse: 22.8% of 3446 samples
+    6.67% vgpu::ptx::lex
+    1.36% clear_page_erms | vgpu::ptx::lex
+    0.67% vgpu::ptx::parse
+    0.67% vgpu::ptx::analyze_registers
+    0.58% sync_regs | vgpu::ptx::lex
+    0.55% vgpu::ptx::{anon}::Parser::peek_punct
+    0.32% rmqueue_bulk | vgpu::ptx::lex
+    0.32% handle_mm_fault | vgpu::ptx::lex
+== samples/cdpQuadtree, ptx engine, module-load: 5.8% of 3446 samples
+    2.93% libzstd.so.1.5.5 < libzstd.so.1.5.5 < ZSTD_decompress_usingDDict
+    1.07% vgpu::runtime::Device::load_module
+    0.46% libzstd.so.1.5.5 < libzstd.so.1.5.5 < libzstd.so.1.5.5
+    0.06% ld-linux-x86-64.so.2 < ld-linux-x86-64.so.2 < ld-linux-x86-64.so.2
+    0.06% percpu_counter_add_batch | libc.so.6 < libc.so.6 < malloc
+    0.06% ld-linux-x86-64.so.2 < ld-linux-x86-64.so.2 < _dl_catch_exception
+    0.06% vma_interval_tree_insert | ld-linux-x86-64.so.2 < ld-linux-x86-64.so.2 < ld-linux-x86-64.so.2
+    0.03% mas_prev_slot | ld-linux-x86-64.so.2 < ld-linux-x86-64.so.2 < ld-linux-x86-64.so.2
+== rodinia/srad_v2, ptx engine, ptx-parse: 16.8% of 989 samples
+    1.21% vgpu::ptx::lex
+    0.71% vgpu::ptx::Instr& std::vector::emplace_back
+    0.51% vgpu::ptx::{anon}::Parser::declare_reg
+    0.51% clear_page_erms | vgpu::ptx::Instr& std::vector::emplace_back
+    0.40% libc.so.6 < malloc < operator new
+    0.40% vgpu::ptx::analyze_registers
+    0.40% clear_page_erms | vgpu::ptx::Instr::Instr
+    0.40% vgpu::ptx::{anon}::Parser::parse_instruction

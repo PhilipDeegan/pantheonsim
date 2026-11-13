@@ -1,0 +1,46 @@
+total samples 1653
+ 21.96%      363  vgpu::sass::Runner::step_warp
+  8.83%      146  vgpu::sass::Runner::exec_mem
+  5.69%       94  vgpu::sass::Runner::exec_int
+  3.33%       55  void vgpu::sass::h_shared<false>
+  3.21%       53  vgpu::simd::avx2_impl::icmp_mask_k
+  2.72%       45  vgpu::simd::avx2_impl::lop3_k
+  2.72%       45  vgpu::sass::h_lop3
+  2.42%       40  vgpu::sass::tier_issue
+  2.30%       38  vgpu::sass::h_shfl
+  2.18%       36  void vgpu::exec::sassatom::detail::shared_lanes<unsigned int, vgpu::exec::sassatom::AddStep>
+  2.06%       34  vgpu::exec::memcount::sass_bank_passes_widened
+  2.00%       33  vgpu::sass::h_isetp
+  2.00%       33  void vgpu::sass::h_shared<true>
+  1.81%       30  vgpu::simd::avx2_impl::lane_unary_k
+  1.63%       27  vgpu::sass::h_s2r
+  1.63%       27  vgpu::sass::h_sel
+  1.57%       26  vgpu::sass::h_lea
+  1.45%       24  vgpu::simd::avx2_impl::shf_k
+  1.39%       23  vgpu::sass::Runner::execute
+  1.33%       22  vgpu::sass::h_mov
+  1.21%       20  vgpu::sass::Runner::exec_mem(vgpu::sass::Block&, vgpu::sass::Warp&, vgpu::sass::Instr const&, unsign
+  1.09%       18  lockstep_worker<vgpu::sass::Block, vgpu::sass::Runner::run()::<lambda(unsigned int)>::<lambda(vgpu::
+  1.09%       18  vgpu::sass::h_shf
+  1.03%       17  vgpu::sass::Runner::release_warpsync
+  0.97%       16  unsigned int const* vgpu::sass::tier_dyn<false>
+  0.97%       16  vgpu::simd::avx2_impl::blend_m_k
+  0.91%       15  vgpu::sass::Runner::exec_control
+  0.91%       15  vgpu::simd::avx2_impl::bank_window_k
+  0.91%       15  vgpu::sass::Runner::read32_slow
+  0.85%       14  vgpu::simd::avx2_impl::imad_k
+  0.67%       11  vgpu::exec::memcount::detail::sectors_fast
+  0.67%       11  vgpu::sass::h_uiadd3
+  0.60%       10  vgpu::MemoryManager::store_batch_in
+  0.60%       10  vgpu::exec::sasslanes::pick_group_avx2
+  0.60%       10  vgpu::sass::Runner::tier_ctl
+  0.54%        9  vgpu::simd::avx2_impl::iadd3x_k
+  0.54%        9  vgpu::simd::avx2_impl::warp_rows_k
+  0.48%        8  vgpu::simd::avx2_impl::iadd3_k
+  0.48%        8  vgpu::sass::Warp::reg
+  0.42%        7  vgpu::exec::memcount::sass_bank_passes_offsets_kept
+  0.42%        7  vgpu::sass::h_vote
+  0.36%        6  bool vgpu::sass::tier_shared_wide<false>
+  0.36%        6  init_block
+  0.36%        6  vgpu::sass::h_unary
+  0.36%        6  void vgpu::sass::h_global<true>

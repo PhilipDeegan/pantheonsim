@@ -1,0 +1,124 @@
+polybench/2DCONV                            705.8 ms rc=0
+polybench/2MM                            TIMEOUT
+polybench/3DCONV                            672.2 ms rc=0
+polybench/3MM                            TIMEOUT
+polybench/ADI                               213.5 ms rc=0
+polybench/ATAX                             1429.1 ms rc=0
+polybench/BICG                              278.9 ms rc=0
+polybench/CORR                           TIMEOUT
+polybench/COVAR                          TIMEOUT
+polybench/FDTD-2D                        TIMEOUT
+polybench/GEMM                              730.5 ms rc=0
+polybench/GEMVER                            646.4 ms rc=0
+polybench/GESUMMV                           384.5 ms rc=0
+polybench/GRAMSCHM                       TIMEOUT
+polybench/JACOBI1D                          930.9 ms rc=0
+polybench/JACOBI2D                          535.4 ms rc=0
+polybench/LU                             TIMEOUT
+polybench/MVT                              1549.8 ms rc=0
+polybench/SYR2K                          TIMEOUT
+polybench/SYRK                           TIMEOUT
+rodinia/backprop                             34.6 ms rc=0
+rodinia/gaussian                             11.0 ms rc=0
+rodinia/lud                                  31.5 ms rc=0
+rodinia/needle                                8.1 ms rc=0
+rodinia/pathfinder                            5.5 ms rc=0
+rodinia/srad_v2                               4.4 ms rc=0
+rodinia/particlefilter_float                 81.4 ms rc=0
+rodinia/sc_gpu                              652.5 ms rc=0
+rodinia/hotspot                            1001.0 ms rc=0
+rodinia/bfs                                   7.9 ms rc=0
+rodinia/nn                                   12.5 ms rc=0
+rodinia/lavaMD                             1758.2 ms rc=0
+hecbench/adam-cuda                           22.8 ms rc=0
+hecbench/aidw-cuda                       TIMEOUT
+hecbench/aligned-types-cuda              TIMEOUT
+hecbench/aobench-cuda                       578.6 ms rc=0
+hecbench/aop-cuda                          1791.2 ms rc=0
+hecbench/asmooth-cuda                       220.4 ms rc=0
+hecbench/asyncAllocation-cuda              3023.2 ms rc=0
+hecbench/atan2-cuda                          17.7 ms rc=0
+hecbench/atomicAggregate-cuda              3757.9 ms rc=0
+hecbench/atomicCost-cuda                 TIMEOUT
+hecbench/atomicIntrinsics-cuda              178.7 ms rc=0
+hecbench/atomicPerf-cuda                   1060.8 ms rc=0
+hecbench/atomicReduction-cuda            TIMEOUT
+hecbench/attention-cuda                      22.2 ms rc=0
+hecbench/axpby-cuda                         401.2 ms rc=0
+hecbench/babelstream-cuda                TIMEOUT
+hecbench/background-subtract-cuda             2.4 ms rc=0
+hecbench/backprop-cuda                        8.9 ms rc=0
+hecbench/base64e-cuda                    TIMEOUT
+hecbench/bgmv-cuda                           10.2 ms rc=0
+hecbench/bh-cuda                            735.3 ms rc=0
+hecbench/bilateral-cuda                    1252.9 ms rc=0
+hecbench/binomial-cuda                   TIMEOUT
+hecbench/bitonic-sort-cuda                  251.5 ms rc=0
+hecbench/black-scholes-cuda              TIMEOUT
+hecbench/blockAccess-cuda                    12.6 ms rc=0
+hecbench/fpdc-cuda                       TIMEOUT
+hecbench/perplexity-cuda                    378.0 ms rc=0
+hecbench/radixsort2-cuda                   1983.3 ms rc=0
+hecbench/s3d-cuda                           378.2 ms rc=0
+hecbench/shmembench-cuda                 TIMEOUT
+hecbench/silu-cuda                          445.1 ms rc=0
+hecbench/sortKV-cuda                        170.9 ms rc=0
+hecbench/zerocopy-cuda                   TIMEOUT
+samples/asyncAPI                            172.0 ms rc=0
+samples/clock                                 3.6 ms rc=0
+samples/cudaOpenMP                            2.6 ms rc=0
+samples/fp16ScalarProduct                    18.1 ms rc=0
+samples/mergeSort                        TIMEOUT
+samples/simpleAWBarrier                     513.4 ms rc=0
+samples/simpleAssert                          2.9 ms rc=0
+samples/simpleAtomicIntrinsics                3.8 ms rc=0
+samples/simpleCallback                       12.5 ms rc=0
+samples/simpleCooperativeGroups               3.0 ms rc=0
+samples/simpleCubemapTexture                  6.6 ms rc=0
+samples/simpleHyperQ                     TIMEOUT
+samples/simpleIPC                           325.1 ms rc=0
+samples/simpleLayeredTexture                194.9 ms rc=0
+samples/simpleMultiGPU                      421.9 ms rc=0
+samples/simpleOccupancy                      24.5 ms rc=0
+samples/simplePrintf                          3.5 ms rc=0
+samples/simpleSurfaceWrite                  613.3 ms rc=0
+samples/simpleTemplates                       3.6 ms rc=0
+samples/simpleVoteIntrinsics                  2.8 ms rc=0
+samples/simpleZeroCopy                       30.1 ms rc=0
+samples/template                              3.5 ms rc=0
+samples/vectorAdd                             4.6 ms rc=0
+samples/MC_EstimatePiInlineP               1720.3 ms rc=0
+samples/MC_EstimatePiP                        0.8 ms rc=127
+samples/MC_SingleAsianOptionP              2141.7 ms rc=0
+samples/convolutionSeparable             TIMEOUT
+samples/dct8x8                           TIMEOUT
+samples/histogram                        TIMEOUT
+samples/inlinePTX                             3.5 ms rc=0
+samples/interval                         TIMEOUT
+samples/radixSortThrust                  TIMEOUT
+samples/reduction                        TIMEOUT
+samples/scalarProd                           31.3 ms rc=0
+samples/segmentationTreeThrust           TIMEOUT
+samples/shfl_scan                            95.2 ms rc=0
+samples/sortingNetworks                  TIMEOUT
+samples/streamOrderedAllocation             275.3 ms rc=0
+samples/threadFenceReduction                322.2 ms rc=0
+samples/StreamPriorities                   1949.1 ms rc=0
+samples/bf16TensorCoreGemm               TIMEOUT
+samples/binaryPartitionCG                    11.0 ms rc=0
+samples/cdpBezierTessellation                 7.7 ms rc=0
+samples/cdpQuadtree                           8.2 ms rc=0
+samples/cdpSimplePrint                        4.1 ms rc=0
+samples/cdpSimpleQuicksort                    4.5 ms rc=0
+samples/cudaTensorCoreGemm               TIMEOUT
+samples/immaTensorCoreGemm                 2719.0 ms rc=0
+samples/jacobiCudaGraphs                 TIMEOUT
+samples/newdelete                             5.5 ms rc=0
+samples/ptxjit                                3.3 ms rc=0
+samples/simpleCudaGraphs                   1748.7 ms rc=0
+samples/tf32TensorCoreGemm               TIMEOUT
+samples/warpAggregatedAtomicsCG            2089.9 ms rc=0
+samples/LargeKernelParameter                222.8 ms rc=0
+samples/alignedTypes                     TIMEOUT
+samples/cudaGraphsPerfScaling                 5.6 ms rc=0
+samples/transpose                        TIMEOUT

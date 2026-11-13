@@ -1,0 +1,45 @@
+diff --git a/src/sass/exec.cpp b/src/sass/exec.cpp
+index f5b7414a..5b04aaef 100644
+--- a/src/sass/exec.cpp
++++ b/src/sass/exec.cpp
+@@ -33,6 +33,8 @@ asm(".pushsection .text,\"ax\",@progbits\n.p2align 12\n.popsection");
+ #include <bit>
+ #include <bitset>
+ #include <cerrno>
++#include <chrono>
++#include <cstdlib>
+ #include <cfenv>
+ #include <cmath>
+ #include <cstdio>
+@@ -2258,7 +2260,30 @@ exec::LaunchStats launch(const Module& m, const std::string& kernel, const exec:
+   {
+     Runner r(m, m.cubin.kernels[it->second], cfg, args, mem, profile);
+     r.set_launches(&dl);
+-    stats = r.run();
++    // sp47 ceiling measurement (not for merge): one line per launch, to the file VGPU_SP47_LOG names.
++    static const char* sp47_path = std::getenv("VGPU_SP47_LOG");
++    if (!sp47_path) {
++      stats = r.run();
++    } else {
++      const auto t0 = std::chrono::steady_clock::now();
++      stats = r.run();
++      const uint64_t ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
++      bool heap = false;
++      for (const std::string& e : m.cubin.externs)
++        if (e == "malloc" || e == "free") heap = true;
++      const unsigned poll = cfg.resident_blocks ? kernel_poll_kinds(m, m.cubin.kernels[it->second]) : 0;
++      const bool clustered = cfg.cluster[0] * cfg.cluster[1] * cfg.cluster[2] > 1;
++      static std::mutex sp47_mu;
++      std::lock_guard<std::mutex> g(sp47_mu);
++      if (FILE* f = std::fopen(sp47_path, "a")) {
++        std::fprintf(f, "sass\t%s\t%llu\t%u\t%llu\t%llu\t%llu\t%d\t%d\t%d\t%d\t%u\t%d\t%d\t%zu\n", kernel.c_str(),
++                     (unsigned long long)(uint64_t{cfg.grid[0]} * cfg.grid[1] * cfg.grid[2]), cfg.block[0] * cfg.block[1] * cfg.block[2],
++                     (unsigned long long)ns, (unsigned long long)stats.instructions, (unsigned long long)stats.atomics, cfg.cooperative ? 1 : 0,
++                     clustered ? 1 : 0, heap ? 1 : 0, m.device_launches ? 1 : 0, poll,
++                     memo::g_smid_by_worker.load(std::memory_order_relaxed) ? 1 : 0, cfg.textures ? 1 : 0, m.cubin.externs.size());
++        std::fclose(f);
++      }
++    }
+   }
+   if (!dl.queue.empty() || !dl.by_buffer.empty() || dl.extra.blocks) {
+     ChildRunner runner{m, cfg, mem, profile, &stats};

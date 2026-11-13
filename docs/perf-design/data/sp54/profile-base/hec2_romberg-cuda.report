@@ -1,0 +1,21 @@
+total samples 2604
+ 12.60%      328  [libcudart.so.13] void vgpu::simd::avx2_impl::dop_avx2_t<2u, false>
+  9.06%      236  [libcudart.so.13] void vgpu::sass::h_global<false>
+  8.18%      213  [libcudart.so.13] vgpu::MemoryManager::load_scalar
+  7.45%      194  [libcudart.so.13] step_warp
+  5.57%      145  [libcudart.so.13] vgpu::sass::h_dop
+  4.45%      116  [libcudart.so.13] vgpu::MemoryManager::load_batch16
+  4.34%      113  [libcudart.so.13] vgpu::sass::Runner::fast_float
+  4.30%      112  [libcudart.so.13] vgpu::sass::Runner::exec_int
+  3.26%       85  [libcudart.so.13] vgpu::sass::h_mov
+  2.50%       65  [libm.so.6] scalbnf64
+  2.46%       64  [libcudart.so.13] vgpu::simd::avx2_impl::dop_m_k
+  2.46%       64  [libcudart.so.13] vgpu::sass::tier_dyn64
+  2.15%       56  [libm.so.6] modff32x
+  2.00%       52  [libcudart.so.13] void vgpu::sass::h_local<false>
+  1.77%       46  [libcudart.so.13] vgpu::sass::tier_issue
+  1.73%       45  [libcudart.so.13] vgpu::sass::Runner::read32_slow
+  1.57%       41  [libcudart.so.13] vgpu::sass::h_fsel
+  1.42%       37  [libcudart.so.13] vgpu::sass::Runner::cbank32
+  1.34%       35  [libcudart.so.13] vgpu::sass::h_ffma
+  1.34%       35  [libcudart.so.13] vgpu::exec::memcount::detail::sectors_fast

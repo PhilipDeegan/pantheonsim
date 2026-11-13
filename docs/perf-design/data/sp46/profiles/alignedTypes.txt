@@ -1,0 +1,26 @@
+samples 27744
+ 16.62% libcudart.so.13.0:vgpu::(anonymous namespace)::run_out
+ 11.49% libcudart.so.13.0:void vgpu::sass::(anonymous namespace)::h_global<false>
+  7.97% libcudart.so.13.0:void vgpu::sass::(anonymous namespace)::h_global<true>
+  7.80% libcudart.so.13.0:vgpu::MemoryManager::load_batch
+  5.73% libcudart.so.13.0:vgpu::sass::(anonymous namespace)::h_imad32
+  5.20% libcudart.so.13.0:vgpu::sass::(anonymous namespace)::Runner::step_warp
+  4.88% libcudart.so.13.0:vgpu::MemoryManager::store_strided
+  4.34% libcudart.so.13.0:vgpu::sass::(anonymous namespace)::h_imad_wide
+  4.15% libcudart.so.13.0:vgpu::simd::avx2_impl::warp_rows_k
+  4.06% libcudart.so.13.0:vgpu::simd::avx2_impl::iadd3x_k
+  3.57% libcudart.so.13.0:void vgpu::simd::avx2_impl::imad_wide_avx2<true, false, false>
+  2.41% libcudart.so.13.0:vgpu::MemoryManager::run_allocation
+  2.30% libcudart.so.13.0:vgpu::sass::(anonymous namespace)::h_iadd3x
+  1.91% libcudart.so.13.0:vgpu::sass::(anonymous namespace)::count_run
+  1.82% libcudart.so.13.0:vgpu::simd::avx2_impl::warp_run_k
+  1.72% libcudart.so.13.0:vgpu::MemoryManager::store_run
+  1.48% libcudart.so.13.0:vgpu::(anonymous namespace)::run_in
+  1.21% libcudart.so.13.0:vgpu::sass::(anonymous namespace)::h_iadd3
+  1.18% libcudart.so.13.0:vgpu::sass::(anonymous namespace)::tier_issue
+  0.97% libcudart.so.13.0:vgpu::MemoryManager::write
+  0.91% libcudart.so.13.0:vgpu::MemoryManager::load_run
+  0.76% libcudart.so.13.0:vgpu::MemoryManager::resolve_bulk
+  0.73% alignedTypes
+  0.72% libcudart.so.13.0:unsigned int const* vgpu::sass::(anonymous namespace)::tier_dyn<false>
+  0.69% libcudart.so.13.0:vgpu::simd::avx2_impl::iadd3_k

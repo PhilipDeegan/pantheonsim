@@ -7,6 +7,11 @@ release says what runs and what it produces, never how fast a real GPU would run
 
 ## Unreleased
 
+- SASS engine on hosts with AVX-512 (F/BW/DQ/VL and VNNI): binary64 add, multiply and fused multiply-add (`DADD`, `DMUL`, `DFMA`) run
+  sixteen lanes to a step instead of four. Programs that compute in `double` run 3 to 39 % faster on a Zen 4 host (eight of nine
+  measured gain 5 % or more: lavaMD 1.18x, RSBench 1.39x, LULESH 1.07x); single-precision programs and hosts without AVX-512 are
+  unchanged, the results are the same bits, and `VGPU_SIMD=avx2` keeps the 256-bit kernel. New unit test `test_lanes512` (skipped on
+  a host without AVX-512).
 - Tier 2 (`VGPU_JIT=1`, still off by default): a code section the cache has nothing for no longer runs in the counting loop all the
   way to its compile threshold. It waits on the plain run loop, where only the warp instructions of each call are added up, and is
   counted region by region again for the last `VGPU_JIT_PROFILE` (4,000,000) instructions before the threshold. Programs that never

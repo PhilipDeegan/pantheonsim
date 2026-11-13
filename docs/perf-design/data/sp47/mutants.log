@@ -1,0 +1,24 @@
+write_conflict_ignored           killed by default, tier0, fastpath0
+read_of_written_ignored          killed by default, tier0, fastpath0
+readers_not_merged               killed by default, tier0, fastpath0
+no_write_back                    killed by default, tier0, fastpath0
+nothing_kept                     killed by default, tier0, fastpath0
+kept_first_word_of_a_run_only    killed by default, tier0, fastpath0
+shadow_not_cleared               killed by default, tier0, fastpath0
+host_store_allowed               killed by default, tier0, fastpath0
+hook_store_batch                 killed by default, tier0, fastpath0
+hook_load_run                    killed by default, tier0, fastpath0
+hook_store_scalar                killed by default, tier0, fastpath0
+hook_load_scalar                 killed by default, tier0, fastpath0
+window_not_declined              killed by default, tier0, fastpath0
+stopped_trial_kept               killed by default, tier0, fastpath0
+blocks_not_run_again_from_zero   killed by default, tier0, fastpath0
+counters_not_summed              killed by default, tier0, fastpath0
+smid_not_stopped                 killed by default, tier0, fastpath0
+failed_block_not_a_stop          SURVIVED
+no_hold_after_a_stop             killed by default, tier0, fastpath0
+tried_without_blocks_in_order    SURVIVED
+(no mutant)                      passes
+--- after the merge of origin/main 7b90cee5, with the test a_launch_whose_blocks_fail_without_touching_memory_fails_as_the_run_in_order_does (server3) ---
+failed_block_not_a_stop          killed by default, tier0, fastpath0
+(no mutant)                      passes
