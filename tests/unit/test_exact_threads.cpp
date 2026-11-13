@@ -1250,7 +1250,8 @@ const MemoryManager::SpecPlan& by_word_plan() {
 // block, on the same worker and on another, reads or writes at every byte of the line and of the words on either side of it, with
 // lengths that stay in a word, cross words and cross into the next line. It is stopped exactly where the words stop it (a read at a
 // word block 0 wrote; a write at a word block 0 read or wrote), never coarsely, and before it touched a byte; where it is not
-// stopped the line is noted by word from then on, and block 0 and block 1 go on in it by the word rules.
+// stopped the line is noted by word from then on, and block 0 and block 1 go on in it by the word rules. The same in a page whose
+// lines keep being written out (round sp62: four lines of the page written out first), where the line goes to words at once.
 VTEST(a_second_block_at_every_byte_of_a_line_another_block_holds_is_stopped_exactly_where_the_words_stop_it) {
   Paged d(3);
   const uint64_t line = d.p + 1024;   // (a multiple of 64 from the device's base)
@@ -1266,13 +1267,24 @@ VTEST(a_second_block_at_every_byte_of_a_line_another_block_holds_is_stopped_exac
     return false;
   };
   unsigned went_on = 0, stopped_n = 0;
+  for (const bool demoted : {false, true})
   for (const unsigned other : {0u, 1u}) {
     for (uint64_t at = line - 8; at < line + 72; ++at) {
       for (const uint64_t len : {uint64_t{1}, uint64_t{2}, uint64_t{4}, uint64_t{5}, uint64_t{8}, uint64_t{17}}) {
         for (const bool writes : {false, true}) {
           const std::string where = std::string(writes ? "write" : "read") + " at line " + (at >= line ? "+" : "-") +
-                                    std::to_string(at >= line ? at - line : line - at) + ", " + std::to_string(len) + " bytes, worker " + std::to_string(other);
+                                    std::to_string(at >= line ? at - line : line - at) + ", " + std::to_string(len) + " bytes, worker " + std::to_string(other) +
+                                    (demoted ? ", lines of the page written out" : "");
           Trial t(d.mem, &by_word_plan());
+          if (demoted) {
+            for (uint64_t i = 0; i < 4; ++i) {   // (four lines at the page's start, far from `line`: each written out by its second reader)
+              t.as(0, 6);
+              VCHECK(!d.rd(d.p + 64 * i, 4));
+              t.as(1, 7);
+              VCHECK(!d.rd(d.p + 64 * i + 4, 4));
+            }
+            t.as(0, 0);
+          }
           for (const uint64_t w : read_words) VCHECK(!d.rd(line + 4 * w, 4));
           for (const uint64_t w : written_words) VCHECK(!d.wr(line + 4 * w, 4));
           t.as(other, 1);
@@ -1297,6 +1309,7 @@ VTEST(a_second_block_at_every_byte_of_a_line_another_block_holds_is_stopped_exac
           const MemoryManager::SpecOutcome out = t.end();
           VCHECK(!out.coarse);
           VCHECK(!out.committed);   // (every path above ends in a stop)
+          VCHECK_EQ(out.stats.lines_straight > 0, demoted);
           ++(got ? stopped_n : went_on);
           if (d.all() != d.init) throw vtest::Failure("a stopped trial was not undone to the byte: " + where);
           d.put_back();
@@ -1365,6 +1378,72 @@ VTEST(a_line_one_block_touched_is_a_record_and_a_line_two_blocks_touched_is_note
   }
 }
 
+// A page whose lines keep being written out (round sp62): once four of its lines have been written out to words, a line of the page
+// that nobody has touched goes to words at once (no record, no writing out, and only the words a block takes are kept), and is noted
+// exactly as the words note it; a line of another page is still a record; and the count starts again at the next trial.
+VTEST(a_page_whose_lines_keep_being_written_out_notes_its_untouched_lines_by_word_at_once) {
+  Paged d(3);
+  const auto out4 = [&](uint64_t page, Trial& t) {
+    for (uint64_t i = 0; i < 4; ++i) {
+      t.as(0, 6);
+      VCHECK(!d.rd(page + 64 * i, 4));
+      t.as(1, 7);
+      VCHECK(!d.rd(page + 64 * i + 4, 4));
+    }
+  };
+  {
+    Trial t(d.mem, &by_word_plan());
+    out4(d.p, t);
+    t.as(0, 2);
+    VCHECK(!d.wr(d.p + 64 * 9 + 12, 4));   // an untouched line of the page: to words at once, and four bytes kept, not 64
+    VCHECK(!d.rd(d.p + 64 * 10 + 8, 4));   // another, read
+    VCHECK(!d.wr(d.p + kPage + 8, 4));      // a line of the next page: a record (and kept whole)
+    t.as(1, 1);
+    VCHECK(!d.rd(d.p + 64 * 10 + 8, 4));    // (several readers: by word, as the words say)
+    VCHECK(!d.wr(d.p + 64 * 9 + 16, 4));    // (the next word of block 2's line: free)
+    VCHECK(!d.wr(d.p + 64 * 10 + 12, 4));   // (beside block 2's read word: free)
+    const MemoryManager::SpecOutcome out = t.end();
+    VCHECK(out.committed);
+    VCHECK_EQ(out.stats.lines_by_word, uint64_t{4});
+    VCHECK_EQ(out.stats.lines_straight, uint64_t{2});
+    VCHECK_EQ(out.stats.lines_one_block, uint64_t{1});
+    VCHECK_EQ(out.kept_bytes, uint64_t{4 + 64 + 4 + 4});
+    d.put_back();
+  }
+  // The same, and block 1 at block 2's words: stopped where the words stop it, and undone.
+  for (const int probe : {0, 1, 2}) {
+    Trial t(d.mem, &by_word_plan());
+    out4(d.p, t);
+    t.as(0, 2);
+    VCHECK(!d.wr(d.p + 64 * 9 + 12, 4));
+    VCHECK(!d.rd(d.p + 64 * 10 + 8, 4));
+    t.as(1, 1);
+    const bool got = probe == 0 ? d.rd(d.p + 64 * 9 + 12, 4) : probe == 1 ? d.wr(d.p + 64 * 9 + 12, 4) : d.wr(d.p + 64 * 10 + 8, 4);
+    VCHECK(got);
+    const MemoryManager::SpecOutcome out = t.end();
+    VCHECK(!out.committed);
+    VCHECK(!out.coarse);
+    VCHECK(d.all() == d.init);
+  }
+  // Three lines written out are not enough, and the next trial starts from nothing: its lines are records again.
+  {
+    Trial t(d.mem, &by_word_plan());
+    for (uint64_t i = 0; i < 3; ++i) {
+      t.as(0, 6);
+      VCHECK(!d.rd(d.p + 64 * i, 4));
+      t.as(1, 7);
+      VCHECK(!d.rd(d.p + 64 * i + 4, 4));
+    }
+    t.as(0, 2);
+    VCHECK(!d.wr(d.p + 64 * 9 + 12, 4));
+    const MemoryManager::SpecOutcome out = t.end();
+    VCHECK(out.committed);
+    VCHECK_EQ(out.stats.lines_straight, uint64_t{0});
+    VCHECK_EQ(out.kept_bytes, uint64_t{64});
+    d.put_back();
+  }
+}
+
 // A store over a line of which the block holds some words already, and into the next line and page: a line the block alone
 // holds is kept whole at the block's first write in it and never again; in a line another block came to first each word's bytes
 // are kept once, when it is taken; and all of them go back.
@@ -1414,7 +1493,7 @@ VTEST(random_blocks_in_three_lines_against_a_model_of_the_word_states) {
     seed ^= seed << 13, seed ^= seed >> 7, seed ^= seed << 17;
     return seed % n;
   };
-  unsigned kept = 0, stopped_n = 0, by_word_lines = 0;
+  unsigned kept = 0, stopped_n = 0, by_word_lines = 0, demoted_n = 0;
   for (int round = 0; round < 1500; ++round) {
     const bool apart = rnd(3) != 0;   // mostly each block writes the words of its own residue: the blocks' words interleave in every line
     const unsigned mode = static_cast<unsigned>(rnd(3));   // by word from the start; by page; the allocation by word
@@ -1424,6 +1503,19 @@ VTEST(random_blocks_in_three_lines_against_a_model_of_the_word_states) {
     std::vector<uint32_t> state(span / 4, 0);
     std::vector<uint8_t> expect = d.init;
     Trial t(d.mem, &plan);
+    // Every other round noted by word, both pages have four lines written out first (round sp62), far from the lines of the
+    // test: their untouched lines then go to words at once.
+    const bool demoted = mode != 1 && rnd(2);
+    if (demoted) {
+      for (const uint64_t page : {d.p, d.p + kPage + 1024})
+        for (uint64_t i = 0; i < 4; ++i) {
+          t.as(0, 6);
+          VCHECK(!d.rd(page + 64 * i, 4));
+          t.as(1, 7);
+          VCHECK(!d.rd(page + 64 * i + 4, 4));
+        }
+      demoted_n += 1;
+    }
     const size_t n_ops = 4 + rnd(24);
     int stopped_at = -1;
     bool early = false;
@@ -1471,11 +1563,12 @@ VTEST(random_blocks_in_three_lines_against_a_model_of_the_word_states) {
     if (d.all() != (stopped_at < 0 ? expect : d.init)) throw vtest::Failure("round " + std::to_string(round) + ": the bytes are not the model's");
     d.put_back();
     ++(stopped_at < 0 ? kept : stopped_n);
-    by_word_lines += static_cast<unsigned>(out.stats.lines_by_word);
+    by_word_lines += static_cast<unsigned>(out.stats.lines_by_word - (demoted ? 8 : 0) + out.stats.lines_straight);
   }
   VCHECK(kept >= 60);
   VCHECK(stopped_n >= 100);
-  VCHECK(by_word_lines >= 300);   // (the lines were met by several blocks: the test is of that)
+  VCHECK(by_word_lines >= 300);   // (the lines were met by several blocks, or went to words at once: the test is of that)
+  VCHECK(demoted_n >= 200);
 }
 
 // A line being written out to its words while its block goes on in it. Thread A (block 0) takes the even words of a line one by

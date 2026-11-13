@@ -1880,11 +1880,11 @@ std::atomic<uint64_t> g_exact_trials{0}, g_exact_committed{0}, g_exact_stopped{0
   std::fprintf(f,
                "%s\tblocks=%llu\tthreads=%u\tattempt=%u\tend=%s\thooks=%llu\tpages=%llu\tpages_read=%llu\tpages_shared=%llu\tpages_by_word=%llu"
                "\tpages_coarse=%llu\tpage_looks=%llu\twords_read=%llu\twords_read_first=%llu\twords_read_shared=%llu\twords_written=%llu"
-               "\twords_written_first=%llu\tkeeps=%llu\tkept_bytes=%llu\truns_known=%llu\tword_pages=%llu\tlines_by_word=%llu\tlines_one_block=%llu\n",
+               "\twords_written_first=%llu\tkeeps=%llu\tkept_bytes=%llu\truns_known=%llu\tword_pages=%llu\tlines_by_word=%llu\tlines_one_block=%llu\tlines_straight=%llu\n",
                kernel.c_str(), u(units), threads, attempt, out.committed ? "committed" : out.coarse ? "coarse" : "stopped", u(s.hooks),
                u(out.shadow_pages), u(s.pages_read), u(s.pages_shared), u(s.pages_by_word), u(s.pages_coarse), u(s.page_looks), u(s.words_read),
                u(s.words_read_first), u(s.words_read_shared), u(s.words_written), u(s.words_written_first), u(s.keeps), u(out.kept_bytes),
-               u(s.runs_known), u(s.word_pages), u(s.lines_by_word), u(s.lines_one_block));
+               u(s.runs_known), u(s.word_pages), u(s.lines_by_word), u(s.lines_one_block), u(s.lines_straight));
   std::fclose(f);
 }
 }  // namespace

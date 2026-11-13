@@ -142,7 +142,16 @@ class MemoryManager::Spec {
   struct Page {
     Line lines[kPageLines];
     Word words[kPageWords];
+    uint32_t outs;   // lines of the page written out to words in this trial (atomic builtins; tune_demote_at)
   };
+  // Two neighbouring words of a line (the first at an even index, so the pair is aligned), the lower index in the low half. (The
+  // words are plain 32-bit values moved only by the atomic builtins, so two can be read and taken as one 64-bit value.)
+  typedef uint64_t __attribute__((may_alias)) Pair;
+  static Pair* pair_at(Word* first) { return reinterpret_cast<Pair*>(first); }
+  // TUNING (round sp62, removed before the end): VGPU_EXACT_TUNE=<demote_at>,<pairs>
+  uint32_t tune_demote_at = 4;
+  bool tune_pairs = true;
+  bool lines_to_words(const Page* page) const { return tune_demote_at && __atomic_load_n(&page->outs, __ATOMIC_RELAXED) >= tune_demote_at; }
   static constexpr size_t kPoolPages = 65536;      // shadow pages kept between trials (288 MiB of host memory at most)
   static constexpr uint64_t kKeepLimit = uint64_t{1} << 30;   // bytes one worker may keep for undoing before the trial stops
   static constexpr size_t kSeen = 256;             // pages a worker remembers it may read without a look at the shadow
@@ -371,6 +380,7 @@ class MemoryManager::Spec {
       if (i == kLineWords / 2 - 1) VGPU_SPEC_HOOK(kOutHalf);
     }
     line.store(kLineByWord);
+    __atomic_fetch_add(&page->outs, 1, __ATOMIC_RELAXED);
     ++w.st.lines_by_word;
     v = kLineByWord;
   }
@@ -378,10 +388,27 @@ class MemoryManager::Spec {
   // The words `m` (a bit each) of a line noted by word, for a read: the four states of a word.
   [[gnu::always_inline]] void read_words(Worker& w, Word* words, uint32_t m) {
     const uint32_t tag = w.tag;
+    const auto readable = [tag](uint32_t v) { return v == kMany || v == tag || v == (tag | kWrite); };
     for (; m; m &= m - 1) {
-      Word& word = words[__builtin_ctz(m)];
+      const unsigned i = static_cast<unsigned>(__builtin_ctz(m));
+      Word& word = words[i];
+      if (!(i & 1) && (m >> (i + 1) & 1) && tune_pairs) {
+        // Two words at once: both readable already, or both untouched and taken by one compare-and-swap; anything else one at a
+        // time, below (the 64-bit compare-and-swap succeeds only if both still hold what was judged).
+        Pair* two = pair_at(&word);
+        uint64_t v2 = __atomic_load_n(two, __ATOMIC_ACQUIRE);
+        if (readable(static_cast<uint32_t>(v2)) && readable(static_cast<uint32_t>(v2 >> 32))) {
+          m &= ~(2u << i);
+          continue;
+        }
+        if (v2 == 0 && __atomic_compare_exchange_n(two, &v2, uint64_t{tag} | uint64_t{tag} << 32, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+          w.st.words_read_first += 2;
+          m &= ~(2u << i);
+          continue;
+        }
+      }
       uint32_t v = word.load(std::memory_order_acquire);
-      if (v == kMany || v == tag || v == (tag | kWrite)) [[likely]] continue;
+      if (readable(v)) [[likely]] continue;
       for (;;) {
         if (v == 0) {
           if (word.compare_exchange_weak(v, tag, std::memory_order_acq_rel)) {
@@ -434,6 +461,12 @@ class MemoryManager::Spec {
         return;
       }
       if (v == 0) {
+        if (lines_to_words(page)) [[unlikely]] {
+          // A page whose lines keep being written out: the line goes to words at once (its words are all untouched, as its record is).
+          if (!line.take(v, kLineByWord)) continue;
+          ++w.st.lines_straight;
+          return read_words(w, page->words + l * kLineWords, m);
+        }
         VGPU_SPEC_HOOK(kFirstBefore);
         if (!line.take(v, uint64_t{tag} | as_read(m))) continue;
         w.st.words_read_first += static_cast<uint64_t>(__builtin_popcount(m));
@@ -449,9 +482,27 @@ class MemoryManager::Spec {
     const uint32_t tag = w.tag, mine = tag | kWrite;
     Word* words = page->words + l * kLineWords;
     uint32_t taken = 0;
+    const uint64_t mine2 = uint64_t{mine} | uint64_t{mine} << 32;
     for (; m; m &= m - 1) {
       const unsigned i = static_cast<unsigned>(__builtin_ctz(m));
       Word& word = words[i];
+      if (!(i & 1) && (m >> (i + 1) & 1) && tune_pairs) {
+        // Two words at once: both the block's already, or both free for it (untouched, or read by it alone) and taken by one
+        // compare-and-swap; anything else one at a time, below.
+        Pair* two = pair_at(&word);
+        uint64_t v2 = __atomic_load_n(two, __ATOMIC_ACQUIRE);
+        if (v2 == mine2) {
+          m &= ~(2u << i);
+          continue;
+        }
+        const uint32_t a = static_cast<uint32_t>(v2), b = static_cast<uint32_t>(v2 >> 32);
+        if ((a == 0 || a == tag) && (b == 0 || b == tag) && __atomic_compare_exchange_n(two, &v2, mine2, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+          w.st.words_written_first += 2;
+          taken |= 3u << i;
+          m &= ~(2u << i);
+          continue;
+        }
+      }
       uint32_t v = word.load(std::memory_order_acquire);
       for (;;) {
         if (v == mine) break;
@@ -568,6 +619,11 @@ void MemoryManager::spec_begin(unsigned workers, const SpecPlan* plan) {
   s.size_for(va_base_, high_water_va_ - va_base_);
   s.host_maps = memo_host_maps();
   s.plan_pages = plan ? plan->pages : true;
+  if (const char* t = std::getenv("VGPU_EXACT_TUNE")) {   // TUNING (round sp62): <demote_at>,<pairs>
+    s.tune_demote_at = static_cast<uint32_t>(std::strtoul(t, nullptr, 10));
+    const char* c = std::strchr(t, ',');
+    s.tune_pairs = !c || c[1] != '0';
+  }
   s.plan_words.clear();
   if (plan) s.plan_words = plan->by_word;
   s.stopped.store(false, std::memory_order_relaxed);
@@ -615,6 +671,7 @@ void MemoryManager::SpecStats::add(const SpecStats& o) {
   runs_known += o.runs_known;
   lines_by_word += o.lines_by_word;
   lines_one_block += o.lines_one_block;
+  lines_straight += o.lines_straight;
 }
 
 MemoryManager::SpecOutcome MemoryManager::spec_end() {
@@ -664,6 +721,7 @@ MemoryManager::SpecOutcome MemoryManager::spec_end() {
         else ++out.stats.lines_one_block;
       }
       std::memset(static_cast<void*>(page->lines), 0, sizeof(page->lines));
+      page->outs = 0;
       if (s.pool.size() < Spec::kPoolPages) s.pool.push_back(page);
       else std::free(page);
     }
@@ -815,6 +873,13 @@ void MemoryManager::spec_keep(uint64_t addr, uint64_t len) const {
         if (fresh && !line.take(v, v | Spec::as_written(fresh))) continue;   // (it moves under its block only when another writes it out)
         w.st.words_written_first += static_cast<uint64_t>(__builtin_popcount(fresh));
         break;
+      }
+      if (v == 0 && s.lines_to_words(page)) [[unlikely]] {
+        // A page whose lines keep being written out: the line goes to words at once (its words are all untouched, as its record is).
+        if (!line.take(v, Spec::kLineByWord)) continue;
+        ++w.st.lines_straight;
+        v = Spec::kLineByWord;
+        continue;
       }
       if (v == 0 || o == w.tag) {
         // The block's first write in a line nobody else has touched: the line's bytes are kept whole while the record is busy
