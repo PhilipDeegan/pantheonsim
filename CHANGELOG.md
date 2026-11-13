@@ -7,6 +7,12 @@ release says what runs and what it produces, never how fast a real GPU would run
 
 ## Unreleased
 
+- `e2e_sass_jit` (steps shard): a fault run whose compile did not happen (it outlasted its time limit on a loaded runner, or the
+  compiler was killed) no longer fails the comparison with the tier. The JIT's notice on stderr ("pantheonsim: JIT: ... stay on the
+  tier") was the only difference: the fault itself was reported the same, byte for byte, in 72 runs of the tier, the JIT and the JIT
+  without exceptions on an idle and on a loaded machine (pantheonsim #611). The fault runs give a compile 840 s and take a run that
+  could not compile once more; a failure now names the notice or shows the diff, and a compiler killed on its first compile checks the
+  retry.
 - `test_lockstep_look`: `a_block_that_stands_still_is_still_found_out_and_slept_on` no longer depends on how many turns a thread
   takes in 100 ms of wall time, which failed under load and under ThreadSanitizer (pantheonsim #612). `lockstep_worker` takes the
   nap it sleeps between passes as a callable (the engines' sleeps, unchanged); the test counts the naps: the first after the third
