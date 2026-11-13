@@ -13129,7 +13129,7 @@ uint64_t write_dispatch_packet(const Dispatch& d, const Kernel& k, MemoryManager
   put32(12, static_cast<uint32_t>(grid_items(d, 0)));
   put32(16, static_cast<uint32_t>(grid_items(d, 1)));
   put32(20, static_cast<uint32_t>(grid_items(d, 2)));
-  put32(24, k.private_segment);
+  put32(24, std::max(k.private_segment, d.private_segment));
   put32(28, k.group_segment);
   put64(32, d.code_base + k.entry);
   put64(40, d.kernarg);
@@ -13181,7 +13181,8 @@ void set_up_group(Group& group, Machine& m, const Dispatch& d, uint64_t packet, 
   // it needs; the rest get none. The hardware gives it to every lane of a
   // wave, work-item or not: a function saving whole-wave registers turns
   // on every lane, past the group's last work-item too.
-  group.scratch_per_lane = (k.private_segment + 3) & ~3u;
+  // (Dispatch::private_segment: more where the launch asks for it, as ROCm's HIP does for a kernel with a dynamic stack, #585.)
+  group.scratch_per_lane = (std::max(k.private_segment, d.private_segment) + 3) & ~3u;
   group.scratch.assign(static_cast<size_t>(group.scratch_per_lane) * waves_per_group * lanes, 0);
   group.waves.resize(waves_per_group);
   group.id[0] = gx;

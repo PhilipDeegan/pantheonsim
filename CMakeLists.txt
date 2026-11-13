@@ -2044,6 +2044,15 @@ target_compile_definitions(test_amd_gcn_cdna_gaps PRIVATE VGPU_SOURCE_DIR="${CMA
 # Three bugs other programs ran into (issues #578, #579, #580): a negative scratch offset, a scalar load into VCC, a packed constant zero.
 vgpu_unit_test(test_amd_gcn_issues_nov11 amd/tests/unit/test_gcn_issues_nov11.cpp)
 target_compile_definitions(test_amd_gcn_issues_nov11 PRIVATE VGPU_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+# A kernel with a dynamic stack gets the device's stack size of scratch (issue #585): the code object and execute, then a HIP launch.
+vgpu_unit_test(test_amd_gcn_dyn_stack amd/tests/unit/test_gcn_dyn_stack.cpp)
+target_compile_definitions(test_amd_gcn_dyn_stack PRIVATE VGPU_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+add_executable(test_amd_hip_dyn_stack amd/tests/unit/test_hip_dyn_stack.cpp)
+target_link_libraries(test_amd_hip_dyn_stack PRIVATE vgpuhip)
+target_include_directories(test_amd_hip_dyn_stack PRIVATE tests/framework amd/include)
+target_compile_definitions(test_amd_hip_dyn_stack PRIVATE VGPU_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+add_test(NAME test_amd_hip_dyn_stack COMMAND test_amd_hip_dyn_stack)
+set_tests_properties(test_amd_hip_dyn_stack PROPERTIES ENVIRONMENT "VGPU_GPU=amd/mi300x;VGPU_QUIET=1" FAIL_REGULAR_EXPRESSION "FAIL")
 # v_div_fmas / v_div_fixup with the clamp bit or an output modifier (issue #613).
 vgpu_unit_test(test_amd_gcn_div_clamp amd/tests/unit/test_gcn_div_clamp.cpp)
 target_compile_definitions(test_amd_gcn_div_clamp PRIVATE VGPU_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

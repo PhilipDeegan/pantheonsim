@@ -35,6 +35,7 @@ data/asm_div_clamp.gfx90a.o	8502e1a0fdc0ff9f
 data/asm_div_clamp.gfx942.o	17befd168be7c34c
 data/asm_dot_clamp.gfx942.o	6b808558de0b7282
 data/asm_ds_tr.gfx950.o	cd632a50402cd1e2
+data/asm_dyn_stack.gfx942.o	ad07388fc3ed184e
 data/asm_fminmax11.gfx1100.o	186f82fb6abc01b9
 data/asm_fminmax12.gfx1201.o	dad1870abd4be860
 data/asm_hwid.gfx942.o	219502aa1a798adc
