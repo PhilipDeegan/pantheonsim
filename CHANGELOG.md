@@ -7,6 +7,13 @@ release says what runs and what it produces, never how fast a real GPU would run
 
 ## Unreleased
 
+- Peer access: after `cudaDeviceEnablePeerAccess` (or `cuCtxEnablePeerAccess`), a kernel on one simulated device reads, writes and
+  atomically updates the peer device's allocations in place, as on a card (unified addressing). It stopped with `[invalid-pointer]
+  ... (belongs to a different device)` and `cudaErrorIllegalAddress`, so a program that asks `cudaDeviceCanAccessPeer` and takes the
+  direct route when the answer is yes failed (accl-kaust/GPU-IBS on two simulated H100s, pantheonsim #598). Without peer access, or
+  after `cudaDeviceDisablePeerAccess`, the access still faults, as it does on two RTX 3060s (measured). Only an access that missed every
+  allocation of the device looks at the peer; launch caching (`VGPU_MEMO=1`) and host-GPU mode stand aside while a peer link exists.
+  New test `e2e_peer_kernel` (SASS and PTX paths).
 - `e2e_sass_jit` (steps shard): a fault run whose compile did not happen (it outlasted its time limit on a loaded runner, or the
   compiler was killed) no longer fails the comparison with the tier. The JIT's notice on stderr ("pantheonsim: JIT: ... stay on the
   tier") was the only difference: the fault itself was reported the same, byte for byte, in 72 runs of the tier, the JIT and the JIT

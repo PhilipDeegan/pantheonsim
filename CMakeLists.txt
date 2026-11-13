@@ -3365,6 +3365,14 @@ if(TARGET vgpucublas)
       ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
       SKIP_REGULAR_EXPRESSION "^SKIP:"
       TIMEOUT 300)
+    # A kernel reaches a peer device's allocations once peer access is enabled, and faults without it (#598).
+    add_test(NAME e2e_peer_kernel
+             COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_peer_kernel.sh)
+    set_tests_properties(e2e_peer_kernel PROPERTIES
+      DEPENDS "vgpucudart;vgpucuda"
+      ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
+      SKIP_REGULAR_EXPRESSION "^SKIP:"
+      TIMEOUT 300)
   endif()
 
   add_test(NAME e2e_device_functions
