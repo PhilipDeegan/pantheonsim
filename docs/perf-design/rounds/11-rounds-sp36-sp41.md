@@ -1504,7 +1504,7 @@ Read from `src/sass/jit.cpp` and tried with `scripts/failure_modes.sh` (hotspot,
 
 Question: round sp57 left five things between `VGPU_JIT=1` and a default-on JIT besides the product decision and linking's CI: the hook loop before the cache lookup, 1 to 2 ms of per-process setup, the cold run of 3 to 10 s programs (the compile late, or cancelled at exit so that a program shorter than its compile is never warm), a cache with no cap keyed by the build's date, and the notice on standard error. Remove what the data allows, keeping a fix only if the default path is unchanged, the bits are the same in every run, and no program of 0.2 s or more becomes more than 3 % slower. The default is not flipped in this round.
 
-**Answer: four of the five are gone, one is smaller.** Over the 51 programs measured at one thread, `VGPU_JIT=1` cold goes from 0.981 (base build, this round's run) to 0.990, warm is 1.007, a second run 1.005; programs more than 2 % slower cold go from 23 to 10, and of those of 0.2 s or more the only ones left are the compile-bound ones (asyncAllocation, SYRK, gaussian). "Per-process setup" turned out to be the same thing as the first blocker: it is the hook loop on the way to the lookup, not setup, and goes with it. What stays: the first cold run of a program of 3 to 10 s (asyncAllocation 0.89, SYRK 0.92, gaussian 0.93; their second run is 1.00, 1.15 and 0.93 to warm, their third warm), and 2 to 3 % on a few programs of 0.2 to 0.4 s with sections that do reach the lookup (s3d 0.973, sortKV 0.977).
+**Answer: four of the five are gone, one is smaller.** Over the 51 programs measured at one thread, `VGPU_JIT=1` cold goes from 0.981 (base build, this round's run) to 0.990, warm is 1.007, a second run 1.005; programs more than 2 % slower cold go from 23 to 10, and of those of 0.2 s or more the only ones left are the compile-bound ones (asyncAllocation, SYRK, gaussian). "Per-process setup" turned out to be the same thing as the first blocker: it is the hook loop on the way to the lookup, not setup, and goes with it. At the default thread count (18 programs) cold goes from 0.912 to 0.960, but a second run is no better than a cold one there: no compile finishes before such a program ends (below). What stays: the first cold run of a program of 3 to 10 s (asyncAllocation 0.89, SYRK 0.92, gaussian 0.93; their second run is 1.00, 1.15 and 0.93 to warm, their third warm), and 2 to 3 % on a few programs of 0.2 to 0.4 s with sections that do reach the lookup (s3d 0.973, sortKV 0.977).
 
 Host: server3 (Ryzen 7 PRO 8840U, 8 cores / 16 threads, g++ 13.3), shared with two other sessions under `flock /tmp/pantheonsim-builder.lock` (3,140 s of the first pass were spent waiting for it). Builds Release, `-g1`, `VGPU_LTO=OFF`, `VGPU_JIT_MUTANTS=ON`, `nice -n 19`, `-j3`. Base: `origin/main` 4e2c1c18 (the merge of #590). Programs: round sp57's corpus (`tools/bench/real` sizes, `VGPU_GPU=nvidia/rtx3060`), without the eight programs over 120 s, fpdc, CORR, COVAR and FDTD-2D, and with LU, atomicCost and black-scholes left out for their length (over 15 s): 51 programs. Data and scripts: `docs/perf-design/data/sp63/`.
 
@@ -1567,7 +1567,18 @@ Every run of every side (fills and the untimed first runs of the second-run side
 
 The 10 cold: asyncAllocation, bgmv (12 ms, one ms), JACOBI1D (noise, above), SYRK, gaussian, s3d, backprop-cuda (11 ms), sortKV, nn (14 ms), bfs (9 ms). Round sp57's numbers (0.954 cold, 0.985 warm over 57, then 0.985 and 1.010 over 54 after its fix) are on another build and partly other programs; this round's base column is the comparison.
 
-DEFAULT_THREADS_PLACEHOLDER
+### The default thread count (16 threads, round sp57's 18 programs, three runs a side, final build; `td.md`)
+
+| programs | n | default B/N | base JIT cold | JIT cold | JIT warm | JIT second run |
+|---|---:|---:|---:|---:|---:|---:|
+| all | 18 | 0.975 | 0.912 | 0.960 | 1.047 | 0.967 |
+| with objects (SYRK, SYR2K, gaussian, asyncAllocation, atomicAggregate) | 5 | 0.988 | 0.877 | 0.912 | 1.144 | 0.892 |
+| without | 13 | 0.969 | 0.926 | 0.979 | 1.012 | 0.998 |
+| more than 2 % slower | | 6 | 16 | 10 | 1 | 8 |
+
+* The machine was noisy: the A/A column is 0.975 (GEMVER 0.827, 2DCONV 0.910, backprop 0.916 are single slow default runs while the other sessions built; three runs a side). Read the columns against each other, not to the third digit.
+* **The wait before the lookup is the larger part of the gain at sixteen threads** (the programs without objects 0.926 to 0.979 cold; asmooth 0.855 to 0.903, ADI 0.926 to 1.012, GEMVER 0.851 to 0.993, 2DCONV 0.883 to 0.995, backprop 0.875 to 0.943, bh 0.941 to 0.971, bitonic-sort 0.946 to 0.969). JACOBI2D (0.925, 0.169 s) is the one that stays below.
+* **The history does not help at sixteen threads, and the second run is not warm.** These programs run 0.9 to 3.4 s there, the compiler (niced by 10) shares the cores with sixteen simulator threads, and no cold run and no second run left an object: the compile at the second run's lookup was cancelled at its exit as the first run's was. So the second run is a cold run with the compiler started earlier, and costs about what the base build's cold run costs (gaussian 0.823 against the base build's 0.796, asyncAllocation 0.832 against 0.842, SYRK 0.910 against 0.927, atomicAggregate 0.930 against 0.936), 1 to 6 % less than this build's own cold run, where the compile starts later. Every run repeats it: at this thread count only a run of the warm side's kind (a compile allowed to finish) makes these programs warm. What would: letting a compile that has a selection on record finish at exit within a bound, or compiling it from a process of its own; not built.
 
 ### Tests and mutants
 
@@ -1584,7 +1595,7 @@ DEFAULT_THREADS_PLACEHOLDER
 | A default forks a C++ compiler out of every long user process (SIGCHLD, programs that manage their own children) | open: the product decision of round sp57; not looked at |
 | Linking and fused runs have not run the `e2e_sass_jit` shards | open (CI) |
 | A JIT on by default makes every SASS ctest leg a JIT leg | open: the legs would need `VGPU_JIT=0` or a private cache |
-| The default thread count | see the table above |
+| The default thread count: compiles never finish in a 1 to 3 s program at sixteen threads, so its later runs are never warm (the history starts each one earlier and it is cancelled again) | open: finish a recorded compile at exit within a bound, or in a process of its own |
 
 ### What was not verified
 
