@@ -56,8 +56,11 @@ To compile with a newer CUDA than Ubuntu's, give its version:
    - AMD: ROCm's `hipcc`, with the clang and device libraries it compiles
      with, from AMD's repository. Only the compiler: the simulator is the
      runtime, so no driver or ROCm runtime is installed.
-2. Builds the simulator at the commit the release pins, and caches the build against
-   a hash of its source and the toolkit version, so later runs skip it.
+2. Gets the simulator at the commit the release pins: the prebuilt tarball
+   from that release when it has one for this runner and toolkit (its sha256
+   checked), otherwise a build from source, cached against a hash of its
+   source and the toolkit version so later runs skip it. See
+   [Setup time](#setup-time).
 3. Puts the simulator's tools first on `PATH` and sets `VGPU_GPU` and
    `VGPU_DEVICE_COUNT` for the rest of the job.
 
@@ -79,6 +82,7 @@ and 4 when the program did not run at all (`vgpu test --help`).
 | `cuda-toolkit` | `apt` for NVIDIA, `none` for AMD | `apt` installs Ubuntu's toolkit; a version like `12.6` or `13.0` installs that `nvcc` from NVIDIA; `none` uses one the job already installed |
 | `rocm` | `7.1` for AMD, `none` for NVIDIA | The ROCm version whose `hipcc` to install -- `6.4`, `7.0`, `7.1` and `7.2` are the releases whose programs are checked on the simulator; `none` uses one the job already installed |
 | `library-path` | `true` | Puts the simulator's libraries on `LD_LIBRARY_PATH`, so programs run directly (ctest, scripts) as well as under `vgpu run`. Set `false` when the build links the toolkit's own vendor libraries (see below) |
+| `prebuilt` | `true` | Uses the release's prebuilt simulator when there is one for this runner and toolkit and its sha256 matches; `false` always builds from source |
 
 ## Outputs
 
@@ -86,6 +90,49 @@ and 4 when the program did not run at all (`vgpu test --help`).
 | --- | --- |
 | `build-dir` | Where the simulator was built |
 | `shim-dir` | Its CUDA libraries, for `LD_LIBRARY_PATH` when not using `vgpu run` |
+| `prebuilt` | `true` when the simulator came from the release's prebuilt tarball, `false` when it was restored from the cache or built |
+| `prebuilt-asset` | The release asset name it looked for (empty off x86-64) |
+
+## Setup time
+
+Building the simulator from source is most of the action's time on a cold
+cache. Measured for the whole action step on GitHub's hosted runners:
+
+| Job | Built from source (cold cache) | Restored from the cache (warm) | From a release's prebuilt tarball |
+| --- | --- | --- | --- |
+| `ubuntu-24.04`, NVIDIA, Ubuntu's CUDA 12.0 | 13 to 22 min | 1.3 to 1.7 min | 4.9 min (4.85 of it the apt install) |
+| `ubuntu-24.04`, NVIDIA, CUDA 12.6 from NVIDIA | 15 to 20 min | 1.4 to 1.8 min | 1.8 min |
+| `ubuntu-24.04`, NVIDIA, CUDA 13.0 from NVIDIA | 20 min | | 1.5 min |
+| `ubuntu-24.04`, AMD, ROCm 7.1 | 8 to 13 min | 0.6 to 0.7 min | 0.5 min |
+| `ubuntu-22.04`, NVIDIA, CUDA 12.6 from NVIDIA | 18 to 24 min | 3.0 min | 3.0 min |
+| `ubuntu-22.04`, AMD, ROCm 7.1 | 9 to 15 min | 0.8 min | 1.1 min |
+
+(Cold and warm: the pantheonsim [Action workflow](../.github/workflows/action.yml),
+9 runs on 2026-11-11 and 12, the
+[setup-pantheonsim tests](https://github.com/pantheongpu/setup-pantheonsim/actions/workflows/test.yml),
+6 runs from 2026-10-27 to 2026-11-12, and the source builds of one
+[release-binaries](../.github/workflows/release-binaries.yml) run; one warm run
+took 5.7 min. Prebuilt: that run's check jobs, one each, which served the
+tarballs from the runner itself, so the 18 to 35 MB download from GitHub's
+release host is not in them; fetching, checking and unpacking took at most 1 s.
+Everything else in a warm or prebuilt step is installing the toolkit.)
+
+The cache is per repository and keyed on the simulator's source, so the first
+run in a repository, and the first after each simulator change, is the cold
+one, and `@main` is cold after every commit to the simulator.
+
+A release tag carries the simulator prebuilt for these runners and toolkits
+(`ubuntu-24.04` with CUDA 12.0, 12.6 or 13.0 or for AMD, `ubuntu-22.04` with
+CUDA 12.6 or for AMD), attached by the
+[release-binaries workflow](../.github/workflows/release-binaries.yml) as
+`pantheonsim-<version>-linux-x86_64-<os>-cuda<version>-<source hash>.tar.gz`
+with a `.sha256` beside it. With the action pinned at such a release (or at its
+commit), it downloads the tarball, checks the sha256 and unpacks it instead
+of building the simulator. Anything else -- `@main`, a
+toolkit or runner with no tarball, a container job (the tarball is built for
+the hosted runner's directory), a failed download or a checksum that does not
+match -- falls back to the cache and the source build, with a notice saying
+why. `prebuilt: false` skips the tarball.
 
 ## Things to know
 

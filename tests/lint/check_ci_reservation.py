@@ -100,7 +100,7 @@ def main():
             errs.append(f"self-test: {label} was not caught")
     for label, text in [
         ("a combined cache step", action.replace("actions/cache/restore@", "actions/cache@")),
-        ("a save with no guard", action.replace("if: steps.cache.outputs.cache-hit != 'true'\n      uses: actions/cache/save", "uses: actions/cache/save")),
+        ("a save with no guard", re.sub(r"if: [^\n]*\n(\s*uses: actions/cache/save)", r"\1", action)),
         ("an unpinned save", re.sub(r"(actions/cache/save@)[0-9a-f]{40}", r"\1v4", action)),
     ]:
         if not check_action(text):
