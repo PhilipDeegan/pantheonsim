@@ -37,6 +37,15 @@ release says what runs and what it produces, never how fast a real GPU would run
   [Design and limits](docs/perf-design/12-host-gpu-turbo.md); the benchmark harness is
   `tools/bench/hostgpu/run.py`, the card probes `tools/probes/hostgpu_turbo_card_probes.sh`. `docs/cli.md` now lists every
   `VGPU_HOST_GPU_*` variable (pantheonsim #587).
+- Tier 2 (`VGPU_JIT=1`, still off by default), the cold run ([round sp63](docs/perf-design/rounds/11-rounds-sp36-sp41.md)): a section the
+  share rule keeps waits for its cache lookup on the plain run loop too, so short programs no longer pay for the counting loop before
+  the lookup (ADI, asmooth, sortKV, atan2, adam lost 1 to 9 % with `VGPU_JIT=1`; now within 0 to 2 %). The regions chosen for a section
+  are recorded before its compile, so a compile that the end of the program cancels (silently now) is started at the next run's lookup
+  instead of at the threshold (`VGPU_JIT_HISTORY=0` turns that off): asyncAllocation, shorter than its compile, is warm from its third run
+  instead of never at one thread (at sixteen threads such compiles still never finish). The cache directory is named by the library's GNU build id, other builds' directories untouched for 14 days are
+  removed, and the cache is capped (`VGPU_JIT_CACHE_MAX_MB`, default 256, least recently loaded objects first). The notice about a missing
+  compiler or an unusable cache is given at most once a day per cache directory, and `VGPU_JIT=auto` turns the JIT on without those notices.
+  Results and counters are unchanged.
 - Setup action: a release carries the simulator prebuilt for linux-x86_64, one tarball and `.sha256` per runner and toolkit the
   action sets up (ubuntu-24.04 with CUDA 12.0, 12.6, 13.0 or none, ubuntu-22.04 with CUDA 12.6 or none), built and attached by
   `.github/workflows/release-binaries.yml` when a `v*` tag is pushed. The action, pinned at that release, downloads the tarball,
