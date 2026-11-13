@@ -16,6 +16,12 @@ release says what runs and what it produces, never how fast a real GPU would run
   removed, and the cache is capped (`VGPU_JIT_CACHE_MAX_MB`, default 256, least recently loaded objects first). The notice about a missing
   compiler or an unusable cache is given at most once a day per cache directory, and `VGPU_JIT=auto` turns the JIT on without those notices.
   Results and counters are unchanged.
+- Setup action: a release carries the simulator prebuilt for linux-x86_64, one tarball and `.sha256` per runner and toolkit the
+  action sets up (ubuntu-24.04 with CUDA 12.0, 12.6, 13.0 or none, ubuntu-22.04 with CUDA 12.6 or none), built and attached by
+  `.github/workflows/release-binaries.yml` when a `v*` tag is pushed. The action, pinned at that release, downloads the tarball,
+  checks its sha256 and unpacks it instead of building the simulator (8 to 24 minutes on a cold cache), and falls back to the cache
+  and the source build when there is no tarball for it or the download or checksum fails. New input `prebuilt` (`false` always
+  builds), outputs `prebuilt` and `prebuilt-asset`; `docs/github-action.md` gives the measured setup times (pantheonsim #599).
 - SASS engine on hosts with AVX-512 (F/BW/DQ/VL and VNNI): binary64 add, multiply and fused multiply-add (`DADD`, `DMUL`, `DFMA`) run
   sixteen lanes to a step instead of four. Programs that compute in `double` run 3 to 39 % faster on a Zen 4 host (eight of nine
   measured gain 5 % or more: lavaMD 1.18x, RSBench 1.39x, LULESH 1.07x); single-precision programs and hosts without AVX-512 are
@@ -53,6 +59,10 @@ release says what runs and what it produces, never how fast a real GPU would run
 - Setup action: the build cache is saved by an `actions/cache/save` step right after the build (on a miss only) instead of by
   `actions/cache`'s post step, which runs only when the whole job succeeds; a caller whose tests failed no longer throws the build away
   and rebuilds it for about 15 minutes next run (pantheonsim #582).
+- CUDA runtime and driver: a kernel's `maxThreadsPerBlock` (`cudaFuncGetAttributes`, `CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK`)
+  counts whole warps per sub-partition, as the launch check does. A kernel of 104 registers a thread reported 608 threads and a
+  launch of 608 was refused ("cannot place a single block ... limited by registers"); it reports 512, as an RTX 5080 does for
+  the same kernel.
 - PTX: `ld.weak` and `st.weak` are accepted (the explicit spelling of the default memory semantics, PTX ISA 6.0 and later). They
   stopped GiMMiK 4.0's matrix-multiply kernels, and so PyFR's CUDA backend, at module load (pantheonsim #554).
 - NVRTC (the built-in compiler, used when no toolkit is visible): `--ftz=`, `--prec-div=` and `--prec-sqrt=` are accepted beside
