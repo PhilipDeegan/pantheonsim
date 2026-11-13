@@ -10,7 +10,7 @@ jobs="$root/ci/jobs.sh"
 [[ -x $jobs ]] || { echo "FAIL: $jobs is not executable"; exit 1; }
 d="$(mktemp -d "${TMPDIR:-/tmp}/vgpu_ci_jobs.XXXXXX")"
 trap 'rm -rf "$d"' EXIT
-unset CI_JOBS CI_JOBS_MAX CI_MEM_CHECK CI_MEM_LIMIT_GIB CI_RESERVE CI_RESERVE_CAPACITY_GIB CI_RESERVE_TTL_SECS CI_RESERVE_ID
+unset CI_JOBS CI_JOBS_MAX CI_MEM_CHECK CI_MEM_LIMIT_GIB CI_RESERVE CI_RESERVE_CAPACITY_GIB CI_RESERVE_TTL_SECS CI_RESERVE_ID RUNNER_NAME
 # The reservation ledger of every run below is a directory of its own, never the host's.
 export CI_RESERVE_DIR="$d/reserve" CI_MEM_SETTLE_SECS=0 CI_NOW=1000000
 
@@ -191,6 +191,12 @@ rj b --check sass >/dev/null 2>&1 || fail "capacity 10: the second was refused"
 rj c --check sass >/dev/null 2>&1 && fail "capacity 10: the third was admitted"
 rj a --release >/dev/null; rj b --release >/dev/null
 unset CI_RESERVE_CAPACITY_GIB
+# On an AWS burst runner (32 GiB, two runners) the default capacity is two heavy jobs; elsewhere one.
+RUNNER_NAME=burst-i-0123456789abcdef0-1 rj a --check sass >/dev/null 2>&1 || fail "burst default: the first was refused"
+RUNNER_NAME=burst-i-0123456789abcdef0-2 rj b --check sass >/dev/null 2>&1 || fail "burst default: the second was refused"
+RUNNER_NAME=burst-i-0123456789abcdef0-1 rj c --check sass >/dev/null 2>&1 && fail "burst default: the third was admitted"
+RUNNER_NAME=server2-1 rj c --check sass >/dev/null 2>&1 && fail "a non-burst runner took a second job"
+rj a --release >/dev/null; rj b --release >/dev/null
 # A capacity below the profile's minimum cannot lock a profile out for good.
 CI_RESERVE_CAPACITY_GIB=1 rj a --check sass >/dev/null 2>&1 || fail "a capacity of 1 GiB locked the 5 GiB profile out"
 rj a --release >/dev/null

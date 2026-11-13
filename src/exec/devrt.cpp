@@ -160,7 +160,13 @@ uint32_t kernel_thread_limit(const ptx::EntryFn& fn, const DeviceProfile& p, uin
   if (fn.max_ntid[0] && bound) limit = std::min(limit, bound);
   if (regs_per_thread && p.limits.registers_per_block && p.warp_size) {
     const uint64_t per_warp = (uint64_t{regs_per_thread} * p.warp_size + 255) / 256 * 256;
-    limit = std::min<uint64_t>(limit, p.limits.registers_per_block / per_warp * p.warp_size);
+    // An NVIDIA block's warps are rounded up to the sub-partitions when its registers are checked against the
+    // per-block file (kernel_resources), so the limit is whole warps per sub-partition: 104 registers a thread
+    // fit 19 warps in 65536 but leave 16, 512 threads, as an RTX 5080 reports. Unrounded, the launch of the
+    // limit this reported was refused.
+    const uint64_t parts = p.vendor == "nvidia" ? (p.cc_major == 6 && p.cc_minor == 0 ? 2 : 4) : 1;
+    const uint64_t warps = p.limits.registers_per_block / per_warp / parts * parts;
+    limit = std::min<uint64_t>(limit, warps * p.warp_size);
   }
   return static_cast<uint32_t>(limit);
 }

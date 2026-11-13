@@ -1,0 +1,205 @@
+name: Release binaries
+
+# The simulator prebuilt for linux-x86_64, one tarball (and its .sha256) per runner and toolkit the
+# action sets up, so a job on a release of the action unpacks it in seconds instead of building it
+# (8 to 24 minutes). action.yml fetches the asset scripts/action-build-id.sh names, checks its sha256,
+# and builds from source when there is none.
+#
+# A pushed tag v<version> builds them and attaches them to the GitHub release of that tag, which must
+# exist by the time the builds finish (create the release with the tag, or within about 20 minutes of
+# pushing it; otherwise re-run the "attach" job). Run by hand with a tag, it does the same for an
+# existing release; with no tag, or on a pull request, it builds the current ref and keeps the
+# tarballs as workflow artifacts only.
+on:
+  push:
+    tags: ['v*.*.*']
+  # A change to how the binaries are built, named or fetched builds and checks them (no release).
+  pull_request:
+    paths:
+      - action.yml
+      - scripts/action-build-id.sh
+      - .github/workflows/release-binaries.yml
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: An existing release tag to build and attach the binaries to; empty keeps them as artifacts only
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-binaries-${{ inputs.tag || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: build, ${{ matrix.os }}, CUDA ${{ matrix.cuda }}
+    permissions: { contents: read, actions: write, pull-requests: read }  # pr-guard cancels a run whose PR conflicts
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # The builds the action makes, by toolkit: the default for each runner (Ubuntu's CUDA 12.0 on
+        # 24.04, NVIDIA's 12.6 on 22.04, and none for an AMD job), and the versions the docs name.
+        # ROCm is not built against, so the AMD build serves every rocm input.
+        include:
+          - { os: ubuntu-24.04, cuda: apt, gpu: nvidia/t4 }
+          - { os: ubuntu-24.04, cuda: '12.6', gpu: nvidia/t4 }
+          - { os: ubuntu-24.04, cuda: '13.0', gpu: nvidia/h100 }
+          - { os: ubuntu-24.04, cuda: none, gpu: amd/mi300x }
+          - { os: ubuntu-22.04, cuda: '12.6', gpu: nvidia/t4 }
+          - { os: ubuntu-22.04, cuda: none, gpu: amd/mi300x }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: ./.github/actions/pr-guard
+
+      - name: The tag is the version in CMakeLists.txt
+        if: (github.event_name == 'workflow_dispatch' && inputs.tag != '') || startsWith(github.ref, 'refs/tags/')
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          version=$(sed -n 's/^project(pantheonsim VERSION \([0-9][0-9.]*\).*/\1/p' CMakeLists.txt)
+          [[ "$TAG" == "v$version" ]] || { echo "::error::tag $TAG is not v$version, the version in CMakeLists.txt, so the action would never find these binaries"; exit 1; }
+
+      # The build the action itself makes, on the same runner and toolkit, so the tarball is exactly
+      # what a cache miss there would build.
+      - name: Build the simulator with the action
+        id: sim
+        uses: ./
+        with:
+          gpu: ${{ matrix.gpu }}
+          cuda-toolkit: ${{ matrix.cuda }}
+          rocm: none
+          prebuilt: 'false'
+
+      - name: Pack it
+        id: pack
+        env:
+          BUILD: ${{ steps.sim.outputs.build-dir }}
+          # Named by the action from the source before it built, as a job using the action will name it.
+          asset: ${{ steps.sim.outputs.prebuilt-asset }}
+        run: |
+          [[ -n "$asset" ]] || { echo "::error::no asset name for this runner"; exit 1; }
+          # The action uses it only at the path it was built at, which its libraries' RUNPATH names.
+          { echo "build-dir=$BUILD"; echo "asset=$asset"; echo "commit=$(git rev-parse HEAD)"; } > "$BUILD/.pantheonsim-prebuilt"
+          # What a job runs: vgpu, its tools and libraries. Not what only rebuilding or testing the
+          # simulator needs (objects, static libraries, CMake's state, the 670 MB of its own unit
+          # tests), which leaves about 35 MB instead of 1.1 GB.
+          dist="$RUNNER_TEMP/dist"; mkdir -p "$dist"
+          tar -C "$BUILD" --exclude='*.o' --exclude='*.a' --exclude='./test_*' --exclude='./CMakeFiles' -czf "$dist/$asset" .
+          (cd "$dist" && sha256sum "$asset" > "$asset.sha256")
+          ls -l "$dist"; cat "$dist/$asset.sha256"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.asset }}
+          path: ${{ runner.temp }}/dist/
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+
+  # Each tarball, through the action's own download path, from a local copy of the release's assets
+  # (PANTHEONSIM_PREBUILT_URL), on a fresh runner: it must be used, and run a program. One of them is
+  # served with a wrong checksum, and the action must refuse it and fall back to the build.
+  check:
+    name: check, ${{ matrix.os }}, CUDA ${{ matrix.cuda }}${{ matrix.corrupt && ', wrong checksum' || '' }}
+    needs: build
+    permissions: { contents: read, actions: write, pull-requests: read }  # pr-guard cancels a run whose PR conflicts
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, cuda: apt, gpu: nvidia/t4, arch: compute_75 }
+          - { os: ubuntu-24.04, cuda: '12.6', gpu: nvidia/t4, arch: compute_75 }
+          - { os: ubuntu-24.04, cuda: '13.0', gpu: nvidia/h100, arch: compute_90 }
+          - { os: ubuntu-24.04, cuda: none, gpu: amd/mi300x }
+          - { os: ubuntu-22.04, cuda: '12.6', gpu: nvidia/t4, arch: compute_75 }
+          - { os: ubuntu-22.04, cuda: none, gpu: amd/mi300x }
+          - { os: ubuntu-24.04, cuda: apt, gpu: nvidia/t4, arch: compute_75, corrupt: true }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: ./.github/actions/pr-guard
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pantheonsim-*
+          path: ${{ runner.temp }}/assets
+          merge-multiple: true
+
+      - name: Serve them as the release would
+        env:
+          CORRUPT: ${{ matrix.corrupt }}
+        run: |
+          cd "$RUNNER_TEMP/assets"
+          if [[ "$CORRUPT" == true ]]; then
+            zeros=$(printf '0%.0s' $(seq 64))
+            for f in *.sha256; do sed -i "s/^[0-9a-f]\{64\}/$zeros/" "$f"; cat "$f"; done
+          fi
+          ls -l
+          nohup python3 -m http.server 8765 --bind 127.0.0.1 > "$RUNNER_TEMP/http.log" 2>&1 &
+          for _ in $(seq 30); do curl -fs -o /dev/null http://127.0.0.1:8765/ && exit 0; sleep 1; done
+          exit 1
+
+      - name: PantheonSim, from the prebuilt tarball
+        id: sim
+        uses: ./
+        env:
+          PANTHEONSIM_PREBUILT_URL: http://127.0.0.1:8765
+        with:
+          gpu: ${{ matrix.gpu }}
+          cuda-toolkit: ${{ matrix.cuda }}
+
+      - name: It used the tarball, or refused the bad one
+        env:
+          PREBUILT: ${{ steps.sim.outputs.prebuilt }}
+          CORRUPT: ${{ matrix.corrupt }}
+        run: |
+          echo "prebuilt: $PREBUILT"
+          cat "$RUNNER_TEMP/http.log"
+          if [[ "$CORRUPT" == true ]]; then test "$PREBUILT" = false; else test "$PREBUILT" = true; fi
+
+      - name: Compile and run a program on the simulated GPU
+        env:
+          GPU: ${{ matrix.gpu }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          if [[ "$GPU" == amd/* ]]; then
+            hipcc --offload-arch=gfx942 .github/action-tests/cmake-hip/vectoradd.hip -o vectoradd
+            ./vectoradd
+          else
+            nvcc -arch="$ARCH" -code="$ARCH" .github/action-tests/cmake-cuda/vectoradd.cu -o vectoradd
+          fi
+          vgpu run ./vectoradd
+
+  attach:
+    name: attach to the release
+    needs: check
+    if: (github.event_name == 'workflow_dispatch' && inputs.tag != '') || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pantheonsim-*
+          path: assets
+          merge-multiple: true
+      - name: Attach the tarballs and their checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          (cd assets && sha256sum -c *.sha256)
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" > /dev/null \
+            || { echo "::error::there is no release for $TAG yet: create it (gh release create $TAG), then re-run this job"; exit 1; }
+          gh release upload "$TAG" assets/* --clobber -R "$GITHUB_REPOSITORY"
