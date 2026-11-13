@@ -676,10 +676,7 @@ class MemoryManager {
     uint64_t words_written_first = 0;   // ... taken by compare-and-swap (their bytes are kept)
     uint64_t keeps = 0;                 // pieces kept for undoing
     uint64_t runs_known = 0;            // accesses inside a run of words the worker remembered its block had noted
-    uint64_t word_pages = 0;            // pages of lines and words put in place
-    uint64_t lines_by_word = 0;         // 64-byte lines a second block came to (their sixteen words are noted one by one from then)
-    uint64_t lines_one_block = 0;       // ... that one block alone had touched when the trial ended
-    uint64_t lines_straight = 0;        // untouched lines of a page whose lines keep being written out, noted by word at once
+    uint64_t word_pages = 0;            // pages of words put in place
     void add(const SpecStats& o);
   };
   struct SpecOutcome {
