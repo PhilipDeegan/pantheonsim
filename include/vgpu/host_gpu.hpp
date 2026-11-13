@@ -1002,7 +1002,7 @@ inline std::optional<double> inblock_launch_seconds(const std::vector<exec::Bloc
     sum += s;
     most = std::max(most, s);
   }
-  const double lanes = static_cast<double>(std::min<uint64_t>(std::max<unsigned>(threads, 1), total));
+  const double lanes = static_cast<double>(std::max<unsigned>(threads, 1));   // (more threads than blocks: the longest block decides)
   const double steps = std::max(sum / static_cast<double>(blocks.size()) * static_cast<double>(total) / lanes, most);
   return steps * per_step;
 }

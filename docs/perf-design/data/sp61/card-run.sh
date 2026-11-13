@@ -14,10 +14,11 @@ mkdir -p "$out"
 export PATH=/usr/local/cuda-13.0/bin:$PATH NVCC=/usr/local/cuda-13.0/bin/nvcc
 H="python3 tools/bench/hostgpu/run.py --build $build --corp $corp --gpu nvidia/a10g"
 HEC_SKIP="aidw-cuda,atomicCost-cuda,fpdc-cuda,zerocopy-cuda"
-# the programs with a launch sampled inside its blocks in the offline pass (data/sp61/offline-*.md); the only ones whose decisions can differ
-# from sp60b's rule. COVAR and CORR are the target.
+# the programs with a launch that is a candidate inside its blocks in the offline pass (data/sp61/offline-turbo.md): the only ones whose
+# decisions can differ from sp60b's rule. Only COVAR and CORR (the target) passed the floor there; the others are short and are here so that the
+# A/B sees it if the rig's ages or memory let one through.
 TARGET=polybench/COVAR,polybench/CORR
-INSIDE=${SP61_INSIDE:-$TARGET}
+INSIDE=${SP61_INSIDE:-$TARGET,polybench/ATAX,polybench/BICG,polybench/GEMVER,polybench/GESUMMV,polybench/MVT,rodinia/sc_gpu,hecbench/aop-cuda,hecbench/bh-cuda}
 
 case $stage in
 build|all)
@@ -37,7 +38,7 @@ ab|all)
   # (their decisions are sp60b's by construction: no launch of theirs is a candidate inside its blocks)
   $H --programs "$INSIDE" --runs 3 --long-secs 30 --long-runs 1 --forms sim,exact,exactw,turbo,turbow --timeout 600 \
      --json "$out/ab-inside.json" --md "$out/ab-inside.md" 2>&1 | tee "$out/ab-inside.txt" | tail -30
-  $H --corpora polybench,rodinia --skip "GRAMSCHM,2MM,LU,FDTD-2D,COVAR,CORR" --runs 1 --forms exact,exactw,turbo,turbow --timeout 300 \
+  $H --corpora polybench,rodinia --skip "GRAMSCHM,2MM,LU,FDTD-2D,COVAR,CORR,ATAX,BICG,GEMVER,GESUMMV,MVT,sc_gpu" --runs 1 --forms exact,exactw,turbo,turbow --timeout 300 \
      --json "$out/ab-rest.json" --md "$out/ab-rest.md" 2>&1 | tee "$out/ab-rest.txt" | tail -30
   ;;&
 log|all)

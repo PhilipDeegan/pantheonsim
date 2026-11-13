@@ -36,7 +36,6 @@ M = [
     (BP, "per turn: no completed turn gives none", "return m.turns >= 1 ? static_cast<double>(m.steps) / m.turns : static_cast<double>(m.steps);", "return m.turns >= 1 ? static_cast<double>(m.steps) / m.turns : 0.0;"),
     (BP, "per turn: a part turn divides", "return m.turns >= 1 ? static_cast<double>(m.steps) / m.turns", "return m.turns > 0 ? static_cast<double>(m.steps) / m.turns"),
     (BP, "per turn: the steps whatever the turns", "return m.turns >= 1 ? static_cast<double>(m.steps) / m.turns : static_cast<double>(m.steps);", "return static_cast<double>(m.steps);"),
-    (BP, "per turn: no steps is a measure", "  if (m.steps == 0) return 0;\n  return m.turns", "  return m.turns"),
     (BP, "per step: no time is a measure", "if (m.steps == 0 || !(m.seconds > 0)) return 0;", "if (m.steps == 0) return 0;"),
     (BP, "per step: no steps divides by zero", "if (m.steps == 0 || !(m.seconds > 0)) return 0;", "if (!(m.seconds > 0)) return 0;"),
     (BP, "per step: inverted", "return m.seconds / static_cast<double>(m.steps);", "return static_cast<double>(m.steps) / m.seconds;"),
@@ -50,8 +49,7 @@ M = [
     (HG, "launch: not shared among threads", "const double steps = std::max(sum / static_cast<double>(blocks.size()) * static_cast<double>(total) / lanes, most);", "const double steps = std::max(sum / static_cast<double>(blocks.size()) * static_cast<double>(total), most);"),
     (HG, "launch: the longest block not a floor", "const double steps = std::max(sum / static_cast<double>(blocks.size()) * static_cast<double>(total) / lanes, most);", "const double steps = sum / static_cast<double>(blocks.size()) * static_cast<double>(total) / lanes;"),
     (HG, "launch: the blocks read are the grid", "const double steps = std::max(sum / static_cast<double>(blocks.size()) * static_cast<double>(total) / lanes, most);", "const double steps = std::max(sum / lanes, most);"),
-    (HG, "launch: more threads than blocks share", "static_cast<double>(std::min<uint64_t>(std::max<unsigned>(threads, 1), total));", "static_cast<double>(std::max<unsigned>(threads, 1));"),
-    (HG, "launch: zero threads", "static_cast<double>(std::min<uint64_t>(std::max<unsigned>(threads, 1), total));", "static_cast<double>(std::min<uint64_t>(threads, total));"),
+    (HG, "launch: zero threads", "static_cast<double>(std::max<unsigned>(threads, 1));", "static_cast<double>(threads);"),
     (HG, "launch: the shortest block", "    most = std::max(most, s);", "    most = most == 0 ? s : std::min(most, s);"),
     # which blocks
     (HG, "inblock: the minimum grid is read inside", "if (blocks >= kSampleMinBlocks || blocks < 1) return 0;", "if (blocks > kSampleMinBlocks || blocks < 1) return 0;"),

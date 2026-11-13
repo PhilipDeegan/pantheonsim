@@ -86,7 +86,6 @@ struct TurnMeasure {
 // The steps of one turn. With no turn completed, the turn under way has lasted the whole run, so the run's steps are the least a turn takes:
 // the estimate then errs low, towards the simulator. None (0) when the warp took no step.
 inline double steps_per_turn(const TurnMeasure& m) {
-  if (m.steps == 0) return 0;
   return m.turns >= 1 ? static_cast<double>(m.steps) / m.turns : static_cast<double>(m.steps);
 }
 

@@ -1376,6 +1376,11 @@ VTEST(a_measured_turn_gives_steps_and_seconds) {
   VCHECK(vgpu::exec::steps_per_turn(m) == 40000);
   m.seconds = 0;
   VCHECK(vgpu::exec::seconds_per_step(m) == 0);
+  m.seconds = -0.001;                                // (a clock that went back: no measure)
+  VCHECK(vgpu::exec::seconds_per_step(m) == 0);
+  TurnMeasure none;                                  // a time and no step: no measure, and no division by zero
+  none.seconds = 0.004;
+  VCHECK(vgpu::exec::seconds_per_step(none) == 0 && vgpu::exec::steps_per_turn(none) == 0);
   vgpu::exec::BlockReading b;
   b.steps = 1000;
   b.turns = 50;
@@ -1606,6 +1611,10 @@ VTEST(a_loop_whose_counter_or_bound_is_not_plain_is_not_followed) {
   auto before = covar_shape();   // the predicate is set before the loop only
   before[10] = op_other();
   VCHECK(find_probe_loops(before).empty());
+  auto pre = covar_shape();      // ... even when that compare reads the counter
+  pre[1] = op_cmp(0, opnd_reg(5), opnd_param(0x160));
+  pre[10] = op_other();
+  VCHECK(find_probe_loops(pre).empty());
   auto notcmp = covar_shape();   // the last write of the predicate is not a compare
   notcmp[10] = op_other();
   notcmp[10].pred_writes = {0};
@@ -1709,6 +1718,9 @@ VTEST(loops_one_after_another_and_inside_one_another) {
   VCHECK(m.size() == vgpu::exec::kProbeLoops && m[0].lo == 1 && m[3].lo == 10);
   // an unreachable back edge is no loop (nvcc's BRA to itself after the EXIT), nor is a branch to a later instruction
   VCHECK(find_probe_loops({op_exit(), op_bra(1)}).empty());
+  // ... even a whole counted loop after the EXIT
+  VCHECK(find_probe_loops({op_exit(), op_add(5, 5, 1), op_cmp(0, opnd_reg(5), opnd_imm(100)), op_bra(1, 0), op_exit()}).empty());
+  VCHECK(find_probe_loops({op_other({5}), op_add(5, 5, 1), op_cmp(0, opnd_reg(5), opnd_imm(100)), op_bra(1, 0), op_exit()}).size() == 1);   // (reached: found)
   VCHECK(find_probe_loops({op_cmp(0, opnd_reg(5), opnd_imm(1)), op_bra(3, 0), op_other(), op_exit()}).empty());
   VCHECK(find_probe_loops({}).empty());
 }
