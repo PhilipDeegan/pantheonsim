@@ -308,18 +308,19 @@ VTEST(a_block_about_to_note_more_in_its_record_while_another_writes_it_out_loses
 VTEST(two_first_comers_to_an_untouched_line_do_not_lose_a_mark) {
   Hooked hooked;
   for (const bool other_writes : {false, true}) {
-    Lines d;
-    d.mem.spec_begin(3, &d.by_word);
-    arm(kFirstBefore);
-    Access a(d, 0, 0, 2, false, true);   // block 0 reads word 2 of the untouched line, held before it takes the record
-    VCHECK(within(10000, [] { return g_parked.load() == 1; }));
-    VCHECK(!access(d, 1, 1, 6, other_writes));
-    g_release.store(1);
-    VCHECK(!a.end());
-    // Block 2 at word 6 (a write: stopped by block 1's mark, read or written) and at word 2 (a write: stopped by block 0's).
-    if (!access(d, 2, 2, 6, true)) throw vtest::Failure(std::string("block 1's ") + (other_writes ? "write" : "read") + " was lost");
-    if (!access(d, 2, 2, 2, true)) throw vtest::Failure("block 0's read was lost");
-    undone(d, d.mem.spec_end(), "two first comers");
+    for (const uint64_t probe : {6, 2}) {   // block 2 writes word 6 (stopped by block 1's mark, read or written) or word 2 (block 0's)
+      Lines d;
+      d.mem.spec_begin(3, &d.by_word);
+      arm(kFirstBefore);
+      Access a(d, 0, 0, 2, false, true);   // block 0 reads word 2 of the untouched line, held before it takes the record
+      VCHECK(within(10000, [] { return g_parked.load() == 1; }));
+      VCHECK(!access(d, 1, 1, 6, other_writes));
+      g_release.store(1);
+      VCHECK(!a.end());
+      if (!access(d, 2, 2, probe, true))
+        throw vtest::Failure(probe == 6 ? std::string("block 1's ") + (other_writes ? "write" : "read") + " was lost" : std::string("block 0's read was lost"));
+      undone(d, d.mem.spec_end(), "two first comers");
+    }
   }
 }
 
