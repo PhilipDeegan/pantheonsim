@@ -1,0 +1,18 @@
+M01 killed (11 s): the NaN rule applied to the operands after |x| and -x :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
+M02 killed (12 s): the fma's NaN rule leaves out the addend :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
+M03 killed (14 s): every lane written, whatever the mask :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
+M04 killed (13 s): the product and the sum not fused (lanes 0 to 7 of a block) :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
+M05 killed (12 s): -x applied before |x| :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
+M06 killed (11 s): the sum rounded to nearest, whatever the rounding mode (lanes 8 to 15 of a block) :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
+M07 killed (12 s): the product rounded toward zero, whatever the rounding mode :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
+M08 killed (11 s): lanes 16 to 31 not computed :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
+M09 killed (11 s): lanes 16 to 31 take the mask bits of lanes 0 to 15 :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
+M10 killed (14 s): the high words of the results taken from the low words' positions in lanes 8 to 15 :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
+M11 killed (11 s): lanes 8 to 15 of a block read lanes 0 to 7's operands :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
+M12 killed (12 s): the NaN rule's results not taken for lanes 8 to 15 :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
+M13 killed (12 s): a NaN result in lanes 8 to 15 alone does not reach the NaN rule :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
+M14 killed (11 s): the modifiers of source b applied to source c :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
+M15 killed (11 s): DMUL without modifiers runs DADD :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
+M16 killed (12 s): |x| of source c never applied :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
+M17 killed (13 s): dispatch: the Avx512 table keeps the AVX2 dop_m :: the_avx512_table_has_its_own_dop_m
+UNMUTATED AGAIN: rc 0 :: 2/2 tests passed

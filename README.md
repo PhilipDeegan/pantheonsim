@@ -1,5 +1,7 @@
 # PantheonSim
 
+[![CI](https://github.com/pantheongpu/pantheonsim/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/pantheongpu/pantheonsim/actions/workflows/ci.yml?query=branch%3Amain)
+
 PantheonSim runs CUDA and HIP programs on a CPU, with no GPU. It supplies fake driver, runtime and library files and a profile for each GPU model (T4, H100, MI300X and 45 more), so a program built with the real `nvcc` or `hipcc` runs against it. It checks what a program computes. It does not model how fast a GPU would run it.
 
 ## Limits
@@ -7,7 +9,8 @@ PantheonSim runs CUDA and HIP programs on a CPU, with no GPU. It supplies fake d
 - There is no timing. Timings mean nothing, and `%clock` and `%globaltimer` count instructions. It is also much slower than a GPU.
 - CUDA programs must be built with `nvcc -cudart shared`. Static cudart (CuPy, for example) does not work.
 - Kernels run to completion inside the launch call, so an event recorded behind a kernel is complete at once ([#523](https://github.com/pantheongpu/pantheonsim/issues/523)); `cudaLaunchHostFunc` and `cuLaunchHostFunc` are asynchronous ([#487](https://github.com/pantheongpu/pantheonsim/issues/487)).
-- Known bug: `shfl.sync` returns 0 for a lane that is still in a long loop ([#488](https://github.com/pantheongpu/pantheonsim/issues/488)).
+- Known bug in the v0.2.0 release (and so in `setup-pantheonsim@v0`): `shfl.sync` returns 0 for a lane that is still in a long loop, and reports nothing ([#488](https://github.com/pantheongpu/pantheonsim/issues/488)). It is fixed on `main` by [#527](https://github.com/pantheongpu/pantheonsim/pull/527).
+- `cudaDeviceCanAccessPeer` reports peer access between simulated GPUs, but a kernel that reads the other GPU's memory fails ([#598](https://github.com/pantheongpu/pantheonsim/issues/598)).
 - OptiX and NVIDIA's Nsight tools are not supported.
 - 31 of the 48 GPU profiles come from public documents, not from a card.
 
@@ -85,6 +88,9 @@ PantheonSim runs everything on the CPU by default, and every run gives the same 
 | **Turbo** | `host_gpu: turbo` or `VGPU_HOST_GPU=turbo` | Every kernel that is safe to send: also approximate math (`sin`, `exp`, `rsqrt`...), half precision, tensor-core instructions and integer atomics | The card's own values, as on real hardware. They can differ from the simulator's in the last bits |
 
 **Turbo mode is the fast mode: it trades bit-for-bit equality with the simulator for speed.** Memory safety, synchronisation and launch checks are the same in all three. Measured on an A10G over 59 programs of PolyBench/GPU, Rodinia and HeCBench: total run time about 1.7x shorter in turbo and 1.2x in exact, and every program's output equal to the simulator's. `VGPU_HOST_GPU_VERIFY=1` runs each launch both ways and compares, in turbo within a tolerance (`VGPU_HOST_GPU_ATOL`, `VGPU_HOST_GPU_RTOL`). Counters, fault injection and the simulator's checks do not apply to launches that run on the card. Details: [turbo mode](docs/perf-design/12-host-gpu-turbo.md), [all variables](docs/cli.md).
+## How PantheonSim is developed
+
+PantheonSim has one maintainer, Saqib Khan. Most of its code, tests and documentation were written with AI coding assistants (Anthropic's Claude), directed and reviewed by the maintainer, and pull requests here have no second reviewer. What it is checked against, and what is not checked, is in [CONTRIBUTING.md](CONTRIBUTING.md), "How PantheonSim is developed"; what does not work is in [status and limits](docs/status.md).
 
 ## More
 

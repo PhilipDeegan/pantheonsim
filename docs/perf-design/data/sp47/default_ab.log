@@ -1,0 +1,49 @@
+== A/B default mode
+polybench/ATAX                           B 1.42s A 1.42s rc {'before': [0], 'after': [0]}
+polybench/SYRK                           B 5.37s A 5.39s rc {'before': [0], 'after': [0]}
+rodinia/gaussian                         B 3.60s A 3.65s rc {'before': [0], 'after': [0]}
+rodinia/hotspot                          B 0.99s A 1.00s rc {'before': [0], 'after': [0]}
+rodinia/lavaMD                           B 1.75s A 1.75s rc {'before': [0], 'after': [0]}
+hecbench/s3d-cuda                        B 0.38s A 0.39s rc {'before': [0], 'after': [0]}
+hecbench/shmembench-cuda                 B 4.82s A 4.86s rc {'before': [0], 'after': [0]}
+
+### polybench (threads=1, cpu 6, 7 runs, median)
+
+| program | n | BEFORE s | AFTER s | ratio | BEFORE user s | AFTER user s | rc | outputs | checks |
+|---|---:|---:|---:|---:|---:|---:|---|---|---|
+| ATAX | 7 | 1.42 | 1.42 | 1.00x | 1.37 | 1.38 | ok | same | Non-Matching CPU-GPU Outputs Beyond Error Threshold of 0.50  |
+| SYRK | 7 | 5.37 | 5.39 | 1.00x | 5.36 | 5.38 | ok | same | Non-Matching CPU-GPU Outputs Beyond Error Threshold of 0.05  |
+
+geometric mean (programs with identical outputs): 0.997x over 2 programs
+
+### rodinia (threads=1, cpu 6, 7 runs, median)
+
+| program | n | BEFORE s | AFTER s | ratio | BEFORE user s | AFTER user s | rc | outputs | checks |
+|---|---:|---:|---:|---:|---:|---:|---|---|---|
+| gaussian | 7 | 3.60 | 3.65 | 0.98x | 3.59 | 3.65 | ok | same |  |
+| hotspot | 7 | 0.99 | 1.00 | 0.99x | 0.99 | 1.00 | ok | same |  |
+| lavaMD | 7 | 1.75 | 1.75 | 1.00x | 1.75 | 1.74 | ok | same |  |
+
+geometric mean (programs with identical outputs): 0.990x over 3 programs
+
+### hecbench (threads=1, cpu 6, 7 runs, median)
+
+| program | n | BEFORE s | AFTER s | ratio | BEFORE user s | AFTER user s | rc | outputs | checks |
+|---|---:|---:|---:|---:|---:|---:|---|---|---|
+| s3d-cuda | 7 | 0.38 | 0.39 | 1.00x | 0.35 | 0.35 | ok | same |  |
+| shmembench-cuda | 7 | 4.82 | 4.86 | 0.99x | 4.80 | 4.85 | ok | same |  |
+
+geometric mean (programs with identical outputs): 0.994x over 2 programs
+
+== A/A (base against a copy of base)
+rodinia/gaussian                         B 3.61s A 3.61s rc {'before': [0], 'after': [0]}
+
+### rodinia (threads=1, cpu 6, 7 runs, median)
+
+| program | n | BEFORE s | AFTER s | ratio | BEFORE user s | AFTER user s | rc | outputs | checks |
+|---|---:|---:|---:|---:|---:|---:|---|---|---|
+| gaussian | 7 | 3.61 | 3.61 | 1.00x | 3.61 | 3.59 | ok | same |  |
+
+geometric mean (programs with identical outputs): 1.000x over 1 programs
+
+PHASE_C_DONE

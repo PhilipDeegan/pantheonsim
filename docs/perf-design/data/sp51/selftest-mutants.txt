@@ -1,0 +1,20 @@
+unmutated                                               rc=0  selftest: 25 cases, 0 wrong
+M1 execute rule first                                   rc=1  selftest: 25 cases, 3 wrong
+      selftest: vgpu::sass::decode(vgpu::sass::Word, unsigned long, int) classified as execute, expected sass-decode
+      selftest: vgpu::sass::tier::analyze(vgpu::sass::Instr const&, int, vgp classified as execute, expected tier-build
+      selftest: vgpu::ptx::(anonymous namespace)::Parser::parse_instruction( classified as execute, expected ptx-parse
+M2 match on the whole symbol (no fname)                 rc=1  selftest: 25 cases, 4 wrong
+      selftest: void vgpu::sass::(anonymous namespace)::h_global<false>(void classified as sim-other, expected execute
+      selftest: vgpu::exec::validate_launch(vgpu::ptx::EntryFn const&, vgpu: classified as ptx-parse, expected execute
+      selftest: std::vector<vgpu::ptx::Instr, std::allocator<vgpu::ptx::Inst classified as ptx-parse, expected sim-other
+M3 any destructor frame is teardown                     rc=1  selftest: 25 cases, 2 wrong
+      selftest: std::lock_guard<std::mutex>::~lock_guard() classified as teardown, expected execute
+      selftest: std::vector<vgpu::ptx::Instr, std::allocator<vgpu::ptx::Inst classified as teardown, expected sim-other
+M4 no executor-leaf rule                                rc=1  selftest: 25 cases, 3 wrong
+      selftest: void vgpu::sass::(anonymous namespace)::h_global<false>(void classified as sim-other, expected execute
+      selftest: vgpu::simd::avx2_impl::imad_k(unsigned int*, unsigned int co classified as sim-other, expected execute
+      selftest: vgpu::MemoryManager::load_batch(unsigned long const*, unsign classified as sim-other, expected execute
+M5 no loader-by-object rule                             rc=1  selftest: 25 cases, 1 wrong
+      selftest: [unknown] classified as program-host, expected loader
+M6 kernel frames taken as user frames                   rc=1  selftest: 25 cases, 1 wrong
+      selftest: finish_task_switch.isra.0 classified as program-host, expected kernel-other

@@ -1,0 +1,2 @@
+M01 killed (309 s): the NaN rule applied to the operands after |x| and -x :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
+M02 killed (321 s): the fma's NaN rule leaves out the addend :: dop_m_gives_the_avx2_bits_in_every_rounding_mode
