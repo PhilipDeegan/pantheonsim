@@ -4,13 +4,21 @@ GitHub's hosted runners have no GPU. This action gives a job simulated NVIDIA
 or AMD GPUs, so CUDA and HIP code can be compiled and its tests run on every
 push, with a run on physical GPUs kept for a nightly or release job.
 
+Use it as `pantheongpu/setup-pantheonsim@v0`
+([setup-pantheonsim](https://github.com/pantheongpu/setup-pantheonsim)). Each
+release of that action pins a simulator commit that was tested with it, and
+`@v0` follows the latest `v0.x.y` release. This repository's own `action.yml`
+(`pantheongpu/pantheonsim@<ref>`) is what that action runs; pointing a workflow
+at `@main` builds whatever `main` is that day, so use it only to try an
+unreleased fix.
+
 ```yaml
 jobs:
   cuda-tests:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: pantheongpu/pantheonsim@main
+      - uses: pantheongpu/setup-pantheonsim@v0
         with:
           gpu: nvidia/h100
           count: 2
@@ -22,7 +30,7 @@ jobs:
 For AMD, name an Instinct profile. The action installs ROCm's own `hipcc`:
 
 ```yaml
-      - uses: pantheongpu/pantheonsim@main
+      - uses: pantheongpu/setup-pantheonsim@v0
         with:
           gpu: amd/mi300x
           count: 2
@@ -34,7 +42,7 @@ For AMD, name an Instinct profile. The action installs ROCm's own `hipcc`:
 To compile with a newer CUDA than Ubuntu's, give its version:
 
 ```yaml
-      - uses: pantheongpu/pantheonsim@main
+      - uses: pantheongpu/setup-pantheonsim@v0
         with:
           gpu: nvidia/h100
           cuda-toolkit: '12.6'
@@ -53,6 +61,8 @@ To compile with a newer CUDA than Ubuntu's, give its version:
    toolkit (its sha256 checked), otherwise a build from source, cached against
    a hash of its source and the toolkit version so later runs skip it. See
    [Setup time](#setup-time).
+2. Builds the simulator at the commit the release pins, and caches the build against
+   a hash of its source and the toolkit version, so later runs skip it.
 3. Puts the simulator's tools first on `PATH` and sets `VGPU_GPU` and
    `VGPU_DEVICE_COUNT` for the rest of the job.
 
@@ -151,7 +161,7 @@ why. `prebuilt: false` skips the tarball.
   for the test run alone:
 
   ```yaml
-  - uses: pantheongpu/pantheonsim@main
+  - uses: pantheongpu/setup-pantheonsim@v0
     with:
       gpu: nvidia/t4
       library-path: false
@@ -161,6 +171,12 @@ why. `prebuilt: false` skips the tarball.
 
   Linking against the simulator's own libraries instead (`-L` the `shim-dir`
   output) also works.
+- A HIP project that calls CMake's `find_package(hip)` can need more of ROCm
+  than the action installs. The action installs only the compiler: it extracts
+  `hsa-rocr-dev` (the HSA runtime's CMake config) but not `hsa-rocr` (the
+  `libhsa-runtime64.so` that config names), and not `comgr`. Projects using the
+  action have had to install `comgr` and `hsa-rocr` themselves, from AMD's
+  repository (the action has already added it), in a step after the action.
 - CMake projects get the shared runtime through a toolchain file the action
   names in `CMAKE_TOOLCHAIN_FILE`, since CMake links with the host compiler
   where the `nvcc` wrapper cannot reach. A project that sets its own

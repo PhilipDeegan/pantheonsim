@@ -1,0 +1,46 @@
+total samples 16275
+ 19.49%     3172  vgpu::sass::Runner::step_warp
+  6.96%     1133  vgpu::exec::sasslanes::pick_group_avx2
+  6.78%     1104  vgpu::simd::avx2_impl::blend_m_k
+  5.29%      861  vgpu::simd::avx2_impl::ffma_k
+  4.72%      768  vgpu::sass::h_ffma
+  2.96%      482  vgpu::sass::Runner::tier_ctl
+  2.84%      462  [libc.so.6] __nss_database_lookup
+  2.82%      459  runBlackScholesAnalyticEngine
+  2.76%      450  errorFunctCpu
+  2.50%      407  vgpu::sass::Runner::fast_float
+  2.49%      405  initBlackCalcVarsCpu
+  2.46%      400  vgpu::simd::avx2_impl::mufu_k
+  2.37%      386  [libm.so.6] f64xsubf128
+  1.99%      324  vgpu::sass::tier_issue
+  1.70%      276  vgpu::MemoryManager::load_batch
+  1.69%      275  vgpu::sass::h_mov
+  1.65%      269  ftz
+  1.62%      263  vgpu::simd::avx2_impl::iadd3_k
+  1.60%      261  getOutValOptionCpu
+  1.48%      241  [libm.so.6] exp2f64
+  1.29%      210  vgpu::simd::avx2_impl::icmp_mask_k
+  1.26%      205  vgpu::exec::sasslanes::set_pcs_avx2
+  1.19%      194  vgpu::sass::h_iadd3
+  0.94%      153  vgpu::sass::h_lea
+  0.91%      148  unsigned int const* vgpu::sass::tier_dyn<true>
+  0.90%      146  vgpu::sass::h_isetp
+  0.86%      140  vgpu::exec::memcount::detail::sectors_fast
+  0.85%      138  vgpu::simd::avx2_impl::fadd_k
+  0.84%      137  vgpu::sass::Runner::fast_float(vgpu::sass::Warp&, vgpu::sass::Instr const&, unsigned int)::{lambda(u
+  0.84%      137  vgpu::simd::avx2_impl::shf_k
+  0.84%      136  vgpu::simd::avx2_impl::lop3_k
+  0.82%      133  vgpu::simd::avx2_impl::fcmp_mask_k
+  0.78%      127  vgpu::simd::avx2_impl::fadd_x_k
+  0.71%      116  vgpu::sass::h_lop3
+  0.65%      105  void vgpu::sass::h_global<false>
+  0.64%      104  vgpu::sass::h_fadd
+  0.63%      103  vgpu::sass::h_shf
+  0.63%      102  vgpu::simd::avx2_impl::sector_window_k
+  0.60%       98  vgpu::simd::avx2_impl::fmul_k
+  0.60%       97  vgpu::sass::h_mufu
+  0.53%       87  vgpu::simd::avx2_impl::warp_rows_k
+  0.50%       82  ?? ??:0
+  0.50%       81  vgpu::sass::h_fsetp
+  0.49%       79  vgpu::sass::h_fmul
+  0.49%       79  vgpu::exec::sasslanes::set_pcs_partial

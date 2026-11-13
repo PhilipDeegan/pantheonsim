@@ -1,7 +1,10 @@
 # PyTorch on a simulated NVIDIA GPU
 
-PyTorch's official CUDA build runs unmodified on the simulated NVIDIA GPUs,
-from the T4 to the B200 and the RTX 5090:
+PyTorch's official CUDA build runs unmodified, under `vgpu run --preload`, on
+the simulated NVIDIA GPUs, from the T4 to the B200 and the RTX 5090. Without
+`--preload`, PyTorch loads NVIDIA's own CUDA runtime, which finds no driver
+(see below). Under `--preload`, importing some packages crashes, ThrustRTC
+for one ([#597](https://github.com/pantheongpu/pantheonsim/issues/597)):
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu130

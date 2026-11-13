@@ -1,0 +1,21 @@
+total samples 2981
+ 13.75%      410  [libcudart.so.13] vgpu::exec::memcount::detail::sectors_hash
+ 12.04%      359  [libcudart.so.13] vgpu::MemoryManager::store_batch_in
+ 11.07%      330  [libcudart.so.13] vgpu::MemoryManager::load_batch
+  7.25%      216  [libc.so.6] __nss_database_lookup
+  6.27%      187  main
+  4.33%      129  [libcudart.so.13] vgpu::exec::memcount::detail::sectors_fast
+  4.13%      123  [libcudart.so.13] vgpu::sass::h_dop
+  3.96%      118  [libcudart.so.13] void vgpu::simd::avx2_impl::dop_avx2_t<0u, false>
+  3.66%      109  [libcudart.so.13] void vgpu::simd::avx2_impl::dop_avx2_t<0u, true>
+  3.19%       95  [libcudart.so.13] vgpu::simd::avx2_impl::sector_up_k
+  2.85%       85  [libcudart.so.13] vgpu::simd::avx2_impl::warp_rows_k
+  2.52%       75  [libcudart.so.13] void vgpu::sass::h_global<false>
+  2.38%       71  [libcudart.so.13] vgpu::simd::avx2_impl::dop_m_k
+  2.38%       71  [libcudart.so.13] vgpu::MemoryManager::load_scalar
+  1.91%       57  [libcudart.so.13] void vgpu::sass::h_shared<false>
+  1.74%       52  [libcudart.so.13] vgpu::sass::Runner::step_warp
+  1.68%       50  [libcudart.so.13] void vgpu::sass::h_shared<true>
+  1.54%       46  [libcudart.so.13] void vgpu::simd::avx2_impl::dop_avx2_t<2u, false>
+  1.48%       44  [libcudart.so.13] vgpu::MemoryManager::batch_addresses_ok
+  1.11%       33  [libcudart.so.13] void vgpu::simd::avx2_impl::dop_avx2_t<1u, false>

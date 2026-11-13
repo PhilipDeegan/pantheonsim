@@ -1,0 +1,41 @@
+total samples 4198
+ 32.99%     1385  vgpu::MemoryManager::load_batch
+ 10.74%      451  void vgpu::sass::h_global<false>
+  9.77%      410  syrk
+  6.48%      272  vgpu::simd::avx2_impl::warp_rows_k
+  5.36%      225  vgpu::MemoryManager::load_broadcast
+  5.12%      215  vgpu::simd::avx2_impl::fmul_k
+  3.38%      142  vgpu::sass::Runner::step_warp
+  3.24%      136  void vgpu::sass::h_global<true>
+  3.10%      130  vgpu::simd::avx2_impl::warp_run_k
+  2.79%      117  vgpu::run_in
+  1.72%       72  vgpu::simd::avx2_impl::ffma_k
+  1.67%       70  vgpu::sass::h_ffma
+  1.52%       64  vgpu::sass::count_run
+  1.48%       62  vgpu::sass::tier_issue
+  1.31%       55  vgpu::MemoryManager::run_allocation
+  1.29%       54  vgpu::sass::h_imad_wide
+  1.17%       49  vgpu::sass::h_fmul
+  1.02%       43  vgpu::MemoryManager::store_run
+  0.91%       38  unsigned int const* vgpu::sass::tier_dyn<true>
+  0.67%       28  vgpu::simd::avx2_impl::iadd3x_k
+  0.67%       28  vgpu::sass::count_global
+  0.64%       27  vgpu::MemoryManager::batch_faults_clear
+  0.55%       23  void vgpu::simd::avx2_impl::imad_wide_avx2<true, false, false>
+  0.48%       20  vgpu::sass::h_iadd3x
+  0.33%       14  vgpu::sass::h_mov
+  0.33%       14  vgpu::sass::h_iadd3
+  0.26%       11  vgpu::simd::avx2_impl::iadd3_k
+  0.26%       11  ?? ??:0
+  0.14%        6  vgpu::sass::h_uiadd3
+  0.10%        4  vgpu::simd::avx2_impl::icmp_mask_k
+  0.10%        4  polybench_flush_cache
+  0.07%        3  vgpu::sass::h_isetp
+  0.07%        3  compareResults
+  0.07%        3  syrkCuda
+  0.07%        3  [libc.so.6] __nss_database_lookup
+  0.05%        2  vgpu::simd::avx2_impl::imad_wide_k
+  0.02%        1  vgpu::sass::Runner::block_round
+  0.02%        1  h_shf
+  0.02%        1  init_arrays
+  0.02%        1  [libc.so.6] __default_morecore

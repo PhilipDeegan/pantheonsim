@@ -10,7 +10,7 @@ working on one). What runs and what does not, for users: [docs/status.md](docs/s
 | Area | State | Where to look |
 | --- | --- | --- |
 | NVIDIA execution | PTX interpreter and a SASS executor (the default; sm_75 to sm_120a); both run unmodified nvcc programs through `libvgpucudart` / `libvgpucuda` | nvidia/docs/sass.md, "Coverage" |
-| AMD execution | GCN/CDNA and RDNA executors (64- and 32-lane); unmodified hipcc programs from ROCm 6.4 to 7.2 on MI250X, MI300X, MI325X, MI350X, RX 6900 XT, RX 6800, RX 6700 XT, RX 7900 XTX, RX 9070 XT | amd/README.md |
+| AMD execution | GCN/CDNA and RDNA executors (64- and 32-lane); unmodified hipcc programs from ROCm 6.4 to 7.2 on all 10 AMD profiles (MI250X, MI300X, MI325X, MI350X, MI455X, RX 6900 XT, RX 6800, RX 6700 XT, RX 7900 XTX, RX 9070 XT), 8 gfx targets ([docs/status.md](docs/status.md)) | amd/README.md |
 | Device profiles | 38 NVIDIA (14 read from hardware) and 10 AMD (3 read from hardware) | [docs/history/TODO-done.md](docs/history/TODO-done.md), "Profile inventory" |
 | NVIDIA libraries | cuBLAS, cuBLASLt, cuDNN, cuFFT, cuRAND, cuSPARSE, cuSOLVER, NCCL, NVRTC, NPP, nvJPEG, cuDSS (0.8 and 1.0), cuSPARSELt, cuTENSOR, cuTensorNet, cuStateVec, cuFile, nvCOMP, NVSHMEM, nvJitLink, nvFatbin, NVENC | nvidia/docs/libraries.md |
 | AMD libraries | rocBLAS, hipBLASLt, hipSPARSELt, MIOpen, rocPRIM/hipCUB, rocRAND, rocFFT, rocSPARSE, rocSOLVER, Composable Kernel, RCCL; ROCm SMI, AMD SMI, rocprofv3/rocprofiler-sdk shims | amd/README.md |

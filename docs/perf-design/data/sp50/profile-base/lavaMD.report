@@ -1,0 +1,46 @@
+total samples 1361
+ 22.63%      308  void vgpu::simd::avx2_impl::dop_avx2_t<2u, false>
+ 11.76%      160  vgpu::sass::h_dop
+  9.48%      129  vgpu::MemoryManager::load_scalar
+  8.16%      111  vgpu::simd::avx2_impl::dop_m_k
+  6.10%       83  void vgpu::sass::h_shared<false>
+  4.70%       64  vgpu::sass::Runner::step_warp
+  4.41%       60  void vgpu::simd::avx2_impl::dop_avx2_t<0u, true>
+  4.26%       58  void vgpu::simd::avx2_impl::dop_avx2_t<1u, false>
+  3.67%       50  vgpu::sass::tier_dyn64
+  3.23%       44  void vgpu::simd::avx2_impl::dop_avx2_t<2u, true>
+  2.79%       38  void vgpu::simd::avx2_impl::dop_avx2_t<0u, false>
+  1.98%       27  bool vgpu::sass::tier_shared_wide<false>
+  1.69%       23  vgpu::simd::avx2_impl::bank_offsets_k
+  1.54%       21  vgpu::sass::h_mov
+  1.54%       21  vgpu::sass::tier_issue
+  1.47%       20  vgpu::sass::Runner::cbank32
+  1.03%       14  vgpu::sass::h_lea
+  0.88%       12  vgpu::exec::sasslanes::pick_group_avx2
+  0.73%       10  vgpu::sass::h_imad
+  0.66%        9  vgpu::sass::Runner::fast_float
+  0.66%        9  vgpu::sass::count_shared_offsets
+  0.51%        7  [libc.so.6] parse_printf_format
+  0.51%        7  vgpu::sass::Runner::fast_float(vgpu::sass::Warp&, vgpu::sass::Instr const&, unsigned int)::{lambda(u
+  0.51%        7  [ld-linux-x86-64.so.2] __tls_get_addr
+  0.51%        7  vgpu::MemoryManager::load_batch
+  0.51%        7  ?? ??:0
+  0.37%        5  vgpu::sass::h_iadd3
+  0.37%        5  vgpu::simd::avx2_impl::imad_k
+  0.29%        4  [libc.so.6] __xpg_basename
+  0.22%        3  vgpu::simd::avx2_impl::fcmp_mask_k
+  0.22%        3  set_pcs_avx2
+  0.22%        3  vgpu::simd::avx2_impl::icmp_mask_k
+  0.22%        3  vgpu::simd::avx2_impl::blend_m_k
+  0.22%        3  vgpu::sass::Runner::read32_slow
+  0.22%        3  vgpu::sass::thread_bank_memo
+  0.15%        2  vgpu::simd::avx2_impl::warp_rows_k
+  0.15%        2  h_shared<true>
+  0.15%        2  vgpu::sass::Runner::fast_alu
+  0.15%        2  vgpu::sass::h_fsetp
+  0.07%        1  vgpu::exec::memcount::detail::sectors_fast
+  0.07%        1  h_imad32
+  0.07%        1  vgpu::exec::sasslanes::set_pcs_partial
+  0.07%        1  unsigned int const* vgpu::sass::tier_dyn<false>
+  0.07%        1  vgpu::MemoryManager::batch_faults_clear
+  0.07%        1  void vgpu::sass::h_global<false>

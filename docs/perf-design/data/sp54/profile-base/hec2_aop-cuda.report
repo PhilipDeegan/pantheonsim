@@ -1,0 +1,21 @@
+total samples 1791
+ 17.48%      313  [libcudart.so.13] vgpu::sass::Runner::exec_mem
+ 16.36%      293  [libcudart.so.13] vgpu::sass::Runner::step_warp
+  6.76%      121  [libcudart.so.13] void vgpu::sass::h_shared<false>
+  6.25%      112  [libcudart.so.13] vgpu::sass::Runner::exec_mem(vgpu::sass::Block&, vgpu::sass::Warp&, vgpu::sass::Instr const&, unsign
+  4.86%       87  [libcudart.so.13] vgpu::exec::sasslanes::pick_group_avx2
+  3.57%       64  [libcudart.so.13] vgpu::simd::avx2_impl::bank_offsets_k
+  3.57%       64  [libcudart.so.13] void vgpu::exec::sassatom::detail::shared_lanes<unsigned long, vgpu::exec::sassatom::CasStep>
+  3.46%       62  [libcudart.so.13] void vgpu::simd::avx2_impl::dop_avx2_t<0u, false>
+  2.79%       50  [libcudart.so.13] void vgpu::sass::h_shared<true>
+  2.51%       45  [libcudart.so.13] vgpu::run_out
+  2.07%       37  main
+  1.90%       34  [libcudart.so.13] void vgpu::simd::avx2_impl::dop_avx2_t<2u, false>
+  1.68%       30  [libcudart.so.13] vgpu::simd::avx2_impl::icmp_mask_k
+  1.62%       29  [libcudart.so.13] vgpu::sass::h_dop
+  1.45%       26  [libcudart.so.13] vgpu::simd::avx2_impl::dop_m_k
+  1.12%       20  [libc.so.6] __nss_database_lookup
+  1.06%       19  [libcudart.so.13] vgpu::sass::tier_issue
+  1.01%       18  [libcudart.so.13] vgpu::sass::h_isetp_ex
+  0.89%       16  [libcudart.so.13] vgpu::simd::avx2_impl::blend_m_k
+  0.84%       15  [libcudart.so.13] vgpu::sass::count_shared_offsets
