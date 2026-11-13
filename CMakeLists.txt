@@ -3463,6 +3463,16 @@ if(TARGET vgpucublas)
     ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
     TIMEOUT 300)
 
+  # Sub-warp groups at different copies of a group-masked ballot, then a full-mask shuffle and __syncthreads (#574):
+  # a cell-list neighbour build, PTX and SASS, checked against the host.
+  add_test(NAME e2e_group_ballot_barrier
+           COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_group_ballot_barrier.sh)
+  set_tests_properties(e2e_group_ballot_barrier PROPERTIES
+    DEPENDS vgpucudart
+    ENVIRONMENT "VGPU_BUILD_DIR=${CMAKE_BINARY_DIR}"
+    SKIP_REGULAR_EXPRESSION "^SKIP:"
+    TIMEOUT 600)
+
   add_test(NAME e2e_host_atomics
            COMMAND ${CMAKE_SOURCE_DIR}/nvidia/tests/e2e/run_host_atomics.sh)
   # Under ThreadSanitizer the SASS run alone takes 200 to 370 s on 4 cores (the PTX run 5 s): 262144 device atomics on

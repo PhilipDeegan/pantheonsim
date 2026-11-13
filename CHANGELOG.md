@@ -7,6 +7,11 @@ release says what runs and what it produces, never how fast a real GPU would run
 
 ## Unreleased
 
+- Tests: `e2e_group_ballot_barrier`, a cell-list neighbour build in the shape of fastMD's `nl_build_kernel` (groups of four lanes
+  at different copies of a group-masked `__ballot_sync`, then a full-mask `__shfl_down_sync` and `__syncthreads`), on a simulated
+  H100 as PTX and as SASS, every count and listed neighbour checked against the host; it passes on an RTX 3060. fastMD's
+  `VerletList.GrowsOnOverflowAndStaysComplete` (and the rest of `test_verlet`) and `Simulation.LayerStressSumRules` pass on main
+  on both paths (pantheonsim #574).
 - cuBLAS: the band and packed matrix-vector routines (`tbmv`, `tpmv`, `gbmv`, `sbmv`/`hbmv`, `spmv`/`hpmv`, every type) read the
   band where it is stored and loop over it, instead of building the full n x n matrix on every call. SCS's diagonal scaling
   (`cublasDtbmv` with k = 0 on a vector of 1500) mapped 34 MiB, took 8,000 page faults and summed 2.25 million products on each
