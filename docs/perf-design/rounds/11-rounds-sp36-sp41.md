@@ -1499,3 +1499,98 @@ Read from `src/sass/jit.cpp` and tried with `scripts/failure_modes.sh` (hotspot,
 * g++-12, clang, a build without the mutation hooks, a sanitizer build, AVX-512: not built. The `e2e_sass_jit` shards: not run (no nvcc on server3).
 * Which regions the shorter profile selects against the full count (the objects' keys before and after were not compared), and `VGPU_JIT_LINK=1` / `VGPU_JIT_FUSE=1` on the changed build (their cold and warm numbers above are the base build's).
 * Rule deviations: medians of 3 runs from one second up (asked: four); c and d only where b compiled; the ctest of all 24 legs held the machine lock for eleven minutes in one piece.
+
+## Round sp63: the JIT's cold run: the wait before the lookup, history, the cache cap, the notices (branch `sp63-jit-cold`)
+
+Question: round sp57 left five things between `VGPU_JIT=1` and a default-on JIT besides the product decision and linking's CI: the hook loop before the cache lookup, 1 to 2 ms of per-process setup, the cold run of 3 to 10 s programs (the compile late, or cancelled at exit so that a program shorter than its compile is never warm), a cache with no cap keyed by the build's date, and the notice on standard error. Remove what the data allows, keeping a fix only if the default path is unchanged, the bits are the same in every run, and no program of 0.2 s or more becomes more than 3 % slower. The default is not flipped in this round.
+
+**Answer: four of the five are gone, one is smaller.** Over the 51 programs measured at one thread, `VGPU_JIT=1` cold goes from 0.981 (base build, this round's run) to 0.990, warm is 1.007, a second run 1.005; programs more than 2 % slower cold go from 23 to 10, and of those of 0.2 s or more the only ones left are the compile-bound ones (asyncAllocation, SYRK, gaussian). "Per-process setup" turned out to be the same thing as the first blocker: it is the hook loop on the way to the lookup, not setup, and goes with it. What stays: the first cold run of a program of 3 to 10 s (asyncAllocation 0.89, SYRK 0.92, gaussian 0.93; their second run is 1.00, 1.15 and 0.93 to warm, their third warm), and 2 to 3 % on a few programs of 0.2 to 0.4 s with sections that do reach the lookup (s3d 0.973, sortKV 0.977).
+
+Host: server3 (Ryzen 7 PRO 8840U, 8 cores / 16 threads, g++ 13.3), shared with two other sessions under `flock /tmp/pantheonsim-builder.lock` (3,140 s of the first pass were spent waiting for it). Builds Release, `-g1`, `VGPU_LTO=OFF`, `VGPU_JIT_MUTANTS=ON`, `nice -n 19`, `-j3`. Base: `origin/main` 4e2c1c18 (the merge of #590). Programs: round sp57's corpus (`tools/bench/real` sizes, `VGPU_GPU=nvidia/rtx3060`), without the eight programs over 120 s, fpdc, CORR, COVAR and FDTD-2D, and with LU, atomicCost and black-scholes left out for their length (over 15 s): 51 programs. Data and scripts: `docs/perf-design/data/sp63/`.
+
+### Protocol
+
+`scripts/sp63.py` (round sp57's driver with two builds). Sides, interleaved (a round in order, the next reversed), every run writing `VGPU_COUNTERS_FILE` and `VGPU_MEMO_FINAL_HASH`: **Ba**, **Na** the base and the changed build with nothing set; **Bbc**, **Nbc** `VGPU_JIT=1` cold (the side's cache emptied before every run); **Nbw** warm (filled by one untimed run with `VGPU_JIT_SYNC=1`); **Nbs** the second run (before every timed run the cache is emptied and the program run once, untimed, with the defaults: what a user's second run sees). Medians of 5, of 3 for programs over one second. One thread: `VGPU_THREADS=1`, `taskset -c 12-15` (four CPUs: the compiler has cores of its own, as on a user's machine). Each build's speed-ups are against its own default; "default B/N" is the base build's default over the changed one's (the default path, an A/A check: no file of the run loop changed). The first pass ran on an intermediate build that also started the compiler with `vfork` (below: not kept); the programs whose numbers that could touch (the ones that start a compiler) were run again on the final build, five runs each (`t1-recheck`).
+
+### 1. The hook loop before the lookup (blockers 1 and 2)
+
+Measured first (`setup-probe.txt`, 15 runs a side, one thread, a cache that already holds the compiler's identity): on the base build `VGPU_JIT=1` costs ADI 9.7 ms, asmooth 9.5, sortKV 15.3, s3d 18.5, atan2 1.6, adam 1.9; with `VGPU_JIT_MIN_REGION=4096` (the same process with no section given a unit: the manager, the region discovery, everything but the hook loop) it costs 0.0 to 0.4 ms (s3d 1.5). So the "setup" of round sp57's short programs is not setup: it is what a kept section pays in the hook loop between the share rule's sample and the lookup, which a short program spends its whole life in. A `strace` of ADI shows no fork, no file access but the telemetry file's on the default side, and only the cache directory's `cid` file and the worker thread with `VGPU_JIT=1`.
+
+Built (`Unit::sample`, `Unit::wait_then`, `Unit::wait_over`, `kPrewaitMin`): when the share rule keeps a section that is at least 4,096 instructions from its lookup, the section waits for the lookup on the plain loop, as round sp57's sections wait for their threshold (`State::Waiting`, all of its instructions counted by `wait_note`, a thread bringing a 64th of the wait to the shared count at a time), and when the wait is over it is Idle again (`wait_then`), so that the next check of its total asks the cache. The wait counts towards the lookup and the threshold (`credit` is added to, and the miss's distance to the threshold includes it). The lookup comes up to 2.5 times earlier, since all instructions count; a section whose lookup misses then waits for its threshold as before. `VGPU_JIT_PROFILE=0` turns both waits off.
+
+The same probe on the changed build: ADI 1.2 ms, asmooth 1.3, sortKV 4.9, s3d 8.0, atan2 0.2, adam 0.2, backprop 0.6, blockAccess 0.3. In the A/B (`t1.md`): ADI 0.933 to 1.004 cold, asmooth 0.952 to 1.000, sortKV 0.926 to 0.977, atan2 0.930 to 1.005, adam 0.931 to 0.988, backprop-cuda 0.907 to 0.973, blockAccess 0.935 to 0.986, pathfinder 0.962 to 0.983, JACOBI2D 0.971 to 0.993; the 45 programs that compile nothing 0.983 to 0.992 cold. What is left on s3d and sortKV is the sample itself (50,000 instructions in the hook loop, and one call of the hook loop runs up to 14,000 of a chained kernel's instructions, so a sample overshoots) and the lookup; not looked at further.
+
+### 2. The cold run of 3 to 10 s programs (blocker 3)
+
+Built: the selection of a section is recorded (its `.sel` file) before its compile, not after (`Engine::obtain_selected`); a compile that is cancelled because the process ends gives no notice (`Result::cancelled`); and a lookup that finds a selection without its object (`Result::pending`) compiles that selection at once (`Manager::run`, `stats().history`) instead of counting to the threshold. `VGPU_JIT_HISTORY=0` turns the last off. A failed compile also leaves its selection, so its next run tries again at the lookup instead of at the threshold, as it would have later.
+
+| program (one thread, 5 runs, final build) | default s | base cold | cold | warm | second run | objects after the cold runs / the second runs |
+|---|---:|---:|---:|---:|---:|---|
+| asyncAllocation | 3.263 | 0.934 | 0.911 | 1.240 | 0.996 | 0 of 5 / 5 of 5 |
+| SYRK | 5.402 | 0.924 | 0.924 | 1.127 | 1.149 | 5 / 5 |
+| gaussian | 3.693 | 0.946 | 0.934 | 1.081 | 0.934 | 2 / 5 |
+| JACOBI1D (first pass: 0.903 cold, 0.870 warm, 3 runs) | 1.059 | 0.978 | 0.989 | 0.991 | 0.988 | 0 |
+
+* **asyncAllocation is warm from its third run** (before: never). Its first run still loses 9 to 11 % (the 2.1 to 2.4 s compile starts at the threshold and is cancelled at exit: no object after any cold run, on either build); the second compiles at its lookup and finishes before the end (0.996 of the default, and an object after every one), the third is warm (1.24 to 1.33).
+* SYRK's and the other compiling programs' first runs are unchanged (SYRK 0.924 on both builds: the compile of 2.3 s is asked for at the threshold): the history only helps a compile that did not finish. Finishing a nearly done compile at exit was not built: the time a compile has left is not known (a cancelled one has no time on record), and keeping a user's process alive for it, or leaving a compiler behind it, is what a default must not do.
+* gaussian's compile ends near the program's end: two of five cold runs left their object; where the first run did not, the second compiled at its lookup and was not warm before its end either (0.934), the third is warm.
+* JACOBI1D's 0.870 warm and 0.903 cold in the first pass (three runs, a machine whose other sessions were building) are 0.991 and 0.989 in five runs on the final build: noise, not the change.
+
+### 3. The cache: its directory, a cap, old builds' directories (blocker 4)
+
+Built (`cache_tag`, `Engine::trim`): the default directory is `.../pantheonsim/jit/<12 hex digits>` of a hash of the GNU build id of the library the JIT is in (read from the loaded image, no I/O; the build's date and time without one, as before), so a rebuild that is the same file shares its directory. libcuda and libcudart both contain the JIT, so a driver-API and a runtime program have a directory each. After each install the cache is trimmed: in the default directory's parent, every directory of 12 hex digits owned by the user is in scope (nothing else is touched; an explicit `VGPU_JIT_CACHE` is trimmed by itself, its siblings are not the cache's); another build's directory none of whose files changed in 14 days is removed; over `VGPU_JIT_CACHE_MAX_MB` (default 256; `0`: no cap) objects are removed least recently used first (a load renews an object's time) down to 90 % of the cap, never the object just made nor the runtime headers of the directory in use; another build's directory left without an object and an hour old is removed. The 33 directories server3 held at the end of round sp57 would go at the first compile after 14 days. Sizes for scale (round sp57): 236 KiB for hotspot's object with the headers, 2.0 MB for the whole corpus's objects.
+
+### 4. The notices (blocker 5)
+
+Built (`Manager::notice`, `auto_mode`): a notice of a kind is given once a process (as before) and at most once a day from one cache directory (a `notice-<kind>` stamp there; where the directory cannot be used, every process gives it). `VGPU_JIT=auto` runs the JIT as `1` does without the notices that only say it cannot run here (no compiler, a cache that cannot be used); a later round that turns the JIT on by default can make the default `auto`. A compile cancelled at exit says nothing (it was the "compile was cancelled" line of round sp57's failure modes).
+
+### 5. Tried and not kept: `vfork` for the compiler
+
+The compiler and its two identity queries were started with `fork`; the comment of round sp53 put the cost at about 7 ms of kernel time in a simulator with a large address space. Built with `vfork` (every signal blocked across it, the child resetting caught signals) and measured (`spawn-fork-vfork.txt`, `strace -T` of a cold hotspot run, three runs a build): `fork` returned in 0.20 to 0.30 ms, `vfork` (which returns only when the child has exec'd) in 1.3 to 1.7 ms, on the JIT's worker thread in both. No gain to show at this program's size, so it was reverted; it may matter for a program with gigabytes mapped, which was not measured.
+
+### Same bits and the default path
+
+Every run of every side (fills and the untimed first runs of the second-run side too) against the default's first run: 49 of 51 programs equal in every run; particlefilter_float differs from itself on the default (as in every round), pathfinder's fill run differs in its output's hash only (the statistics line in the middle of the program's output through one pipe, round sp57's driver artefact). The recheck: 5 of 5 programs equal. The default path (no file of the run loop or the tier changed: `jit.cpp`, `jit.hpp` and tests only): base over changed default, geometric mean 1.000 over 51 programs (3MM 0.924 and GEMVER 0.955 are single slow runs of the changed build's default under the other sessions' builds; bfs 9 ms).
+
+### The table (one thread, 51 programs, `t1.md`; base and changed build in the same pass)
+
+| programs | n | default B/N | base JIT cold | JIT cold | JIT warm | JIT second run |
+|---|---:|---:|---:|---:|---:|---:|
+| PolyBench/GPU | 14 | 0.992 | 0.981 | 1.000 | 1.014 | 1.023 |
+| Rodinia | 12 | 1.008 | 0.992 | 0.990 | 1.000 | 0.999 |
+| HeCBench | 25 | 1.000 | 0.977 | 0.984 | 1.007 | 0.998 |
+| all | 51 | 1.000 | 0.981 | 0.990 | 1.007 | 1.005 |
+| with objects (SYRK, SYR2K, gaussian, asyncAllocation, atomicAggregate, zerocopy) | 6 | 1.009 | 0.969 | 0.974 | 1.131 | 1.089 |
+| without | 45 | 0.998 | 0.983 | 0.992 | 0.992 | 0.994 |
+| 0.2 s and longer | 39 | 1.001 | 0.985 | 0.992 | 1.015 | 1.011 |
+| more than 2 % slower | | 5 | 23 | 10 | 9 | 9 |
+
+The 10 cold: asyncAllocation, bgmv (12 ms, one ms), JACOBI1D (noise, above), SYRK, gaussian, s3d, backprop-cuda (11 ms), sortKV, nn (14 ms), bfs (9 ms). Round sp57's numbers (0.954 cold, 0.985 warm over 57, then 0.985 and 1.010 over 54 after its fix) are on another build and partly other programs; this round's base column is the comparison.
+
+DEFAULT_THREADS_PLACEHOLDER
+
+### Tests and mutants
+
+`tests/unit/test_jit_cold.cpp` (ctest `test_jit_cold`): the wait before the lookup driven as the run loop drives it (kept, waiting, the batch, a stray hook-loop count, the wait's end to the instruction, Idle again, the lookup at the next check with the waited instructions, the miss's wait for the threshold with both counted), the cases without it (near the lookup, declined), a selection whose compile was cut off (a time limit of nothing) found as pending and compiled at the next lookup, the default directory's name against the test executable's own build id, the cap and the age rule on a made-up cache (three other builds' directories and one that is not the cache's), a hit renewing an object's time, and in child processes of the test itself the notices (once a day, again after two days, none with `auto`) and a compile cancelled at exit (a fake compiler that sleeps: no notice, its selection left, no object). ctest `test_sass_chain_cont_jit_prewait`: the run-loop test's kernels with the share rule on, compared with the interpreter word for word and counter for counter, and the counts that say three sections waited for the lookup, then for the threshold, and were compiled. `test_jit_share` now expects the wait after a kept sample. Mutants (`mutants.log`): `prewait_never`, `prewait_stuck`, `prewait_to_counting`, `wait_no_credit`, `history_never`, `history_after`, `trim_no_age`, `trim_no_cap`, `trim_no_touch`, `cachedir_date`, `notice_every_run`, `auto_loud`, `cancel_notice` each fail `test_jit_cold`; `wait_stuck` fails round sp57's `test_jit_wait`; the pristine build passes both. The 25 ctest legs of the JIT's unit tests and the run-loop tests passed (`tests.log`; two failed in the first run, both test expectations: fixed and run again). The `e2e_sass_jit` shards need nvcc and are CI-only: not run.
+
+### What is left before the JIT could be default-on
+
+| blocker | state |
+|---|---|
+| The hook loop before the lookup, and the "per-process setup" of short programs | **fixed** (the same cost): 0 to 1 % on programs under 0.3 s, 2 to 3 % left on s3d and sortKV (the sample and the lookup) |
+| The first cold run of a 3 to 10 s program (the compile at the threshold arrives late or is cancelled) | **smaller**: a cancelled compile starts at the next run's lookup (asyncAllocation warm from its third run, 0.996 in its second); the very first run is unchanged (asyncAllocation 0.91, SYRK 0.92, gaussian 0.93) |
+| No cache cap, the directory keyed by the build's date | **fixed**: build id, 256 MB cap, LRU, 14-day rule for other builds |
+| The notice when there is no compiler or the cache cannot be used | **fixed** for a default: `VGPU_JIT=auto` is silent, `1` says it once a day |
+| A default forks a C++ compiler out of every long user process (SIGCHLD, programs that manage their own children) | open: the product decision of round sp57; not looked at |
+| Linking and fused runs have not run the `e2e_sass_jit` shards | open (CI) |
+| A JIT on by default makes every SASS ctest leg a JIT leg | open: the legs would need `VGPU_JIT=0` or a private cache |
+| The default thread count | see the table above |
+
+### What was not verified
+
+* LU, atomicCost, black-scholes, CORR, COVAR, FDTD-2D and the eight programs over 120 s: not run (time). The second-run side does not show what a run after a compile that failed for another reason does.
+* g++-12, clang, a sanitizer build, a build without the mutation hooks: not built. The `e2e_sass_jit` shards: not run (no nvcc on server3).
+* The trim on a real cache full of objects (it ran on the test's made-up files and after every install of these runs, which never came near the cap), a `noexec` mount, a full disk; two builds trimming one another's directories at once.
+* `VGPU_JIT_LINK=1` and `VGPU_JIT_FUSE=1` on the changed build.
+* The first pass's changed build also had `vfork`; its numbers for programs that start a compiler were re-measured on the final build (the recheck table), the others start none.
+* Rule deviations: the first ctest run held the machine lock for eleven minutes in one piece; the default-thread pass is three runs a side on 18 programs.
